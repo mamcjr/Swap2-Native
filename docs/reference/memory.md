@@ -551,6 +551,15 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Validation:** the real Android file/mmap/mremap test covers contents, writer synchronization, protected pages, range splitting and release. See [0.1.5 build report](../BUILD-0.1.5-beta-BANANANATIVE-2026-11-10.md).
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+- **Follow-up (2026-11-15):** a pool moving to its file held every copied page twice (the anonymous range and the file's page cache) for the length of the copy: upstream Banana Native saw a 2.9 GB shader-code pool take Kirby from 5.7 to 7.4 GB and the low-memory killer stop it. `vka_fileback.h` `vkfb_drop` (Banana Native `b29c30af`, MIT, the same file as ours): every 64 MiB copied are written to flash (`sync_file_range`), unmapped from the file mapping (`MADV_DONTNEED`) and dropped from the page cache (`POSIX_FADV_DONTNEED`), so the peak is the pool plus 64 MiB. Not yet measured on Ocarina of Time (its shader pool's move is in the log, `file-backed pools: ... moved`).
+
+### Android write faults release the protected run around the page
+
+- **Symptom:** (Android, placed memory) a game that overwrites much protected texture storage at once (an area load) can pass `vm.max_map_count`; from then on every `mmap`, `mprotect` and thread creation fails with `ENOMEM` and the game crashes or the host stops. Upstream Banana Native measured 60,864 write faults in about 10 s in Kirby and the Forgotten Land.
+- **Cause:** placed GPU memory is mapped by the kernel driver, and its maps never merge again once split; `nvn_dirty.c` `on_fault` made one page writable at a time, each in the middle of a read-only stretch: two more maps a fault.
+- **Fix:** `fault_run`: a write fault releases the run of protected pages around the page, up to `DM_DIRTY_FAULT_RUN_KB` (default 1024) each way, in one `mprotect` (a whole run is one protection call's stretch, one texture's pages, so it splits nothing); the textures over the run upload again at their next use. `0` = the page alone, as before. From Banana Native `6624426f` (MIT; its crash-report helpers were not taken).
+- **Found on:** Kirby and the Forgotten Land upstream; here for [Ocarina of Time](../../dm/games/0400486024DEC000/README.md)'s map-count deaths (Turnip, the Redmagic 11 Air), not yet measured.
+
 ### MIUI Game Turbo sidebar disappears under Zelda memory pressure
 
 - **Symptom:** the Game Turbo side handle disappears while Zelda remains in the foreground.

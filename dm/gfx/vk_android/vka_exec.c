@@ -250,7 +250,10 @@ static _Atomic uint64_t g_oq_ready, g_oq_freed;   // queries below ready are res
 static uint64_t g_oq_acc; static pthread_mutex_t g_oq_mu = PTHREAD_MUTEX_INITIALIZER;   // the running count (the completion thread; vka_fence_cpu may run a submission's effects on another)
 static uint64_t g_oqs_reset, g_oqs_rep, g_oqs_nores, g_oqs_q, g_oqs_full, g_oqs_skip, g_oqs_fly;
 static uint64_t g_oqp_cur, g_oqs_passes, g_oqs_pmax, g_oqs_din;   // the queries' pattern (oq_stats): queries in the open pass, passes that held any, the most in one, draws counted inside a query
-// Occlusion reuse (DM_VK_OQ_REUSE=<n>, read once at the first samples-passed reset; default 3, 1 = every report counted, as before 2026-11-15). Ocarina of Time resets and reports around every object it draws: 2,322
+// Occlusion reuse (DM_VK_OQ_REUSE=<n>, read once at the first samples-passed reset; default 1 = every report counted). Off by default since 2026-11-15 19:00: with 3,
+// Ocarina of Time drew light effects over Link (bright white streaks on his back by Mido, 2 of 4 screenshots; none with 1, with the new or the old library): a light
+// whose visibility the game measures with a query is drawn over everything while it reads visible, and a repeated "visible" keeps it drawn for up to n - 1 frames
+// after Link stepped in front of it. The check's "visible while hidden" answers (about 11 a frame) are not harmless for such effects. Ocarina of Time resets and reports around every object it draws: 2,322
 // reports a frame by Kokiri Forest's scarecrow, all 186 passes holding queries, up to 597 in one, 2,952 draws inside them (2026-11-15). On the Adreno 830 those queries
 // cost about 10 ms of a 52 ms frame (every report written 1 instead: 41.7 ms; not precise: no change): a tiler sums a query bin by bin, and Qualcomm advises few of them
 // in a binned pass. With n, a report whose object was counted lately is counted again only every n frames; in between its draws begin no query and the report writes
@@ -362,7 +365,7 @@ static void oq_reset(void) {   // OP_RESET_COUNTER(SAMPLES_PASSED)
     oq_close();
     if (g_oq_head > g_oq_seg0) post((pop){5, 0, 0, 0, 0, g_oq_seg0, g_oq_head});   // the queries since the last report: no report reads them
     g_oq_seg0 = g_oq_head; g_oq_count = 1; g_oq_fresh = 1; g_oq_lost = 0; g_oq_sk_set = 0; g_oq_sk1 = g_oq_sk2 = 0; g_oq_sent = 0; g_oq_skip = 0;
-    if (g_oq_reuse < 0) { g_oq_reuse = VKA_ENV("DM_VK_OQ_REUSE", 3); if (g_oq_reuse < 1) g_oq_reuse = 1; if (g_oq_reuse > 1) { g_oq_rcheck = VKA_ENV("DM_VK_OQ_REUSE_CHECK", 0); g_oq_rzero = VKA_ENV("DM_VK_OQ_REUSE_ZERO", 0); VLOG("occlusion queries: an object seen before counted every %d frames, its last count repeated in between (DM_VK_OQ_REUSE)%s", g_oq_reuse, g_oq_rcheck ? "; the repeated counts checked against real ones (DM_VK_OQ_REUSE_CHECK)" : ""); } }
+    if (g_oq_reuse < 0) { g_oq_reuse = VKA_ENV("DM_VK_OQ_REUSE", 1); if (g_oq_reuse < 1) g_oq_reuse = 1; if (g_oq_reuse > 1) { g_oq_rcheck = VKA_ENV("DM_VK_OQ_REUSE_CHECK", 0); g_oq_rzero = VKA_ENV("DM_VK_OQ_REUSE_ZERO", 0); VLOG("occlusion queries: an object seen before counted every %d frames, its last count repeated in between (DM_VK_OQ_REUSE)%s", g_oq_reuse, g_oq_rcheck ? "; the repeated counts checked against real ones (DM_VK_OQ_REUSE_CHECK)" : ""); } }
     uint64_t f = g_job_frame_set ? g_job_frame : g_frame; if (f != g_oq_kframe) { g_oq_kframe = f; g_oq_kres = 0; }   // (the frame being replayed: g_frame is the game's, ahead of it with the worker)
     g_oq_kres++;
 }

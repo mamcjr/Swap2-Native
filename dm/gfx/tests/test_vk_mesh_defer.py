@@ -142,6 +142,23 @@ class DeferPlaneStores(unittest.TestCase):
         # the compute fallback lowered from it is valid too
         cs, vs, _ = mesh.lower(m.data())
         self.valid(cs); self.valid(vs)
+        # and has direct outputs (vk_android_mesh.direct_outputs): the calls back on the store, no plane copy, the store one table lookup and one store, no chain
+        c = spv.Module(cs)
+        names = {s: i for i, s in c.names.items()}
+        self.assertNotIn('mesh_plane_defer', names); self.assertNotIn('mesh_plane_flush', names); self.assertNotIn('mesh_plane_clear', names)
+        called = [x[3] for x in c.ins if x[0] & 0xffff == spv.OP_FUNCTION_CALL]
+        self.assertEqual(called.count(names['mesh_plane_store']), n)
+        self.assertEqual([v for v, (_, sc) in c.vars.items() if sc == spv.SC_WORKGROUP], [])   # (this fixture has no GL depth copy)
+        sa, se = c.function_range(names['mesh_plane_store'])
+        body = c.ins[sa:se]
+        self.assertEqual(sum(1 for x in body if x[0] & 0xffff == 170), 0)   # no OpIEqual chain left
+        self.assertEqual(sum(1 for x in body if x[0] & 0xffff == 62), 1)   # one OpStore
+        # the module without the deferral gets the same direct store
+        cs2, _, _ = mesh.lower(self.build(n))
+        self.valid(cs2)
+        c2 = spv.Module(cs2); s2 = {s: i for i, s in c2.names.items()}['mesh_plane_store']
+        a2, e2 = c2.function_range(s2)
+        self.assertEqual(sum(1 for x in c2.ins[a2:e2] if x[0] & 0xffff == 170), 0)
 
     def test_over_the_workgroup_budget_untouched(self):
         data = self.build(spv.MESH_DEFER_MIN_CALLS + 2)

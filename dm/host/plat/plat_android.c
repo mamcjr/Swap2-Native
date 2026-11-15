@@ -151,7 +151,9 @@ int64_t plat_footprint_bytes(void) {
 struct plat_zone { char unused; };
 static struct plat_zone g_zone;
 plat_zone_t *plat_zone_create(const char *name) { (void)name; return &g_zone; }   // Scudo's heap: the accounting goes by malloc_usable_size
-void *plat_zone_malloc(plat_zone_t *z, size_t n) { (void)z; return malloc(n); }
+// 16-byte aligned, as malloc_zone_malloc on Apple and Horizon's malloc give: bionic's allocator may hand out 8-byte aligned small blocks (jemalloc's size classes),
+// and code that checks (Unreal's PhysX: "Allocations must be 16-byte aligned") aborts. After DroidPlay e52f2026 (MIT)
+void *plat_zone_malloc(plat_zone_t *z, size_t n) { (void)z; void *p = NULL; return posix_memalign(&p, 16, n ? n : 1) ? NULL : p; }
 void *plat_zone_memalign(plat_zone_t *z, size_t align, size_t n) { (void)z; void *p = NULL; return posix_memalign(&p, align < sizeof(void *) ? sizeof(void *) : align, n) ? NULL : p; }
 void *plat_zone_realloc(plat_zone_t *z, void *p, size_t n) { (void)z; return realloc(p, n); }
 void plat_zone_free(plat_zone_t *z, void *p) { (void)z; free(p); }

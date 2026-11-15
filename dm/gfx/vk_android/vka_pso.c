@@ -807,6 +807,33 @@ static void heavy_load(void) {
     fclose(f);
     VLOG("long compiles: %d shaders of earlier runs on this driver (%s): the background compiles' gate runs each alone (DM_VK_PREWARM_HEAVY_MS)", atomic_load(&g_heavy_n), g_heavy_path);
 }
+// DM_VK_PIPE_STATS (vka_dev.c V.pexec): the driver's statistics of a pipeline it made, one line per executable (VK_KHR_pipeline_executable_properties). For finding what
+// limits a program on the GPU: its registers (and so how many waves fit), its instruction count, its spills
+static void pipe_stats(VkPipeline p, const char *what, uint64_t key, uint32_t lx, uint64_t shared) {
+    static PFN_vkGetPipelineExecutablePropertiesKHR props; static PFN_vkGetPipelineExecutableStatisticsKHR stats;
+    if (!props) { props = (PFN_vkGetPipelineExecutablePropertiesKHR)vk.vkGetDeviceProcAddr(V.dev, "vkGetPipelineExecutablePropertiesKHR");
+                  stats = (PFN_vkGetPipelineExecutableStatisticsKHR)vk.vkGetDeviceProcAddr(V.dev, "vkGetPipelineExecutableStatisticsKHR"); }
+    if (!props || !stats || !p) return;
+    VkPipelineInfoKHR pi = {VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, .pipeline = p};
+    VkPipelineExecutablePropertiesKHR ep[4]; uint32_t ne = 4;
+    for (uint32_t i = 0; i < 4; i++) ep[i] = (VkPipelineExecutablePropertiesKHR){VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR};
+    if (props(V.dev, &pi, &ne, ep) < 0) return;
+    for (uint32_t e = 0; e < ne; e++) {
+        VkPipelineExecutableInfoKHR ei = {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR, .pipeline = p, .executableIndex = e};
+        VkPipelineExecutableStatisticKHR st[48]; uint32_t ns = 48;
+        for (uint32_t i = 0; i < 48; i++) st[i] = (VkPipelineExecutableStatisticKHR){VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR};
+        if (stats(V.dev, &ei, &ns, st) < 0) continue;
+        char b[1600]; size_t o = 0; b[0] = 0;
+        for (uint32_t i = 0; i < ns && o < sizeof b - 64; i++) {
+            const VkPipelineExecutableStatisticKHR *t = &st[i];
+            if (t->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR) o += (size_t)snprintf(b + o, sizeof b - o, "; %s %u", t->name, t->value.b32);
+            else if (t->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR) o += (size_t)snprintf(b + o, sizeof b - o, "; %s %lld", t->name, (long long)t->value.i64);
+            else if (t->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR) o += (size_t)snprintf(b + o, sizeof b - o, "; %s %llu", t->name, (unsigned long long)t->value.u64);
+            else if (t->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR) o += (size_t)snprintf(b + o, sizeof b - o, "; %s %.3g", t->name, t->value.f64);
+        }
+        VLOG("pipeline stats: %s %016llx (local size %u, shared %llu bytes) executable %u %s, subgroup %u%s", what, (unsigned long long)key, lx, (unsigned long long)shared, e, ep[e].name, ep[e].subgroupSize, b);
+    }
+}
 static void build_end(int i) {
     atomic_store(&g_last_compile_ns, now_ns());
     if (i < 0) return;
@@ -1823,6 +1850,7 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, const vka_img
     // replayed as compute pipelines on native mesh"
     int notcs = V.mesh && cs->e->stage >= DMSH_VK_STAGE_TS;
     if (!notcs) ci.stage.module = img ? vka_shader_img_module(cs, &k.rt) : vka_shader_cs_module(cs);
+    if (V.pexec) ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     VkPipeline p = VK_NULL_HANDLE; VkResult r; int over = 0;
     // Shared memory past the device's limit is invalid usage (the driver may refuse, crash or run it with less). The translator keeps a program's shared memory past
     // DMSH_VK_SHARED_MAX in a storage buffer (DMSH_VK_KIND_SHARED_SPILL), and e->shared is then what stays in workgroup memory; a program still over this device's
@@ -1847,12 +1875,15 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, const vka_img
     { uint64_t dns = now_ns() - t0; g_create_ms += dns / 1e6; if (!prewarm) g_create_ns += dns; }
     g->p = p; g->busy = 0; pthread_cond_broadcast(&g_busy_cv);
     pthread_mutex_unlock(&g_mu);
+    if (V.pexec && !r && p) pipe_stats(p, cs->e->stage >= DMSH_VK_STAGE_TS ? (cs->e->stage == DMSH_VK_STAGE_TS ? "task (compute)" : "mesh (compute)") : "compute", cs->key, cs->e->local[0], shared);
     if (r && !over) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("compute pipeline %016llx: %d; its dispatches are skipped", (unsigned long long)cs->key, r); }
     { double ms_ = (now_ns() - t0) / 1e6; static _Atomic int n; if (!r && ms_ > 50 && atomic_fetch_add(&n, 1) < 200) VLOG("compute pipeline %016llx took %.0f ms%s", (unsigned long long)cs->key, ms_, prewarm ? " (prewarm)" : "");
-      if (!prewarm && !r && ms_ > 1000) vka_pso_save(2); }
     // (one not made stays out of the prewarm list. A task / mesh program's fallback compute is recorded: it is what warms those stages on a driver that emulates mesh, Qualcomm's
     // among them; the replay skips such a record on a driver with native mesh)
     if (!prewarm && !over && !img && !notcs) { vka_shader *s5[5] = {cs, NULL, NULL, NULL, NULL}; pw_note(VKA_PW_CS, s5, "", 0); }
+      // the forced save after a slow one, once its key is in the list: before, the save went out without it, and a game killed before the next save made it again at its
+      // next start on the frame path (as Banana Native 67a2da0a found and fixed; the graphics path already noted first)
+      if (!prewarm && !r && ms_ > 1000) vka_pso_save(2); }
     *made = 1;
     return p;
 }

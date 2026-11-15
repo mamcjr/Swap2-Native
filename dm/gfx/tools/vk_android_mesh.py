@@ -382,7 +382,9 @@ def lower(data):
     vertex = None if task else _vertex(m, out_var, group_type, out_types, output_decos, member_decos, meta)
     _localize_generated(m, [*oldwg, payload_base], setup)
     promote_function_locals(m)
-    return m.data(), vertex, meta
+    cs = m.data()
+    if not task: cs = direct_outputs(cs)   # (the outputs straight into the output buffer: direct_outputs below)
+    return cs, vertex, meta
 
 
 def _vertex(compute, out_var, group_type, outputs, decos, member_decos, meta):
@@ -481,3 +483,181 @@ def _vertex(compute, out_var, group_type, outputs, decos, member_decos, meta):
         if x[0] & 65535 == 15: m.ins[i] = ins(15, 0, fid, *spv.lit_string('main'), *io)
     m.index(); spv.gl_depth(m, 0)
     return m.data()
+
+
+# ---------- Direct mesh outputs (direct_outputs) ----------
+# The driver's statistics (DM_VK_PIPE_STATS, VK_KHR_pipeline_executable_properties) put Ocarina of Time's heavy mesh computes at 4-6 % ALU occupancy on the Adreno 830
+# (Qualcomm 891.14), with 8-13 KB of workgroup memory per 32-thread group: almost all of it the Workgroup copy of the planes that vk_android_spv.defer_mesh_plane_stores
+# adds (2026-11-12, so Turnip would not die compiling the store chain inlined at every call). On the compute form only (the native MeshEXT module keeps the deferral):
+#   _undefer: the calls of mesh_plane_defer go back to mesh_plane_store, and the copy, its written mask and the clear / flush loops are removed;
+#   _direct_stores: mesh_plane_store's chains of `if (plane == p) out.member[index]... = value` (one per plane, inlined at every call) become one lookup in two Private
+#     tables (byte offset and stride of each plane, from the output block's Offset / ArrayStride decorations; ~0 = a plane with no output, not stored) and one store
+#     into a uint[] view of the same output binding (after DroidPlay 2e802839, MIT: each mesh output stored straight into the output buffer). The GL depth copy of
+#     planes 2 / 3 (mesh_position_zw) is kept. The pulling vertex stage reads the same layout as before.
+# Ocarina of Time by Kokiri Forest's scarecrow on the POCO F7 Ultra (2026-11-15, as replay overrides): 18.7 / 18.5 fps → 22.7 / 22.5, GPU 47.7 / 48.0 → 39.1 / 38.9 ms;
+# by Mido 30.0 (capped) → 41.6 fps, GPU 25.2 → 20.7 ms; the same picture; compile time no worse (docs/RESULTADOS-ETAPA1-2026-11-15.md, tenth step).
+OP_NAME, OP_FUNCTION_CALL, OP_VARIABLE, OP_DECORATE, OP_ENTRY_POINT = 5, 57, 59, 71, 15
+
+
+def _undefer(data):
+    m = spv.Module(data)
+    fid = {n: i for i, n in m.names.items() if n in ('mesh_plane_store', 'mesh_plane_defer', 'mesh_plane_flush', 'mesh_plane_clear')}
+    if len(fid) != 4: return None, 'no deferral'
+    store, defer, flush, clear = fid['mesh_plane_store'], fid['mesh_plane_defer'], fid['mesh_plane_flush'], fid['mesh_plane_clear']
+    # the copy and the mask: the Workgroup variables the deferred store writes
+    a, e = m.function_range(defer)
+    used = {x[3] for x in m.ins[a:e + 1] if x[0] & 0xffff == 65}   # OpAccessChain bases
+    copyvars = {v for v in used if m.vars.get(v, (0, 0))[1] == spv.SC_WORKGROUP}
+    if len(copyvars) != 2: return None, f'copy variables {copyvars}'
+    n = 0
+    for x in m.ins:
+        if x[0] & 0xffff == OP_FUNCTION_CALL and x[3] == defer: x[3] = store; n += 1
+    # drop main's calls of clear / flush, then the three functions, the variables, their names and decorations, and the entry point's interface entries
+    m.ins = [x for x in m.ins if not (x[0] & 0xffff == OP_FUNCTION_CALL and x[3] in (flush, clear))]
+    m.index()
+    for f in (defer, flush, clear):
+        a, e = m.function_range(f); del m.ins[a:e + 1]; m.index()
+    drop = copyvars | {defer, flush, clear}
+    out = []
+    for x in m.ins:
+        o = x[0] & 0xffff
+        if o == OP_VARIABLE and x[2] in copyvars: continue
+        if o in (OP_NAME, OP_DECORATE) and x[1] in drop: continue
+        if o == OP_ENTRY_POINT:
+            name_end = 3
+            while True:   # the name: a literal string, up to and with the word holding its 0 byte
+                w = x[name_end]; name_end += 1
+                if any(((w >> s) & 0xff) == 0 for s in (0, 8, 16, 24)): break
+            x = x[:name_end] + [i for i in x[name_end:] if i not in copyvars]; x[0] = len(x) << 16 | OP_ENTRY_POINT
+        out.append(x)
+    m.ins = out; m.index()
+    return m.data(), n
+
+
+
+OP = dict(IEQ=170, SMERGE=247, BRC=250, LABEL=248, BR=249, AC=65, STORE=62, LOAD=61, CEXT=81, VAR=59, MDECO=72)
+NONE = 0xFFFFFFFF
+
+
+def layout(m):
+    md = {}
+    for x in m.ins:
+        if x[0] & 0xffff == OP['MDECO']: md.setdefault((x[1], x[2]), {})[x[3]] = x[4:]
+    return md
+
+
+def const(m, i):
+    c = m.consts.get(i)
+    return c[1][0] if c and len(c[1]) == 1 else None
+
+
+def offset_of(m, md, ty, idx):   # byte offset of constant indices idx inside type ty (Offset / ArrayStride decorations, 4-byte scalars)
+    off = 0
+    for i in idx:
+        t = m.types[ty]; o = t[0] & 0xffff
+        if o == 30: off += md[(ty, i)][35][0]; ty = t[2 + i]
+        elif o == 23: off += 4 * i; ty = t[2]
+        elif o in (28, 29): off += m.decos[ty][6][0] * i; ty = t[2]
+        else: raise ValueError(f'type op {o}')
+    return off
+
+
+def _direct_stores(m):
+    store = next((i for i, n in m.names.items() if n == 'mesh_plane_store'), None)
+    if store is None: return 0
+    md = layout(m)
+    a, e = m.function_range(store)
+    body = m.ins[a:e + 1]
+    params = [x[2] for x in body if x[0] & 0xffff == 55]
+    word_p, value_p = params
+    # the chains: blocks `%c = IEqual %plane %const; SelectionMerge %M; BranchConditional %c %T %M; Label %T ... Branch %M; Label %M`, grouped by %plane
+    chains = {}
+    k = 0
+    while k < len(body):
+        x = body[k]
+        if x[0] & 0xffff == OP['IEQ'] and const(m, x[4]) is not None and k + 3 < len(body) and body[k + 1][0] & 0xffff == OP['SMERGE'] \
+                and body[k + 2][0] & 0xffff == OP['BRC'] and body[k + 2][1] == x[2]:
+            M = body[k + 1][1]; T_ = body[k + 2][2]
+            end = next(j for j in range(k + 3, len(body)) if body[j][0] & 0xffff == OP['LABEL'] and body[j][1] == M)
+            blk = body[k + 3:end]
+            chains.setdefault(x[3], []).append((k, end, const(m, x[4]), blk))
+            k = end + 1; continue
+        k += 1
+    if not chains: return 0
+    u = m.add_type(21, 32, 0); bty = m.add_type(20); v3 = m.add_type(23, u, 3)
+    C = lambda n: m.add_const(u, n)
+    b = Build(m)
+    raw = b.words(OUT)
+    # the output block: its runtime array's stride is the group stride
+    out_var = None; zw_var = next((i for i, n in m.names.items() if n == 'mesh_position_zw'), None)
+    new_body = list(body); shift = 0
+    replaced = 0
+    for plane_var, blocks in chains.items():
+        # each block: an AccessChain into the output (base, 0, group, member, index, consts...), maybe a zw store
+        table = {}; idx_var = None; wg_load_var = None; zw = {}
+        for (_, _, p, blk) in blocks:
+            for y in blk:
+                if y[0] & 0xffff == OP['AC'] and m.vars.get(y[3], (0, 0))[1] == 12 and len(y) >= 8:
+                    out_var = y[3]
+                    member = const(m, y[6]); idx_var = y[7]; rest = [const(m, z) for z in y[8:]]
+                    blockty = m.pointee(m.vars[out_var][0])[1]; rt = m.types[blockty][2]; group_ty = m.types[rt][2]
+                    gstride = m.decos[rt][6][0]
+                    mty = m.types[group_ty][2 + member]
+                    table[p] = (md[(group_ty, member)][35][0] + offset_of(m, md, m.types[mty][2], rest), m.decos[mty][6][0])
+                if y[0] & 0xffff == OP['LOAD'] and y[1] == v3: wg_load_var = y[3]
+                if y[0] & 0xffff == OP['AC'] and zw_var is not None and y[3] == zw_var: zw[p] = 1
+        if idx_var is None or not table: continue
+        n = max(max(table), max(zw) if zw else 0) + 1
+        offs = [table.get(p, (NONE, 0))[0] for p in range(n)]; strides = [table.get(p, (0, 0))[1] for p in range(n)]
+        arr = m.add_type(28, u, C(n)); pp = m.add_type(32, SC_PRIVATE, arr)
+        tv = {}
+        for name, vals in (('off', offs), ('str', strides)):
+            cc = m.new_id(); m._insert_decl([(3 + n) << 16 | 44, arr, cc, *[C(v) for v in vals]])
+            var = m.new_id(); m._insert_decl([5 << 16 | OP['VAR'], pp, var, SC_PRIVATE, cc]); tv[name] = var
+        # the new code
+        b.code = []
+        inr = b.val(176, bty, plane_var, C(n))   # ULessThan
+        pc = b.val(169, u, inr, plane_var, C(0))   # Select
+        off = b.load(u, b.val(65, m.add_type(32, SC_PRIVATE, u), tv['off'], pc))
+        st = b.load(u, b.val(65, m.add_type(32, SC_PRIVATE, u), tv['str'], pc))
+        ok = b.val(167, bty, inr, b.val(171, bty, off, C(NONE)))   # LogicalAnd, INotEqual
+        def put():
+            g = b.val(OP['CEXT'], u, b.load(v3, wg_load_var), 0)
+            byte = b.add(b.add(b.mul(g, C(gstride)), off), b.mul(idx_var, st))
+            w = b.val(194, u, byte, C(2))   # ShiftRightLogical
+            b.emit(OP['STORE'], b.word(raw, w), value_p)
+        b.guarded(ok, put)
+        if zw:
+            zp = sorted(zw)
+            isz = b.val(166, bty, b.val(170, bty, plane_var, C(zp[0])), b.val(170, bty, plane_var, C(zp[-1])))   # LogicalOr of IEquals
+            def putz():
+                hi = b.val(169, u, b.val(170, bty, plane_var, C(zp[-1])), C(1), C(0)) if len(zp) > 1 else C(0)
+                p_ = b.val(65, m.add_type(32, SC_WORKGROUP, u), zw_var, b.add(b.mul(idx_var, C(2)), hi))
+                b.emit(OP['STORE'], p_, value_p)
+            b.guarded(isz, putz)
+        first, last = blocks[0][0], blocks[-1][1]
+        new_body[first + shift:last + 1 + shift] = b.code[:-1] if False else b.code
+        # (b.code ends with the last guard's merge label, as the replaced span ended with the last block's merge label)
+        shift += len(b.code) - (last + 1 - first)
+        replaced += len(blocks)
+    if not replaced: return 0
+    # the ids used in the span must not be needed after it: the replaced blocks' own results only feed their own stores
+    m.index(); a, e = m.function_range(store)   # (the declarations added above moved the function)
+    m.ins[a:e + 1] = new_body
+    # the entry point lists every global (SPIR-V 1.4)
+    m.index()
+    ent = m.entry
+    for v in (raw, *[x[2] for x in m.ins if x[0] & 0xffff == OP['VAR'] and x[3] == SC_PRIVATE]):
+        if v not in ent[3:]: ent.append(v)
+    ent[0] = len(ent) << 16 | 15
+    m.index()
+    return replaced
+
+
+
+def direct_outputs(data):
+    """A lowered mesh compute module (bytes) → the same with direct outputs (bytes); unchanged when it has neither the deferral nor a plane store chain"""
+    a, _ = _undefer(data)
+    m = spv.Module(a if a is not None else data)
+    r = _direct_stores(m)
+    return m.data() if (r or a is not None) else data

@@ -453,3 +453,89 @@ O que ficou de fora e por quê:
 
 **Ligado por padrão (14:20) e conferido em outro jogo (14:44–15:00):** Zelda, ponto do espantalho, mesma partida seguida: padrão (`REUSE=3`) 17,3 fps, GPU 51,6 ms; `DM_VK_OQ_REUSE=1` 16,1 fps, 55,6 ms. **Donkey Kong Bananza** no app de teste (o pack do app assinado de 09/11 copiado para `Switch2/Work/040074A01BF12000/test-pack`, o save de teste reposto a cada partida, `android_bench.py --pack`), tutorial de abertura: só ~3 relatórios e 81 consultas de oclusão por quadro, então o reuso quase não age; ligado e desligado deram 30,1 e 29,8 fps (GPU 21,3 e 21,2 ms), a mesma imagem de fim de janela e as mesmas 14 linhas `[RED]`. A primeira partida com o reuso teve um quadro de 2,2 s (cache de pipelines aquecendo depois das sondagens), que não se repetiu.
 
+
+## Etapa 2, oitavo passo: o fallback de mesh fora da passagem? (15/11, 15:40–16:05)
+
+Pedido do usuário: "Fallback de mesh" (o G2 do plano: rodar o controlador e o compute antes de a passagem abrir, para que cada draw emulado não feche a passagem). Antes de reescrever, a medida do que as quebras custam: `DM_VK_MESH_DIAG_STAGE=3` (novo, diagnóstico) larga o draw emulado antes de ele fechar a passagem; `=1` roda só o controlador (a passagem ainda é quebrada, sem o compute nem o draw que puxa). Ponto do espantalho, 1 partida cada, save reposto, trava em 30, sem LSFG:
+
+| Variante | fps | GPU p50 | passagens por quadro |
+|---|---|---|---|
+| completo | 18,7 | 48,2 ms | 186 |
+| só o controlador (`=1`) | 28,2 | 31,4 ms | 114 |
+| nada do fallback (`=3`) | 28,6 | 29,5 ms | 104 |
+
+- **O controlador e as suas quebras de passagem custam 1,9 ms.** No completo cada draw emulado reabre uma passagem (cerca de 72 a mais que o `=1`), mas os draws que puxam os vértices **junto com** essas reaberturas já tinham sido medidos em 2,5 ms (`=2`, quinto passo).
+- **O G2 ganharia no máximo 2 a 4 ms de 17**, com uma reescrita grande e arriscada (simular o estado de cada draw adiante e dar a cada um a sua região no buffer de saída). Não foi feito.
+- **Os ~15 ms restantes são o compute dos próprios mesh shaders traduzidos**, o mesmo que o perfil passo a passo mede (15,5 ms). Nem banda (contadores), nem lanes paradas (pareamento), nem cantos mortos (compactação), nem as quebras de passagem: o que sobra é o código dos shaders (registradores e ocupação no Adreno, os laços e as barreiras de memória compartilhada de cada grupo), que pede o compilador do driver ou uma ferramenta de estatística de shader para ver.
+
+## Etapa 2, nono passo: a estatística dos shaders pelo driver (15/11, 16:05–16:50)
+
+Pedido do usuário: "Estatística dos shaders". O driver 891.14 do POCO tem `VK_KHR_pipeline_executable_properties`; o replay passou a pedir as estatísticas de cada pipeline de compute que faz (`DM_VK_PIPE_STATS=1`, diagnóstico, lido ao criar o dispositivo; `vka_pso.c pipe_stats`). 192 pipelines no ponto do espantalho:
+
+| Programa | instruções | registradores | spill | memória compartilhada por grupo de 32 | **ocupação da ALU** |
+|---|---|---|---|---|---|
+| mesh `604134a5262ff670` | 26.474 | 48 | 520 B | 12.144 B | **4 %** |
+| mesh `fed302d791a4ba43` | 25.618 | 43 | 0 | 13.200 B | **4 %** |
+| mesh `73dc0b90c4082e43` | 47.662 | 48 | 536 B | 10.296 B | **6 %** |
+| task `eb021183bf9b0092` | 29.111 | 42 | 24 B | 8.316 B | **6 %** |
+| mesh `d98076e4148db34f` | 2.597 | 15 | 0 | 3.696 B | 10 % |
+
+- A ocupação segue cerca de 300 ÷ registradores (10 → 25-28 %, 20 → 12 %, 30 → 9 %, 40+ → 4-6 %), e a memória compartilhada a baixa ainda mais (10 registradores com 3,7 KB: 10 %). Os computes comuns do jogo: mediana de 10 registradores e 28 %; os de mesh: 23 e 9 %, e os pesados 4-6 %, com spill.
+- **É isso que deixa a GPU "ocupada" mas parada** (os 40 % de shaders parados do Profiler): quase nenhuma onda em voo para esconder a latência.
+- **`spirv-opt -O` nos 520 computes de mesh (por substituição, `DM_VK_SPV_OVERRIDE`) não mudou nada:** as mesmas instruções, registradores e ocupação no driver, o mesmo fps (17,2 contra 17,3 / 18,6). O compilador da Qualcomm já faz essas otimizações; o limite está na forma do código.
+- **De onde vem a memória compartilhada:** a cópia dos planos de `defer_mesh_plane_stores` (`vk_android_spv.py`, de 12/11: cada saída do mesh vai primeiro para uma cópia em memória compartilhada, de até ~20 KB, com uma máscara de `OpAtomicOr`, e um laço no fim a entrega às saídas; feita porque o Turnip morria compilando a cadeia de stores inlinada em cada chamada). A DroidPlay (MIT, `2e802839`) achou o mesmo gargalo nos seus kernels de mesh (11-13 KB por grupo de 32; dobrar o vetor dobrou o tempo) e o resolveu gravando cada saída direto no buffer de saída, no layout de planos `(v/32)*nvc*32 + k*32 + v%32`: no Adreno 830, kernels de mesh de 5,1 para 3,3 ms, o jogo de 27,0 para 29,4 fps. O fork do Erick ganhou 7,47 → 6,05 ms trocando a cadeia por uma tabela (`eed329f`, GPL: só a ideia). Análises: `docs/ANALISE-DROIDPLAY-0.8.5-0.8.11-2026-11-15.md`, `docs/ANALISE-ERICK-2026-11-15.md`.
+
+## Etapa 2, décimo passo: saídas diretas do mesh (15/11, 16:55–17:46)
+
+Pedido do usuário: "Sim, saídas diretas". Testado por substituição de módulos (`DM_VK_SPV_OVERRIDE`), sem preparar o jogo; a ferramenta ficou em `dm/gfx/tools/vk_android_mesh_direct.py` (de agente, fora da cadeia: reproduz byte a byte os módulos medidos).
+
+- **A (sem a cópia):** as chamadas de `mesh_plane_defer` voltam para `mesh_plane_store`, e a cópia dos planos em memória compartilhada, a máscara e os laços de limpar e entregar saem (344 dos 520 computes de mesh tinham a cópia).
+- **A2:** A com `mesh_plane_store` marcado DontInline: o driver ignora (as mesmas instruções), e o compilado sobe para 8,6-9,4 s por pipeline.
+- **B (saídas diretas, como a DroidPlay `2e802839`, MIT):** A, e as cadeias de `if (plano == p) saída.membro[índice] = valor` de `mesh_plane_store` viram uma consulta em duas tabelas (deslocamento e passo de cada plano, das decorações do bloco de saída) e uma gravação numa vista `uint[]` do mesmo buffer de saída. A cópia de profundidade dos planos 2 e 3 (`mesh_position_zw`) fica. 500 dos 520 módulos mudaram, todos válidos.
+
+**Ponto do espantalho** (trava em 30, save reposto, partidas alternadas):
+
+| Variante | fps | GPU p50 | instruções (`604134a5`) | ocupação (pesados / `d98076e4`) |
+|---|---|---|---|---|
+| biblioteca | 18,7 / 18,5 | 47,7 / 48,0 ms | 26.474 | 4-6 % / 10 % |
+| A | 21,4 / 21,6 | 40,6 / 40,7 ms | 81.906 | 6 % / 25 % |
+| A2 | 21,5 | 40,8 ms | 81.906 | 6 % |
+| **B** | **22,7 / 22,5** | **39,1 / 38,9 ms** | **31.741** | **6 % / 18 %** |
+
+**Ponto do Mido** (sem trava): biblioteca 30,0 fps (GPU 25,2 ms, presa na cadência); **B 41,6 fps (GPU 20,7 ms)**.
+
+- **+21 % de fps e −8,8 ms de GPU no ponto pesado; −4,5 ms no Mido.** A imagem de fim de janela é a mesma cena nos dois pontos.
+- **O tempo de compilação não piorou:** nas partidas que recompilam tudo (`DM_VK_PIPE_STATS`), a biblioteca levou 2,4-4,8 s nos pipelines de mesh mais pesados e B 1,5-4,2 s. Os 7-8 s vistos numa partida de B foram compilações junto com o pré-aquecimento, disputando a CPU, o que vale para qualquer versão.
+- **O que falta para os jogadores:** levar B para a cadeia (`vk_android_mesh.py`, versão da cadeia nova, biblioteca completa de cada jogo com o seu `vk_delta.tsv`). No celular, a atualização incremental traduz de novo só as entradas de mesh que mudaram (cerca de 500 no Zelda), não as 42 mil.
+
+## A biblioteca nova na cadeia, e o reuso de oclusão desligado de novo (15/11, 17:50–19:05)
+
+Pedido do usuário: "Sim, para a cadeia".
+
+- **Cadeia:** `vk_android_mesh.py` `direct_outputs` aplica as saídas diretas (passo anterior) na forma compute de todo programa de mesh; a versão da cadeia passou de `4e12942060ff` a **`e3d2789e93f6`**, com a mesma ABI (`623c0a2f1e8a`: um celular joga a biblioteca antiga enquanto a atualização roda). Abaixar de novo as 520 entradas da biblioteca antiga dá byte a byte os módulos medidos no celular. Testes: os 25 da cadeia e os 18 do mesh no WSL (um teste novo em `test_vk_mesh_defer.py`: sem cópia, sem a cadeia de `if`, uma gravação direta).
+- **Biblioteca completa do Zelda** no WSL (`output/build/zelda-vklib-e3d2.sh`, 44 min, J=12): 42.847 de 42.847 shaders, todos os módulos válidos, nenhuma linha `[RED]`, 1,25 GB. **Manifesto** `dm/games/0400486024DEC000/vk_delta.tsv` publicado: um celular com a biblioteca `4e12942060ff` traduz de novo só **500** shaders (os de mesh); com as anteriores, de 1.829 a 2.633. Uma cópia da biblioteca ficou em `mesh-emulation/cache/v-e3d2789e93f6` na pasta de trabalho do Zelda.
+- **No POCO, sem substituições** (a biblioteca no `test-pack`, o replay carregou `v-e3d2789e93f6`): espantalho 22,8 / 23,1 fps (GPU 39,0 / 38,8 ms), igual às substituições; Mido 41,8 fps.
+- **O brilho no Link** (o usuário viu partes de luz no Link voltarem): A/B no Mido com 4 capturas de tela por partida, a cada 8 s, dentro da janela:
+
+| Variante | capturas com o brilho | fps |
+|---|---|---|
+| biblioteca nova + reuso 3 (o padrão de então) | **2 de 4** (riscos brancos fortes nas costas) | 41,8 |
+| biblioteca nova, reuso desligado | 0 de 4 | 41,0 |
+| biblioteca antiga, reuso desligado | 0 de 4 | 34,2 |
+
+  **É o reuso de oclusão**, não a biblioteca nova: um efeito de luz que o jogo mede com uma consulta é desenhado por cima de tudo enquanto ela lê visível, e o "visível" repetido o mantém por até 2 quadros depois de o Link ficar na frente da luz. O erro "visível quando oculto" da conferência (cerca de 11 por quadro) não é inofensivo para esses efeitos. **O reuso voltou a ser desligado por padrão** (`DM_VK_OQ_REUSE=1`); fica como opção, e o que falta para religar está no verbete (`docs/reference/rendering.md`, "Open"). As saídas diretas do mesh ficam: a biblioteca nova não mostrou o brilho.
+
+## Portes dos outros projetos, primeiro lote (15/11, 19:00–19:20, sem o celular)
+
+Da análise consolidada (`docs/ANALISE-PORTS-2026-11-15.md`), o lote só de host, de baixo risco, sem cadeia nem pack:
+
+- **`vkfb_drop`** (Banana Native `b29c30af`, MIT, o mesmo `vka_fileback.h` que o nosso): um pool que vai para o arquivo não segura mais cada página copiada duas vezes; a cada 64 MiB copiados, `sync_file_range`, `MADV_DONTNEED` e `POSIX_FADV_DONTNEED`. Verbete em `docs/reference/memory.md`.
+- **A falta de escrita libera a faixa protegida em volta** (`fault_run` em `nvn_dirty.c`, Banana Native `6624426f`, MIT; `DM_DIRTY_FAULT_RUN_KB`, padrão 1024): menos mapas do driver por falta (a frente de `vm.max_map_count` do Zelda no Turnip e no Redmagic). Verbete em `docs/reference/memory.md`.
+- **A ordem do save do cache de pipelines** (`vka_pso.c` `cs_obtain`): o compute é anotado na lista de pré-aquecimento antes do save forçado que um compile de mais de 1 s dispara (antes o save saía sem ele; achado do Banana `67a2da0a`).
+- **A lista de pré-aquecimento do Zelda** juntada com a da Banana v0.3.25 (`dm/tools/vk_prewarm.py seed`): de 865 para **3.456** chaves (396 compute, 95 mesh, 2.965 gráficas), o mesmo layout de chave (`3710792d`).
+- **`plat_zone_malloc` alinhado a 16** no Android (DroidPlay `e52f2026`, MIT): o `malloc` do bionic pode dar blocos alinhados a 8 (jemalloc), e o `hle_uemalloc.c` (o malloc do Unreal) conta com 16.
+- **Não portado:** `DM_VK_CS_ASYNC` (Banana `67a2da0a`): ele pula o dispatch enquanto o compute compila, e aqui os draws esperam o pipeline justamente para não perder efeitos persistentes; pular um compute que grava um buffer uma vez só o deixaria velho. A lista de pré-aquecimento maior ataca a mesma travada sem pular nada.
+
+Compilado (APK de teste); ainda não rodado no celular (a fila do POCO tinha as sessões do BOTW e do TOTK).
+
+**Conferência do brilho com o reuso desligado (20:16–20:22):** biblioteca `e3d2789e93f6`, `DM_VK_OQ_REUSE` no novo padrão (1), Mido, 2 partidas com capturas a cada 8 s: **brilho em 0 de 12 capturas** (contra 2 de 4 com o reuso em 3), 41,9 / 41,1 fps (igual aos 41,8 com o reuso: no Mido ele não ganhava nada). A lista de pré-aquecimento maior só vale como semente de uma instalação nova: o app de teste usa a lista das próprias execuções (1.204 chaves, `vk_pipelines.keys`).

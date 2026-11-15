@@ -373,6 +373,9 @@ static int mesh_emulate(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_s
     // nothing at all (no controller, no pass break). 0 = batches over all 65535 groups, as before
     int fit = VKA_ENV("DM_VK_MESH_BATCH_FIT", 1);
     if (fit && !dw->ind && dw->count == 0) return 1;
+    // DM_VK_MESH_DIAG_STAGE=3 (diagnostic, incomplete picture): the emulated draw is dropped before it ends the pass, so against =1 (the controller only, the pass
+    // still broken) it measures what the fallback's pass breaks cost on their own
+    if (VKA_ENV("DM_VK_MESH_DIAG_STAGE", 0) == 3) { VRED_ONCE("task/mesh diagnostic stage 3: emulated draws dropped, not a visual acceptance test"); return 1; }
     uint32_t stride = ms->e->vin_mask, prims = ms->e->reserved >> 16 & 511;
     uint32_t topology = ms->e->reserved >> 25 & 1 ? 1 : 3;
     uint32_t pw = ms->e->reserved & 65535, tpw = ts ? ts->e->reserved & 65535 : 0;
