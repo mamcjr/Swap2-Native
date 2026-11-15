@@ -50,10 +50,16 @@ final class Switch2Layout {
         return new File(Frontend.normal(new File(s != null && !s.isEmpty() ? s : "/storage/emulated/0", "Switch2").getPath()));
     }
 
-    /** The folder that holds a game's folder or .nup: its parent, or the folder above it when that is Games/ (the Switch2 root of a game in Switch2/Games) */
+    /**
+     * The folder that holds a game's folder or .nup: its parent, or the folder above Games/ when the game is in Games/ or in a folder of its own there
+     * (Switch2/Games/x.nup and Switch2/Games/Zelda/x.nup: PackFind.gamesIn finds both), the Switch2 root
+     */
     static File rootOf(File game) {
         File p = game.getAbsoluteFile().getParentFile();
-        if (p != null && p.getName().equalsIgnoreCase(GAMES) && p.getParentFile() != null) return p.getParentFile();
+        if (p == null) return null;
+        if (p.getName().equalsIgnoreCase(GAMES) && p.getParentFile() != null) return p.getParentFile();
+        File g = p.getParentFile();
+        if (g != null && g.getName().equalsIgnoreCase(GAMES) && g.getParentFile() != null) return g.getParentFile();
         return p;
     }
 

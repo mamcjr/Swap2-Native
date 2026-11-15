@@ -1,0 +1,20 @@
+#version 450
+// The task/mesh fallback's batch compaction (vka_mesh.inc DM_VK_MESH_COMPACT): one invocation per mesh group of the batch reads the
+// primitive count the group stored at the end of its output structure (vk_android_mesh.py: 0 for a group that emitted nothing) and,
+// for a group with primitives, appends a draw of exactly its primitives' corners: vertexCount = count * corners per primitive,
+// firstVertex = the group's first corner (group * max primitives * corners per primitive), which is where the pulling vertex stage
+// (gl_VertexIndex includes firstVertex) finds the group. The host draws them with vkCmdDrawIndirectCount: the corners of primitives
+// past a group's count, and every corner of an empty group, are never run.
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Out { uint words[]; } o;
+layout(set=0,binding=1,std430) readonly buffer Info { uint info[]; };
+layout(set=0,binding=2,std430) buffer Cmds { uint draws; uint pad0; uint pad1; uint pad2; uvec4 cmd[]; };
+layout(push_constant) uniform P { uint stride_words; uint count_word; uint max_prims; uint corners; } p;
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    if (g >= info[0]) return;   // the batch's mesh groups (the controller's dispatch record)
+    uint c = min(o.words[g * p.stride_words + p.count_word], p.max_prims);
+    if (c == 0u) return;
+    uint slot = atomicAdd(draws, 1u);
+    cmd[slot] = uvec4(c * p.corners, 1u, g * p.max_prims * p.corners, 0u);
+}

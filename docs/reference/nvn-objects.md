@@ -655,3 +655,12 @@ Games read this count as a position in their own command memory and size their h
 ### `nvnPrivate0`, an inlined command-buffer fast path flag
 
 - `nvnPrivate0`, a new SDK 20 import, needs nothing: it is a flag in `sdk`'s bss that enables an inlined command-buffer fast path when the NVN driver sets it (it stays 0). Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### Android queue dependencies and texture-object ownership
+
+- **Symptom:** Zelda lighting is consumed before its producer; pool-only textures churn under cache pressure; finalizing a copied texture object destroys an image still used by the original.
+- **Cause:** the Android replay previously treated cross-queue waits as no-ops. Texture-cache age does not observe shader-side pool lookups, and serial-only release cannot distinguish an original object from its by-value copy.
+- **Fix:** Swap2 0.1.5 adapts BananaNative 0.2.8 (`7ea6a966e4be51d5e2ac0be08543ff44c036e447`): record event/sync waits, snapshot sync fences at submission, park dependent logical queues while replaying producers, and carry completion effects until a covering timeline signal. Command slots have their own completion fences when no timeline signal is possible. Present waits outside the queue lock. Texture images named by generation-valid pool slots remain resident, and `vka_texown.h` tracks original-object ownership using fault-safe guest reads. Preserve transfer holds and deferred retirement.
+- **Limits:** inherited scheduler safety valves release waits at present, CPU blocking waits, finalization, bounded backlog or a missing producer timeout; these are logged compatibility fallbacks, not complete emulation of every possible cyclic/late dependency. Inline replay retains submission-order behavior. A live texture working set can exceed the cache budget; do not evict readable images to hide that pressure. Reuse of dead-pool GPU images remains conservatively disabled locally.
+- **Validation:** real ARM64 scheduler, record-snapshot and production texture-lifetime tests pass; see [0.1.5 build report](../BUILD-0.1.5-beta-BANANANATIVE-2026-11-10.md). Device gameplay validation is recorded there separately.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md).

@@ -209,7 +209,7 @@ final class TouchControls extends View {
             prof = v2 != null && w > h && (prefs().contains("group0@" + v2) || !legacyCustom(key, screen)) ? v2 : key;
             load();
         }
-        float[] p = picture(w, h, placeX, placeY);
+        float[] p = GameGraphics.stretch(getContext(), gameId) ? new float[] {0, 0, 1, 1} : picture(w, h, placeX, placeY);
         picX = p[0]; picY = p[1]; picW = p[2]; picH = p[3];
         if (input) { Native.picturePlace(placeX, placeY); Native.touchLayout(w, h, picX, picY, picW, picH); }
         // On a short screen (under 340 units high) everything shrinks with it

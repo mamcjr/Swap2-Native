@@ -195,7 +195,7 @@ final class SaveUi {
         Game g = importFor;
         importFor = null;
         if (g == null) return true;
-        String p = PathUtil.documentToPath(doc);
+        String p = PathUtil.documentToPath(a, doc);
         File f = p == null ? null : new File(p);
         if (f != null && f.isFile() && f.canRead()) { importRead(a, g, new SaveZip.Source(f)); return true; }
         ContentResolver cr = a.getContentResolver();

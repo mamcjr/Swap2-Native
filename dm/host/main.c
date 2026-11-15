@@ -1,6 +1,7 @@
 // Bootstrap: after loading the modules, initialize the SDK runtime in the real order of nn::init::Start (sdk+0x2b0470) in the SDK, then enter nnMain.
 #include "dm.h"
 #include "front.h"
+#include "pack_modules.h"
 #include "../gfx/nvn/dmsh_chain.h"
 #include <stdatomic.h>
 #include <sys/resource.h>
@@ -107,6 +108,8 @@ static void host_preload(int argc, char **argv) {
         for (char *t = strtok(s, " "); t && g_argc < 63; t = strtok(NULL, " ")) g_argv[g_argc++] = t;
         LOG("game arguments from the game profile: %s", DM_GAME_ARGS);
     }
+    static char pm[512];
+    if (!n) n = pack_modules(argv[1], pm, sizeof pm, names, DM_GAME_NMOD);
 #ifdef DM_GAME_RUNTIME   // (the profile read at start: rt/game_profile.h)
     if (!n) for (int k = 0; k < DM_GAME_NMOD; k++) names[n++] = dm_game.modules[k];
 #else

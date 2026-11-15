@@ -90,7 +90,7 @@ static int load(void) {
     if (F.state) return F.state > 0;
     if (!device_ok()) return 0;
     const char *path = getenv("DM_LSFG_DLL");
-    if (!path || !*path) { unavailable("%s", "no Lossless.dll (the launcher looks in Documents/Emulation/bios, Switch2 and the app's files; or pick it in the launcher)"); return 0; }
+    if (!path || !*path) { unavailable("%s", "no Lossless.dll (the launcher looks in Documents/Emulation/bios, Switch2, LSFG, Download, the storage's root and the app's files; or pick it in the launcher)"); return 0; }
     uint64_t t0 = now_ns();
     int r = lsfg_dll_load(path, &F.mods);
     if (r) { char b[200]; snprintf(b, sizeof b, "%s: %s", path, lsfg_status_name(r)); unavailable("%s", b); return 0; }

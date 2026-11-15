@@ -4,6 +4,7 @@
 #define _GNU_SOURCE   // process_vm_readv, pipe2 (the Android build defines it for every file)
 #endif
 #include "../dm.h"
+#include "plat_guestmap.h"
 #include <dirent.h>
 #include <ftw.h>
 #include <fcntl.h>
@@ -97,7 +98,7 @@ size_t plat_page_size(void) { return (size_t)getpagesize(); }
 #define GUEST_VA_END (1ull << 39)
 #define GUEST_ALIGN 0x200000ull
 static void *reserve_at(uint64_t at, size_t size) {
-    void *p = mmap((void *)(uintptr_t)at, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    void *p = mmap((void *)(uintptr_t)at, size, PROT_NONE, PLAT_GUEST_MAP | MAP_FIXED_NOREPLACE, -1, 0);
     if (p == MAP_FAILED) return NULL;
     if ((uint64_t)(uintptr_t)p != at) { munmap(p, size); return NULL; }   // a kernel without MAP_FIXED_NOREPLACE takes the address as a hint only
     return p;
@@ -110,7 +111,7 @@ void *plat_mem_reserve(size_t size) {
     for (uint64_t a = want; !p && a + size <= GUEST_VA_END; a += step) if ((p = reserve_at(a, size))) at = a;
     for (uint64_t a = want & ~(step - 1); !p && a >= 2 * step; a -= step) if ((p = reserve_at(a - step, size))) at = a - step;
     if (!p) {
-        uint8_t *raw = mmap(NULL, size + GUEST_ALIGN, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        uint8_t *raw = mmap(NULL, size + GUEST_ALIGN, PROT_NONE, PLAT_GUEST_MAP, -1, 0);
         if (raw == MAP_FAILED) return NULL;
         p = (void *)(((uintptr_t)raw + GUEST_ALIGN - 1) & ~(uintptr_t)(GUEST_ALIGN - 1));
         if ((uint8_t *)p > raw) munmap(raw, (size_t)((uint8_t *)p - raw));
@@ -118,8 +119,27 @@ void *plat_mem_reserve(size_t size) {
         LOG("[RED] guest block: no room at a fixed address below %#llx; the kernel gave %p", GUEST_VA_END, p);
     } else if (at != want) LOG("guest block: %#llx was taken, reserved at %#llx", (unsigned long long)want, (unsigned long long)at);
     if ((uint64_t)(uintptr_t)p + size > GUEST_VA_END) LOG("[RED] guest block %p+%#zx ends above %#llx (the 39-bit user space)", p, size, GUEST_VA_END);
-    prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, p, size, "nxnative guest");   // its name in /proc/self/maps (fails quietly where the kernel has no anonymous VMA names)
+    plat_mem_name_guest(p, size);
     return p;
+}
+// Its name in /proc/self/maps (fails quietly where the kernel has no anonymous VMA names). The kernel merges two neighbouring anonymous mappings only when their names are
+// the same, so a fixed map inside the block (guest_release, the Vulkan replay's give-back) is named again: unnamed, every such map stayed a mapping of its own beside the
+// named rest, and the alias region's map and unmap churn left thousands of them (vm.max_map_count, docs/reference/memory.md)
+void plat_mem_name_guest(void *p, size_t n) { prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, p, n, "nxnative guest"); }
+// Lines of /proc/self/maps, counted in a stack buffer (no allocation: at the limit malloc may need a new mapping itself); vm.max_map_count read once
+int plat_maps_count(int *max) {
+    static _Atomic int mx;
+    if (max) {
+        int m = atomic_load(&mx);
+        if (!m) { char b[32]; int fd = open("/proc/sys/vm/max_map_count", O_RDONLY | O_CLOEXEC); ssize_t k = fd >= 0 ? read(fd, b, sizeof b - 1) : -1; if (fd >= 0) close(fd);
+                  m = k > 0 ? (b[k] = 0, atoi(b)) : 0; if (m <= 0) m = 65530; atomic_store(&mx, m); }   // (the kernel's default when it cannot be read)
+        *max = m;
+    }
+    int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC); if (fd < 0) return -1;
+    char b[16384]; ssize_t k; int n = 0;
+    while ((k = read(fd, b, sizeof b)) > 0) for (ssize_t i = 0; i < k; i++) n += b[i] == '\n';
+    close(fd);
+    return k < 0 ? -1 : n;
 }
 int64_t plat_footprint_bytes(void) {
     char b[128]; int fd = open("/proc/self/statm", O_RDONLY | O_CLOEXEC); if (fd < 0) return -1;

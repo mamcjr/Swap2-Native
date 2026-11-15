@@ -17,8 +17,9 @@ import java.util.List;
  *     a restamp for any game</li>
  * <li>the Switch2 layout: a game in Games/ finds its pack in &lt;Switch2&gt;/Work/&lt;id&gt;/&lt;any&gt; before the older &lt;id&gt;-work, and the scan of the Switch2 folder
  *     takes its Games/ folder's games too</li>
- * <li>the folder scan (PackFind.gamesIn and what Add game makes of it): several .nups (made by dm/tools/nup_pack.py), dump subfolders, a title without a
- *     profile, and the folders that are not games (work, pack, empty, two levels deep)</li>
+ * <li>the folder scan (PackFind.gamesIn and what Add game makes of it): several .nups (made by dm/tools/nup_pack.py; the extension in any case), dump
+ *     subfolders, a .nup in a folder of its own (Games/Zelda/zelda.nup), a title without a profile, and the folders that are not games (work, pack, the app's
+ *     data, empty, two levels deep)</li>
  * </ul>
  * Prints "ok &lt;checks&gt;"; exits non-zero on the first failure.
  */
@@ -194,49 +195,69 @@ public final class PackFindJvmTest {
     }
 
     static void scan(File repo, File t) throws IOException, InterruptedException {
-        // The Switch2 folder (Switch2Layout): its own games and those of its Games/, one level deep there too; Work/ is not a game
+        File src = new File(t, "src");
+        dump(new File(src, "dkb"), DKB);
+        dump(new File(src, "mkw"), MKW);
+        dump(new File(src, "other"), OTHER);
+        File dkbNup = new File(t, "made/dkb.nup"), mkwNup = new File(t, "made/mkw.nup");
+        nup(repo, new File(src, "dkb"), dkbNup);
+        nup(repo, new File(src, "mkw"), mkwNup);
+
+        // The Switch2 folder (Switch2Layout): its own games and those of its Games/, one level deep there too (a dump folder, or the .nup files of a folder of
+        // their own: Games/Zelda/zelda.nup); Work/ and the app's data folders are not games, and nothing two levels down
         File s2 = new File(t, "S2scan");
         dump(new File(s2, "RootGame"), DKB);
         dump(new File(s2, "Games/InGames"), MKW);
         dump(new File(s2, "Work/" + DKB), DKB);
         dump(new File(s2, "Games/Games/Deeper"), DKB);
+        copy(mkwNup, new File(s2, "Games/Zelda/zelda.nup"));
+        copy(mkwNup, new File(s2, "Games/Zelda/Deeper/deep.nup"));
+        copy(mkwNup, new File(s2, "profiles/stray.nup"));
+        copy(mkwNup, new File(s2, "Work/" + DKB + "/stray.nup"));
         List<String> s2names = new ArrayList<>();
         for (File g : PackFind.gamesIn(s2)) s2names.add(g.getName());
-        check(s2names.equals(List.of("RootGame", "InGames")), "the Switch2 folder's games and its Games/'s " + s2names);
+        check(s2names.equals(List.of("RootGame", "InGames", "zelda.nup")), "the Switch2 folder's games and its Games/'s " + s2names);
+        check(Switch2Layout.rootOf(new File(s2, "Games/Zelda/zelda.nup")).equals(s2.getAbsoluteFile()) && Switch2Layout.rootOf(new File(s2, "Games/x.nup")).equals(s2.getAbsoluteFile()),
+                "a game in a folder of its own in Games/ has the Switch2 root " + Switch2Layout.rootOf(new File(s2, "Games/Zelda/zelda.nup")));
 
-        File src = new File(t, "src"), dir = new File(t, "Switch2/nup-test");
-        dump(new File(src, "dkb"), DKB);
-        dump(new File(src, "mkw"), MKW);
-        dump(new File(src, "other"), OTHER);
-        nup(repo, new File(src, "dkb"), new File(dir, "DonkeyKongBananza.nup"));
-        nup(repo, new File(src, "mkw"), new File(dir, "MarioKartWorld.nup"));
+        File dir = new File(t, "Switch2/nup-test");
+        copy(dkbNup, new File(dir, "DonkeyKongBananza.nup"));
+        copy(mkwNup, new File(dir, "MarioKartWorld.nup"));
         nup(repo, new File(src, "other"), new File(dir, "Other-v1.nup"));
-        write(new File(dir, "Shout.NUP"), "wrong case");
+        copy(dkbNup, new File(dir, "Shout.NUP"));   // the extension in another case: a .nup like any other (the host and the tools split at ".nup:" in any case)
+        copy(mkwNup, new File(dir, "OwnFolder/Mario Kart.Nup"));   // a .nup in a folder of its own
         dump(new File(dir, "DkbDump"), DKB);
         write(new File(dir, "OneVersion/exefs/main.npdm"), npdm(Long.parseUnsignedLong(MKW, 16)));
         dump(new File(dir, DKB + "-work"), DKB);   // a work folder holding an extraction: not a game
+        copy(mkwNup, new File(dir, DKB + "-work/x.nup"));
         dump(new File(dir, "android-pack"), DKB);
         write(new File(dir, "android-pack/pack.tsv"), "format\t1\n");   // a pack folder: not a game
+        copy(mkwNup, new File(dir, "android-pack/x.nup"));
         dump(new File(dir, "Nested/Inner"), DKB);   // two levels deep: not looked at
         new File(dir, "Empty").mkdirs();
         write(new File(dir, "readme.txt"), "x");
+        write(new File(dir, "game.nup.part"), "x");   // not a .nup by its name
 
         List<File> games = PackFind.gamesIn(dir);
         List<String> names = new ArrayList<>();
         for (File g : games) names.add(g.getName());
-        check(names.equals(List.of("DkbDump", "DonkeyKongBananza.nup", "MarioKartWorld.nup", "OneVersion", "Other-v1.nup", "Shout.NUP")), "the folder's games " + names);
+        check(names.equals(List.of("DkbDump", "DonkeyKongBananza.nup", "MarioKartWorld.nup", "OneVersion", "Other-v1.nup", "Mario Kart.Nup", "Shout.NUP")), "the folder's games " + names);
 
         // What Add game makes of them (MainActivity.addAll): the title, whether this APK runs it, and whether it is a dump Prepare can start from
-        List<String> ok = new ArrayList<>(), unsupported = new ArrayList<>(), bad = new ArrayList<>();
+        List<String> ok = new ArrayList<>(), unsupported = new ArrayList<>();
         for (File g : games) {
-            if (Nup.wrongCase(g)) { bad.add(g.getName()); continue; }
             String id = Pack.titleIdOf(g);
             if (Profile.missing(id, g.getName()) != null) unsupported.add(g.getName() + " " + id);
             else ok.add(g.getName() + " " + id + (Pack.isDump(g) ? " dump" : ""));
         }
-        check(ok.equals(List.of("DkbDump " + DKB + " dump", "DonkeyKongBananza.nup " + DKB + " dump", "MarioKartWorld.nup " + MKW + " dump", "OneVersion " + MKW)), "supported " + ok);
+        check(ok.equals(List.of("DkbDump " + DKB + " dump", "DonkeyKongBananza.nup " + DKB + " dump", "MarioKartWorld.nup " + MKW + " dump", "OneVersion " + MKW,
+                "Mario Kart.Nup " + MKW + " dump", "Shout.NUP " + DKB + " dump")), "supported " + ok);
         check(unsupported.equals(List.of("Other-v1.nup " + OTHER)), "unsupported " + unsupported);
-        check(bad.equals(List.of("Shout.NUP")), "wrong case " + bad);
         check(PackFind.gamesIn(new File(t, "missing")).isEmpty(), "a missing folder: no games");
+    }
+
+    static void copy(File from, File to) throws IOException {
+        to.getParentFile().mkdirs();
+        java.nio.file.Files.copy(from.toPath(), to.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
     }
 }

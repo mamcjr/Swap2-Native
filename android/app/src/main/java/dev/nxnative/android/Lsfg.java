@@ -25,8 +25,10 @@ import java.util.List;
 final class Lsfg {
     private Lsfg() {}
 
-    /** The places looked in, in order; then the app's own folders */
-    static final String[] KNOWN = {"/storage/emulated/0/Documents/Emulation/bios/Lossless.dll", "/storage/emulated/0/Switch2/Lossless.dll", "/storage/emulated/0/Download/Lossless.dll"};
+    /** The places looked in, in order; then the app's own folders. LSFG/ is where other Android front ends of Lossless Scaling keep it (the user's phone had it only
+     *  there, 2026-11-13: frame generation stayed off with "not found" although it was on the phone); the storage's root for a DLL copied there as it is */
+    static final String[] KNOWN = {"/storage/emulated/0/Documents/Emulation/bios/Lossless.dll", "/storage/emulated/0/Switch2/Lossless.dll", "/storage/emulated/0/LSFG/Lossless.dll",
+                                   "/storage/emulated/0/Download/Lossless.dll", "/storage/emulated/0/Lossless.dll"};
     static final int[] MULTS = {2, 3, 4}, TARGETS = {0, 60, 90, 120}, FLOWS = {0, 25, 50, 75, 100};
 
     static File privateCopy(Context c) { return new File(c.getFilesDir(), "lsfg/Lossless.dll"); }
@@ -77,7 +79,7 @@ final class Lsfg {
             }
         }
         if (looksLikeDll(copy)) { note = "Lossless.dll: the copy picked earlier"; return copy; }
-        if (note.isEmpty() || !note.contains("could not")) note = "Lossless.dll not found (looked in Documents/Emulation/bios, Switch2, Download and the app's files)";
+        if (note.isEmpty() || !note.contains("could not")) note = "Lossless.dll not found (looked in Documents/Emulation/bios, Switch2, LSFG, Download, the storage's root and the app's files)";
         return null;
     }
 

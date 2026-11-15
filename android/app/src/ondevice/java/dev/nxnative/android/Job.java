@@ -187,10 +187,16 @@ final class Job {
     /** Whether the pack step refused this library before (importRefused) */
     synchronized boolean refusedImport(File lib) { return lib != null && librarySignature(lib).equals(o.optString("import_refused", "")); }
 
+    /** What the split step writes into ondevice/split/ (shader_split.py's arguments in PackService.step) */
+    static final String[] SPLIT_OUTPUTS = {"pkg/", "shader_map.tsv", "shader_facts.tsv", "shader_pairs.tsv", "pso_pairs.tsv"};
+
+    /** Whether split/ holds a whole split: its marker (Outputs), or an older build's split/ renamed into place from split.tmp/ with every output there */
+    static boolean splitComplete(File split) { return Outputs.complete(split, SPLIT_OUTPUTS); }
+
     /** Starts the chain's steps over with this APK's versions; the caller deletes their outputs */
     synchronized void resetChainSteps() throws JSONException {
         // the split is the dump's and stays valid, but a finished job deleted it: then it is made again too
-        int from = new File(dir(), "split").isDirectory() ? FIRST_CHAIN_STEP : FIRST_CHAIN_STEP - 1;
+        int from = splitComplete(new File(dir(), "split")) ? FIRST_CHAIN_STEP : FIRST_CHAIN_STEP - 1;
         for (int i = from; i < STEPS.length; i++) o.getJSONObject("steps").put(STEPS[i], new JSONObject().put("state", "pending").put("done", 0).put("total", 0).put("stage", ""));
         o.remove("shader_cache");
         o.remove("shaders_imported");   // translated again: the preparation screen shows the translation's count, not "imported"
@@ -231,10 +237,45 @@ final class Job {
     synchronized String titleId() { return o.optString("title_id"); }
     synchronized long version() { return o.optLong("version"); }
     synchronized long updated() { return o.optLong("updated"); }
+
+    /** An idle service's old JSON must not override a newer import/completion on disk. */
+    static Job latestSnapshot(Job snapshot, boolean alive) {
+        if (snapshot == null || alive) return snapshot;
+        try {
+            Job disk = read(snapshot.file);
+            if (!GameFlow.preferLiveJob(false, snapshot.updated(), disk.updated())) return disk;
+        } catch (IOException e) { /* atomic rename in progress: keep the last valid snapshot */ }
+        return snapshot;
+    }
     synchronized long created() { return o.optLong("created"); }
     synchronized File dump() { return new File(o.optString("dump")); }
     synchronized File work() { return new File(o.optString("work")); }
     synchronized File pack() { return new File(o.optString("pack")); }
+    /** Re-home only a different Swap2 variant's private output. All completed shared work remains reusable. */
+    synchronized void rehomeVariantPack(Context c) throws IOException {
+        String old = pack().getPath();
+        if (!PackDestination.foreignVariant(old, c.getPackageName(), titleId())) return;
+        File destination = AppStorage.pack(c, titleId());
+        String cache = o.optString("shader_cache", "");
+        if (cache.startsWith(old + "/")) {
+            File local = new File(dir(), "lib/v-" + BuildConfig.NX_DMSH_VK_CHAIN + "/dmsh_vk.lib");
+            if (!local.isFile()) throw new IOException("The previous app variant owns this job's shader cache. Import its shaders or prepare them in this app before finishing the pack.");
+        }
+        try {
+            o.put("pack", destination.getPath());
+            o.put("own_pack", isNew(destination) || ShaderZip.onlyShaders(destination));
+            o.remove("adopted");
+            if (cache.startsWith(old + "/")) o.remove("shader_cache");
+            stepState("rewrite", "pending");   // module outputs were owned by the previous app too; shared shaders remain done
+            stepState("pack", "pending");
+        } catch (JSONException e) { throw new IOException("Cannot update the preparation destination", e); }
+    }
+    synchronized void repairMissingCode() {
+        if (!"done".equals(stepState("rewrite")) || "done".equals(state())) return;
+        Profile profile = Profile.of(titleId());
+        java.util.Map<String, String> modules = profile == null ? null : profile.buildMap().get(version());
+        if (modules != null && PackDestination.missingCode(pack(), modules.keySet())) stepState("rewrite", "pending");
+    }
     /** The folder of shader libraries (v-<V>/) the pack step copies from: the job's own build (ondevice/lib), or the pack's shaders/ when only the code is redone */
     synchronized File shaderCache() { String s = o.optString("shader_cache", ""); return s.isEmpty() ? new File(dir(), "lib") : new File(s); }
 

@@ -145,7 +145,12 @@ final class SidePanel extends FrameLayout {
 
         lsfgNow = Lsfg.rows(act, box, "", () -> { Lsfg.push(act); refresh(); });
 
-        Fsr.rows(act, box);   // FSR 1 upscaling at the present (DM_VK_FSR), sent to the game through DM_CTL
+        LinearLayout graphics = new LinearLayout(act);
+        graphics.setOrientation(LinearLayout.VERTICAL);
+        box.addView(graphics);
+        Runnable[] redraw = new Runnable[1];
+        redraw[0] = () -> { graphics.removeAllViews(); GameGraphics.rows(act, game(), graphics, redraw[0], true); };
+        redraw[0].run();
 
         head("Overlay");
         Overlay.rows(act, box, null);

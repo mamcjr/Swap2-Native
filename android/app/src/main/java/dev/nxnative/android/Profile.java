@@ -27,10 +27,19 @@ final class Profile {
     String stamp = "";   // its "stamp" rows: "version:old SHA-256:new SHA-256", ';' between them (ShaderLibs.restamp)
     String resolution = "";   // what Game resolution sets (build.gradle resolutionOf): "window", "scale:<choice>=<scale>/<console|handheld>,…" or "" (nothing: not offered)
     String ndsr = "";    // agl's NDSR networks (build.gradle ndsrOf): the FSR stand-in's input encoding (profile ndsr_input: sqrt or linear) when the shader map has them, else ""
-    String scene = "";   // the Scene resolution's 720p (build.gradle sceneOf): "<scale>/<expected original scales, ','>" from scene_scale_palette, or "" (not offered)
+    String scene = "";   // the Scene resolution (build.gradle sceneOf): "<scale>/<expected original scales, ','>[/<label>=<scale>|…]" from scene_scale_palette and scene_preset, or "" (not offered)
 
-    /** Whether Game resolution does something for this game (its profile has window_fn or graphics_scale rows) */
+    /** Whether Game resolution does something for this game (its profile has window_fn, res_levels or graphics_scale rows) */
     boolean hasResolution() { return resolution.equals("window") || resolution.startsWith("scale:"); }
+
+    /** Fixed graphics-scale tables cannot invent a new render size; arbitrary window-size profiles can. */
+    boolean supports540p() { return resolution.equals("window") || resolution.startsWith("scale:") && resolution.substring(6).contains("960x540="); }
+
+    /** A global 540p choice falls back to the verified 720p scale on fixed-scale profiles, never silently to a larger original size. */
+    String windowChoice(String choice) {
+        if (!"960x540".equals(choice) || !resolution.startsWith("scale:") || supports540p()) return choice;
+        return resolution.substring(6).contains("1280x720=") ? "1280x720" : "original";
+    }
 
     /** Whether the Upscaler option does something for this game: its shader map has agl's NDSR upscaler networks (agl_ndsr*.pck), which DM_VK_NDSR=fsr replaces */
     boolean hasNdsr() { return ndsr.equals("sqrt") || ndsr.equals("linear"); }
@@ -65,17 +74,34 @@ final class Profile {
 
     /** The palette's original scales the tool checks before it writes (gsys_dynres.py --expect, ',' between them), "" when the profile names none */
     String sceneExpect() {
-        int sl = scene.indexOf('/');
-        String e = sl < 0 ? "" : scene.substring(sl + 1);
+        String[] part = scene.split("/", -1);
+        String e = part.length > 1 ? part[1] : "";
         return e.matches("[0-9.]+(,[0-9.]+)*") ? e : "";
+    }
+
+    /**
+     * The Scene resolution's choices besides the game's own palette, label → the scale written into every level (gsys_dynres.py --scale), in the profile's order:
+     * its scene_preset rows, else one "720p" at scene_scale_palette's scale. Empty when the option is not offered
+     */
+    java.util.LinkedHashMap<String, String> scenePresets() {
+        java.util.LinkedHashMap<String, String> out = new java.util.LinkedHashMap<>();
+        String[] part = scene.split("/", -1);
+        if (part.length > 2) for (String kv : part[2].split("\\|")) {
+            int eq = kv.indexOf('=');
+            if (eq <= 0) continue;
+            String v = kv.substring(eq + 1);
+            if (v.matches("\\d*\\.\\d+") && Double.parseDouble(v) >= 0.05 && Double.parseDouble(v) <= 2) out.put(kv.substring(0, eq), v);
+        }
+        if (out.isEmpty() && sceneScale() != null) out.put("720p", sceneScale());
+        return out;
     }
 
     /** Whether the Scene resolution option does something for this game: its profile has a scene_scale_palette row */
     boolean hasScene() { return sceneScale() != null; }
 
     /**
-     * The host's environment lines for a Game resolution choice (Prefs.WINDOWS: "1920x1080", "original", "1280x720"): DM_WINDOW_SIZE=&lt;choice&gt; for a game with
-     * window_fn rows; DM_GRAPHICS_SCALE and DM_OPMODE from the choice's graphics_scale row for a game that sizes its scenes by the graphics scale (none for a choice
+     * The host's environment lines for a Game resolution choice (Prefs.WINDOWS: "1920x1080", "original", "1280x720", "960x540"): DM_WINDOW_SIZE=&lt;choice&gt; for a game with
+     * window_fn rows (its window size) or res_levels rows (a cap on its dynamic resolution); DM_GRAPHICS_SCALE and DM_OPMODE from the choice's graphics_scale row for a game that sizes its scenes by the graphics scale (none for a choice
      * without a row: the game's own); none for a game with neither.
      */
     List<String> resolutionEnv(String choice) {
@@ -153,7 +179,7 @@ final class Profile {
 
     /**
      * The profiles of a folder of profile folders (&lt;title ID&gt;/game.tsv), as build.gradle makes a built-in one: the name, the shader count (shader_map.tsv's rows),
-     * the builds ("version module=build ID …" from the build rows) and what Game resolution sets (window_fn or graphics_scale rows). Its shader inputs digest is
+     * the builds ("version module=build ID …" from the build rows) and what Game resolution sets (window_fn, res_levels or graphics_scale rows). Its shader inputs digest is
      * "unknown" (dmsh_chain.py computes it from Python; the launcher then checks a library by its path only), and it has no readiness rows or shader delta
      */
     static List<Profile> user(File dir) {
@@ -173,19 +199,21 @@ final class Profile {
                 }
             } catch (IOException e) { continue; }
             String name = d.getName(), ndsrInput = "linear", scene = "", upscaler = "";
+            List<String> presets = new ArrayList<>();
             List<String> builds = new ArrayList<>(), scale = new ArrayList<>();
             boolean window = false;
             for (String[] c : rows) {
                 if (c[0].equals("ndsr_input") && c.length > 1) ndsrInput = c[1];
                 if (c[0].equals("ndsr_default") && c.length > 1 && c[1].equals("fsr")) upscaler = "fsr";
-                if (c[0].equals("scene_scale_palette") && c.length > 1 && scene.isEmpty()) scene = c[1] + (c.length > 2 ? "/" + c[2] : "");
+                if (c[0].equals("scene_scale_palette") && c.length > 1 && scene.isEmpty()) scene = c[1] + "/" + (c.length > 2 ? c[2] : "") + scene;
+                if (c[0].equals("scene_preset") && c.length > 2) presets.add(c[1] + "=" + c[2]);
                 if (c[0].equals("name") && c.length > 1) name = c[1].replaceAll("[\\t\\n\\\\\"]", " ");
                 else if (c[0].equals("build") && c.length > 3) {
                     java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\d+").matcher(c[1]);
                     StringBuilder b = new StringBuilder(m.find() ? m.group() : c[1]);
                     for (int i = 3; i < c.length; i++) b.append(' ').append(c[i]);
                     builds.add(b.toString());
-                } else if (c[0].equals("window_fn")) window = true;
+                } else if (c[0].equals("window_fn") || c[0].equals("res_levels")) window = true;   // res_levels: DM_WINDOW_SIZE caps the dynamic resolution
                 else if (c[0].equals("graphics_scale") && c.length > 3) scale.add(c[1] + "=" + c[2] + "/" + c[3]);
             }
             int shaders = 0;
@@ -197,7 +225,7 @@ final class Profile {
             Profile p = new Profile(d.getName(), name, shaders, "unknown", String.join(";", builds), "", "bring-up");
             p.resolution = window ? "window" : scale.isEmpty() ? "" : "scale:" + String.join(",", scale);
             p.ndsr = ndsr ? ndsrInput : "";
-            p.scene = scene;
+            p.scene = scene.isEmpty() || presets.isEmpty() ? scene : scene + "/" + String.join("|", presets);
             p.upscaler = upscaler;
             out.add(p);
         }
@@ -219,8 +247,8 @@ final class Profile {
         // The title IDs this APK runs, so a user with another game sees it is not supported (rather than a broken dump); IDs only, no game names
         List<String> ids = new ArrayList<>();
         for (Profile p : all()) ids.add(p.titleId);
-        return (what == null ? titleId : what + " (" + titleId + ")") + " has no game profile, so it cannot run here: put one in " + userDir() + "/" + titleId
-                + " (game.tsv and its tables, as in the repository's dm/games). Profiles here: " + String.join(", ", ids) + ".";
+        return (what == null ? titleId : what + " (" + titleId + ")") + " is not supported by this app: this game, or this region's version of it, has no game profile."
+                + " Supported title IDs: " + String.join(", ", ids) + ". (A profile can be added in " + userDir() + "/" + titleId + ": game.tsv and its tables, as in the repository's dm/games.)";
     }
 
     /** A version of a dump in words: 0 is the base game itself (no update installed; Mario Kart World 1.8.0's supported build), any other an update */

@@ -1,7 +1,7 @@
 """SPIR-V reading and the few rewrites the Android Vulkan library needs (vk_android_build.py): the descriptor set / binding renumbering into the Vulkan ABI
 (dm/gfx/nvn/dmsh_abi_vk.h), vertex outputs that start as (0, 0, 0, 1), the GL depth and alpha test constants, the integer-output and dual-source variants, the
 viewport mask of an emulated passthrough geometry shader, and the facts the reflection reads (resources, vertex inputs, colour outputs, capabilities). The translator's modules are taken as they come; every rewrite keeps the module valid for spirv-val --target-env vulkan1.3."""
-import struct
+import collections, struct
 
 MAGIC = 0x07230203
 # opcodes
@@ -271,7 +271,7 @@ def gl_depth(m, spec_id):
     spec = m.new_id(); m._insert_decl([3 << 16 | OP_SPEC_CONSTANT_FALSE, boolean, spec])
     at = next(k for k, y in enumerate(m.ins) if y[0] & 0xffff == OP_DECORATE)
     m.ins.insert(at, [4 << 16 | OP_DECORATE, spec, DEC_SPEC_ID, spec_id]); m.decos[spec] = {DEC_SPEC_ID: [spec_id]}
-    name = lit_string('dm_gl_depth'); m.ins.insert(next(k for k, y in enumerate(m.ins) if y[0] & 0xffff in (OP_NAME, OP_DECORATE)), [(2 + len(name)) << 16 | OP_NAME, spec, *name])
+    name = lit_string('dm_gl_depth'); m.ins.insert(next(k for k, y in enumerate(m.ins) if y[0] & 0xffff in (OP_NAME, OP_DECORATE, OP_MEMBER_DECORATE)), [(2 + len(name)) << 16 | OP_NAME, spec, *name])
     a, e = m.function_range(m.entry_function())
     stop = (OP_EMIT_VERTEX, OP_EMIT_STREAM_VERTEX) if m.model == 'gs' else (OP_RETURN, OP_RETURN_VALUE)
     out, n = [], 0
@@ -1161,3 +1161,818 @@ def hmma_lds(m, keep=HMMA_KEEP):
     m.ins = [y for y in m.ins if not (y[0] & 0xffff in (OP_NAME, OP_DECORATE) and y[1] in gone)]
     m.index()
     return calls
+
+
+# ---- raw global memory (Ryujinx GlobalToStorage.cs TryGenerateRawStorageOp; dmsh_abi.h DMSH_GMEM_MAP_*): the helpers' temporaries as values, the pool table search as one
+# loop, and load calls read through the pool entry kept last. Adapted from Banana Native's promote_locals, loop_pool_search and cache_raw_loads (eden/v0.3.11) to the
+# helper this translator emits: a 12-step search over the 4,096-entry table, no chunk hint, no sink word, the hash-set write log. Nothing here changes what a helper
+# reads or writes; a module without a raw helper is left byte for byte as it was (raw_global_memory)
+OP_VECTOR_INSERT_DYNAMIC, OP_VECTOR_SHUFFLE, OP_CONVERT_U_TO_PTR, OP_INOT_EQUAL, OP_ULESS_THAN, OP_ULESS_THAN_EQUAL = 78, 79, 120, 171, 176, 178
+OP_LOGICAL_OR, OP_LOGICAL_AND, OP_LOOP_MERGE, OP_BRANCH, OP_SWITCH = 166, 167, 246, 249, 251
+SC_PHYSICAL_STORAGE_BUFFER, CAP_PHYSICAL_STORAGE_BUFFER, LOOP_DONT_UNROLL = 5349, 5347, 0x2
+GMEM_MAP_LOG2, GMEM_MAP_ENTRY_WORDS = 12, 8   # dmsh_abi.h DMSH_GMEM_MAP_ENTRIES (1 << 12), DMSH_GMEM_MAP_ENTRY / 4 (GlobalToStorage.GmemMapLog2, GmemMapEntryWords)
+GMEM_RUN_WORDS = 4   # the most words of one run cache_raw_loads reads at once (the translator splits a 128-bit global load into four 32-bit raw loads)
+GMEM_CACHE_MIN_CALLS = 4   # a module with fewer raw load calls keeps its helper (with the search as a loop): its few inlined helpers cost little
+
+# Function-body instructions by where their operands are ids of values or pointers (value_operands): the rest of their words are a type, the result, a label or a literal
+_OPS_NONE = {0, 1, 8, 317, OP_FUNCTION, OP_FUNCTION_PARAMETER, OP_FUNCTION_END, OP_VARIABLE, OP_LABEL, OP_LOOP_MERGE, OP_SELECTION_MERGE, OP_BRANCH, OP_KILL, OP_RETURN, 255,
+             OP_EMIT_VERTEX, 219, OP_TERMINATE_INVOCATION, OP_DEMOTE_TO_HELPER, 5364, 5365}
+_OPS_FROM_1 = {OP_CONTROL_BARRIER, OP_MEMORY_BARRIER, 228, OP_EMIT_STREAM_VERTEX, 221, 5294, 5295}   # no result, every operand an id: barriers, OpAtomicStore, stream and mesh emits
+_OPS_FROM_3 = ({OP_FUNCTION_CALL, OP_IMAGE_TEXEL_POINTER, OP_ACCESS_CHAIN, OP_IN_BOUNDS_ACCESS_CHAIN, OP_PTR_ACCESS_CHAIN, 70, 77, OP_VECTOR_INSERT_DYNAMIC, OP_COMPOSITE_CONSTRUCT,
+                OP_COPY_OBJECT, 84, 86, OP_CONVERT_U_TO_PTR, OP_BITCAST, 227, OP_PHI, 365, 366} | set(range(100, 108)) | set(range(109, 118)) | set(range(126, 153))
+               | set(range(154, 158)) | set(range(164, 192)) | set(range(194, 206)) | set(range(207, 216)) | set(range(229, 243)) | set(range(333, 342)) | set(range(343, 349)))
+_OPS_IMAGE_MASK = {87: 5, 88: 5, 91: 5, 92: 5, 95: 5, 98: 5, 89: 6, 90: 6, 93: 6, 94: 6, 96: 6, 97: 6, 99: 4}   # image sample / fetch / gather / read / write: the image operands mask
+_OPS_GROUP_LITERAL = {342} | set(range(349, 365))   # OpGroupNonUniformBallotBitCount and the arithmetic group operations: word 4 is the GroupOperation literal
+
+
+def value_operands(x):
+    """The positions in a function-body instruction of the operands that are ids of values or pointers (types, results, labels and literals left out), so an id is
+    replaced only where it is an id: a literal (an image operands mask, a component index, an alignment) may equal one. None for an opcode this table does not know;
+    the caller then leaves the function as it is"""
+    op, n = x[0] & 0xffff, len(x)
+    if op in _OPS_FROM_3: return range(3, n)
+    if op == OP_LOAD: return (3,)
+    if op in (OP_STORE, 63): return (1, 2)   # (63: OpCopyMemory; memory operands follow)
+    if op in _OPS_NONE: return ()
+    if op in (OP_BRANCH_CONDITIONAL, OP_SWITCH, OP_RETURN_VALUE): return (1,)
+    if op == OP_EXT_INST: return range(5, n)
+    if op in (OP_COMPOSITE_EXTRACT, 68): return (3,)   # (68: OpArrayLength)
+    if op in (OP_COMPOSITE_INSERT, OP_VECTOR_SHUFFLE): return (3, 4)
+    if op in _OPS_FROM_1: return range(1, n)
+    if op in _OPS_IMAGE_MASK: return [p for p in range(1 if op == OP_IMAGE_WRITE else 3, n) if p != _OPS_IMAGE_MASK[op]]
+    if op in _OPS_GROUP_LITERAL: return [p for p in range(3, n) if p != 4]
+    return None
+
+
+def raw_helpers(m):
+    """The GlobalToStorage raw helpers of a module: its non-entry functions that make a physical pointer (OpConvertUToPtr) → [function id]"""
+    if CAP_PHYSICAL_STORAGE_BUFFER not in m.caps: return []
+    ent, out, cur = (m.entry_function() if m.entry else None), [], None
+    for x in m.ins:
+        op = x[0] & 0xffff
+        if op == OP_FUNCTION: cur = x[2]
+        elif op == OP_CONVERT_U_TO_PTR and cur != ent and cur not in out: out.append(cur)
+    return out
+
+
+def _dominance(blks, preds):
+    """A test dominates(a, b) for a function's blocks (blks in order, the first the entry; preds {block: its predecessors}) that answers as the maximal fixed point of
+    dom(b) = {b} | the intersection of dom(p) over b's predecessors, with dom(entry) = {entry} and dom(b) = {b} for a block without predecessors: the dominator tree
+    (Cooper, Harvey and Kennedy's iteration) of the blocks reachable from those roots, and every block dominating one that no root reaches (a cycle entered only from
+    itself). Memory O(blocks). Banana Native's (eden/v0.3.11 vk_android_spv.py _dominance)"""
+    roots = [blks[0]] + [b for b in blks[1:] if not preds[b]]
+    succs = {b: [] for b in blks}
+    for b in blks[1:]:
+        for p in preds[b]: succs[p].append(b)
+    post, seen = [], set(roots)
+    for r in roots:   # postorder, iteratively (a module has tens of thousands of blocks)
+        stack = [(r, iter(succs[r]))]
+        while stack:
+            b, it = stack[-1]
+            for s in it:
+                if s not in seen: seen.add(s); stack.append((s, iter(succs[s]))); break
+            else: post.append(b); stack.pop()
+    num = {b: i for i, b in enumerate(post)}   # postorder number; the virtual root above every root is len(post)
+    top, rootset = len(post), set(roots)
+    order = [b for b in reversed(post) if b not in rootset]
+    num_idom = {top: top}
+    for r in roots: num_idom[num[r]] = top
+    def meet(a, b):
+        while a != b:
+            while a < b: a = num_idom[a]
+            while b < a: b = num_idom[b]
+        return a
+    chg = True
+    while chg:
+        chg = False
+        for b in order:
+            nb = num[b]; new = None
+            for p in preds[b]:
+                np_ = num.get(p)
+                if np_ is None or np_ not in num_idom: continue   # a predecessor no root reaches, or not reached yet
+                new = np_ if new is None else meet(np_, new)
+            if new is not None and num_idom.get(nb) != new: num_idom[nb] = new; chg = True
+    kids = collections.defaultdict(list)
+    for n, d in num_idom.items():
+        if n != top: kids[d].append(n)
+    pre, out_, t = {}, {}, 0
+    stack = [(top, False)]
+    while stack:   # entry and exit times in the dominator tree
+        n, done = stack.pop()
+        if done: out_[n] = t; t += 1; continue
+        pre[n] = t; t += 1; stack.append((n, True)); stack.extend((k, False) for k in kids[n])
+    def dominates(a, b):
+        nb = num.get(b)
+        if nb is None: return True   # no root reaches b: every block is in its set
+        na = num.get(a)
+        if na is None: return False
+        return pre[na] <= pre[nb] and out_[nb] <= out_[na]
+    return dominates
+
+
+def _promote_body(m, body):
+    """One function's instructions with its single-store Function variables replaced by the stored values (promote_locals) → (the new instructions, the variables
+    removed); None when an instruction is not one value_operands knows (the function is then left as it is). body's instructions are changed in place, and only
+    when the function is promoted"""
+    blks = [x[1] for x in body if x[0] & 0xffff == OP_LABEL]
+    fvars = {x[2] for x in body if x[0] & 0xffff == OP_VARIABLE and len(x) == 4 and x[3] == SC_FUNCTION and x[2] not in m.decos}
+    bools = {x[2]: True for x in body if x[0] & 0xffff == OP_VARIABLE and x[2] in fvars and m.op(m.pointee(x[1])[1]) == OP_TYPE_BOOL}
+    if not fvars or not blks: return body, set()
+    preds = {b: set() for b in blks}
+    bad, stores, loads, blk = set(), {}, {}, None
+    for idx, x in enumerate(body):
+        op = x[0] & 0xffff
+        if op == OP_LABEL: blk = x[1]; continue
+        if op == OP_BRANCH: preds[x[1]].add(blk); continue
+        if op == OP_BRANCH_CONDITIONAL: preds[x[2]].add(blk); preds[x[3]].add(blk)
+        elif op == OP_SWITCH:
+            preds[x[2]].add(blk)
+            for t in x[4::2]: preds[t].add(blk)
+        elif op == OP_STORE and len(x) == 3 and x[1] in fvars and x[2] not in fvars:
+            if x[1] in stores: bad.add(x[1])
+            else: stores[x[1]] = (blk, idx, x[2])
+            continue
+        elif op == OP_LOAD and len(x) == 4 and x[3] in fvars:
+            if x[2] in m.decos: bad.add(x[3])   # (a decorated load keeps its instruction)
+            loads.setdefault(x[3], []).append((blk, idx, x[2]))
+            continue
+        pos = value_operands(x)
+        if pos is None: return None
+        for p in pos:
+            if x[p] in fvars: bad.add(x[p])   # any other use (an access chain, a call's argument, a load or store with memory operands): the variable stays
+    dominates = _dominance(blks, preds)
+    good, remap = set(), {}
+    for v in fvars - bad:
+        ls = loads.get(v, [])
+        if v not in stores:
+            if not ls: good.add(v)   # never read or written
+            continue
+        sblk, sidx, val = stores[v]
+        # A bool is promoted only when it is read in its store's own block. Qualcomm's 891.14 refused every compute pipeline that kept many bool values alive across
+        # blocks (VK_ERROR_UNKNOWN: Ocarina of Time's d731a68214175cbc and 83df46a0b1b379b4 lost their dispatches from DMSH_VK_CHAIN 96979a7c89ff on; found
+        # 2026-11-12 by promoting one class of variable at a time on the phone: ints, floats and same-block bools compile, bools read in other blocks do not). A bool
+        # left in its variable costs a load where it is read, as before these passes
+        if bools.get(v) and any(lblk != sblk for lblk, _, _ in ls): continue
+        if all(dominates(sblk, lblk) and (lblk != sblk or lidx > sidx) for lblk, lidx, _ in ls):
+            good.add(v)
+            for _, _, lres in ls: remap[lres] = val
+    if not good: return body, set()
+    for k in list(remap):
+        v = remap[k]
+        while v in remap: v = remap[v]
+        remap[k] = v
+    out = []
+    for x in body:
+        op = x[0] & 0xffff
+        if op == OP_VARIABLE and x[2] in good: continue
+        if op == OP_STORE and len(x) == 3 and x[1] in good: continue
+        if op == OP_LOAD and len(x) == 4 and x[3] in good: continue
+        if remap:
+            for p in value_operands(x):
+                if x[p] in remap: x[p] = remap[x[p]]
+        out.append(x)
+    return out, good
+
+
+def promote_locals(m):
+    """Function variables stored once (or never used), whose store dominates every load of them, replaced by the stored value: the translator keeps every
+    intermediate in a Function variable (a raw load helper: 164 variables, 164 stores and 230 loads of its 893 instructions), which hides the helper's values from
+    the passes below and leaves the driver thousands of variables to clone at each inlined call. Banana Native's promote_locals (eden/v0.3.11) without its helper
+    cuts (the log's probes and the inPool branch stay: this ABI has no sink word, and its log is the hash set), and with ids replaced only at id operands
+    (value_operands). A variable with another use (an access chain, a call's argument, memory operands) or a decoration stays; so does one read on a path its
+    store is not on. → (variables removed, functions left as they were for an instruction value_operands does not know)"""
+    m.index()
+    gone, skipped = set(), 0
+    for f in [x[2] for x in m.ins if x[0] & 0xffff == OP_FUNCTION]:
+        a, e = m.function_range(f)
+        r = _promote_body(m, m.ins[a:e + 1])
+        if r is None: skipped += 1; continue
+        if r[1]: m.ins[a:e + 1] = r[0]; gone |= r[1]
+    if gone: m.ins = [y for y in m.ins if not (y[0] & 0xffff in (OP_NAME, OP_DECORATE) and y[1] in gone)]
+    m.index()
+    return len(gone), skipped
+
+
+def value_params(m, f):
+    """Function f's Function-pointer parameters that it only loads, passed by value (the translator passes every helper argument as a pointer to a temporary of the
+    caller's): each call loads the temporary before the call, f reads the parameter itself. The same value: f cannot write the caller's temporary but through a
+    pointer parameter, and f is rewritten only when every pointer argument of every call of it is a Function variable of its own (no parameter names another's
+    variable). → the number of parameters changed (0: f is left as it is)"""
+    m.index()
+    a, e = m.function_range(f)
+    body = m.ins[a:e + 1]
+    params, k = [], 1
+    while body[k][0] & 0xffff == OP_FUNCTION_PARAMETER: params.append(body[k]); k += 1
+    is_ptr = [m.op(p[1]) == OP_TYPE_POINTER for p in params]
+    cand = {p[2] for p, ptr in zip(params, is_ptr) if ptr and m.types[p[1]][2] == SC_FUNCTION}
+    for x in body[k:]:
+        if not cand: return 0
+        if x[0] & 0xffff == OP_LOAD and len(x) == 4 and x[3] in cand:
+            if x[2] in m.decos: cand.discard(x[3])
+            continue
+        pos = value_operands(x)
+        if pos is None: return 0
+        for p in pos: cand.discard(x[p])
+    if not cand: return 0
+    for x in m.ins:
+        if x[0] & 0xffff == OP_FUNCTION_CALL and x[3] == f:
+            args = [x[4 + i] for i, ptr in enumerate(is_ptr) if ptr]
+            if len(x) != 4 + len(params) or len(set(args)) != len(args) or any(m.vars.get(v, (0, None))[1] != SC_FUNCTION for v in args): return 0
+    by_value = {i: m.types[p[1]][3] for i, p in enumerate(params) if p[2] in cand}
+    remap, out = {}, []
+    for x in body:
+        op = x[0] & 0xffff
+        if op == OP_FUNCTION_PARAMETER:
+            if x[2] in cand: x[1] = m.types[x[1]][3]
+        elif op == OP_LOAD and len(x) == 4 and x[3] in cand: remap[x[2]] = x[3]; continue
+        elif remap:
+            for p in value_operands(x):
+                if x[p] in remap: x[p] = remap[x[p]]
+        out.append(x)
+    m.ins[a:e + 1] = out
+    out[0][4] = m.add_type(OP_TYPE_FUNCTION_, out[0][1], *[x[1] for x in out[1:1 + len(params)]])   # (declared before the functions: positions move)
+    new = []
+    for x in m.ins:
+        if x[0] & 0xffff == OP_FUNCTION_CALL and x[3] == f:
+            for i, vty in by_value.items():
+                r = m.new_id(); new.append([4 << 16 | OP_LOAD, vty, r, x[4 + i]]); x[4 + i] = r
+        new.append(x)
+    m.ins = [y for y in new if not (y[0] & 0xffff in (OP_NAME, OP_DECORATE) and y[1] in remap)]
+    m.index()
+    return len(by_value)
+
+
+_SEARCH_OPS = {OP_IADD, OP_IMUL, OP_ACCESS_CHAIN, OP_LOAD, OP_BITCAST, OP_COPY_OBJECT, OP_ULESS_THAN, OP_ULESS_THAN_EQUAL, OP_IEQUAL, OP_LOGICAL_AND, OP_LOGICAL_OR,
+               OP_BITWISE_AND, OP_BITWISE_OR, OP_SELECT}   # what a step of the search is made of: no write, no call, no branch
+
+
+def loop_pool_search(m, f):
+    """The pool table search of raw helper f (after value_params and promote_locals: n steps in one block, step k taking entry index + 2^(n-k) when its start is at
+    or below the address, each OpSelect's false operand the select before it and the first one's the constant 0) made one loop of n iterations with LoopControl
+    DontUnroll: one step's instructions, the index and the step two OpPhi of the loop's header (no variable: the driver inlines the helper at every call and would
+    clone it there). The n unrolled steps of two table reads each were most of what the driver compiled: a mesh shader of Ocarina of Time calls an 893-instruction
+    helper 506 times.
+    Done only when every step is the second step's instructions with its own results, its index before and its constant in their places (compared operand by
+    operand; the first step with the constant 0 as its index before), the steps follow each other, hold nothing but arithmetic, comparisons and reads through a
+    pointer the step made, and nothing outside them uses a step's value but the last index. The loop then runs the same instructions on the same values in the same
+    order: iteration k has the index of step k - 1 and the step first >> (k - 1). → n (0: not this shape; f is left as it is)"""
+    a, e = m.function_range(f)
+    body = m.ins[a:e + 1]
+    at = {x[2]: k for k, x in enumerate(body) if len(x) > 2 and (x[0] & 0xffff) not in NO_RESULT_OPS and x[0] & 0xffff != OP_LABEL}
+    def cint(i):
+        c = m.consts.get(i)
+        return c[1][0] if c and len(c[1]) == 1 and m.int_type(c[0]) else None
+    def step_of(s, prev):   # (index of its IAdd, the step) when s = Select(c, prev + step, prev)
+        if s[0] & 0xffff != OP_SELECT or len(s) != 6 or s[5] != prev or s[4] not in at: return None
+        t = body[at[s[4]]]
+        if t[0] & 0xffff != OP_IADD or t[3] != prev or cint(t[4]) is None: return None
+        return at[s[4]], cint(t[4])
+    chain = None
+    for k, s in enumerate(body):
+        if s[0] & 0xffff != OP_SELECT or len(s) != 6 or cint(s[5]) != 0: continue
+        st = step_of(s, s[5])
+        if st is None: continue
+        ch = [(st[0], k, st[1])]
+        while True:
+            nxt = next((j for j in range(ch[-1][1] + 1, len(body)) if body[j][0] & 0xffff == OP_SELECT and len(body[j]) == 6 and body[j][5] == body[ch[-1][1]][2]), None)
+            st = step_of(body[nxt], body[ch[-1][1]][2]) if nxt is not None else None
+            if st is None: break
+            ch.append((st[0], nxt, st[1]))
+        if len(ch) >= 2: chain = ch; break
+    if chain is None: return 0
+    n, first = len(chain), chain[0][2]
+    if first != 1 << (n - 1) or [c[2] for c in chain] != [first >> k for k in range(n)]: return 0
+    if any(chain[k + 1][0] != chain[k][1] + 1 for k in range(n - 1)): return 0   # the steps follow each other
+    lo_k, hi_k = chain[0][0], chain[-1][1]
+    steps = [body[i:j + 1] for i, j, _ in chain]
+    tpl = steps[1]
+    ity = tpl[-1][1]
+    if any(len(s) != len(tpl) for s in steps) or (m.int_type(ity) or (0,))[0] != 32 or tpl[0][1] != ity: return 0
+    all_defs, tdefs = {x[2] for s in steps for x in s}, {x[2] for x in tpl}
+    last = body[hi_k][2]
+    prev = [body[chain[0][1]][5]] + [body[c[1]][2] for c in chain[:-1]]   # each step's index before it: the constant 0, then the select before
+    cid = [body[c[0]][4] for c in chain]                                  # each step's constant
+    if any(m.consts[c][0] != ity for c in cid) or m.consts[prev[0]][0] != ity: return 0
+    chains = set()
+    for x in tpl:
+        op = x[0] & 0xffff
+        if op not in _SEARCH_OPS: return 0
+        if op == OP_ACCESS_CHAIN: chains.add(x[2])
+        if op == OP_LOAD and (len(x) != 4 or x[3] not in chains): return 0   # a read through a pointer this step made
+        if any(v in all_defs and v not in tdefs and v != prev[1] for v in x[3:]): return 0   # the step reads only its own values and its index before
+    for j, s in enumerate(steps):
+        same = dict(zip((x[2] for x in tpl), (y[2] for y in s)))   # the second step's results → this step's
+        for i, (x, y) in enumerate(zip(tpl, s)):
+            if x[0] != y[0] or x[1] != y[1]: return 0
+            for p in range(3, len(x)):
+                want = cid[j] if (i, p) == (0, 4) else same[x[p]] if x[p] in same else prev[j] if x[p] == prev[1] else x[p]
+                if y[p] != want: return 0
+    for k, x in enumerate(body):
+        if lo_k <= k <= hi_k: continue
+        pos = value_operands(x)
+        if pos is None or any(x[p] in all_defs and x[p] != last for p in pos): return 0   # nothing else reads a step's value but the last index
+    bty = m.add_type(OP_TYPE_BOOL)   # declarations first (they move the function)
+    c0, c1, cfirst = m.add_const(ity, 0), m.add_const(ity, 1), m.add_const(ity, first)
+    idx, st, stn, more, lbl_h, lbl_b, lbl_c, lbl_m = (m.new_id() for _ in range(8))
+    pre = next(body[j][1] for j in range(lo_k, -1, -1) if body[j][0] & 0xffff == OP_LABEL)
+    step = [list(x) for x in tpl]
+    for i, x in enumerate(step):
+        for p in range(3, len(x)):
+            if (i, p) == (0, 4): x[p] = st
+            elif x[p] == prev[1]: x[p] = idx
+    step[-1][2] = last
+    loop = [[2 << 16 | OP_BRANCH, lbl_h],
+            [2 << 16 | OP_LABEL, lbl_h], [7 << 16 | OP_PHI, ity, idx, c0, pre, last, lbl_c], [7 << 16 | OP_PHI, ity, st, cfirst, pre, stn, lbl_c],
+            [4 << 16 | OP_LOOP_MERGE, lbl_m, lbl_c, LOOP_DONT_UNROLL], [2 << 16 | OP_BRANCH, lbl_b],
+            [2 << 16 | OP_LABEL, lbl_b], *step, [5 << 16 | OP_SHR_LOGICAL, ity, stn, st, c1], [5 << 16 | OP_INOT_EQUAL, bty, more, stn, c0], [2 << 16 | OP_BRANCH, lbl_c],
+            [2 << 16 | OP_LABEL, lbl_c], [4 << 16 | OP_BRANCH_CONDITIONAL, more, lbl_h, lbl_m],
+            [2 << 16 | OP_LABEL, lbl_m]]
+    a, e = m.function_range(f)
+    body = m.ins[a:e + 1]
+    for x in body:   # the block's end is now in the loop's merge block
+        if x[0] & 0xffff == OP_PHI: x[4::2] = [lbl_m if p == pre else p for p in x[4::2]]
+    body[lo_k:hi_k + 1] = loop
+    m.ins[a:e + 1] = body
+    gone = all_defs - {x[2] for x in step}
+    m.ins = [y for y in m.ins if not (y[0] & 0xffff in (OP_NAME, OP_DECORATE) and y[1] in gone)]
+    m.index()
+    return n
+
+
+def _raw_load_helper(m, f):
+    """Raw helper f's facts when it is the translator's raw load of a 32-bit word (GlobalToStorage.cs GenerateRawAccess, after value_params and promote_locals), read
+    by what it computes and not by its looks: every value of the function is numbered by its operation and its operands' numbers (bit casts and copies keep the
+    number: they keep the bits), and the branch condition, the physical pointer and the returned values must have the numbers of this reference, built the same way:
+        index = 0; for step = 2^(GMEM_MAP_LOG2-1) .. 1: c = index + step; index = start(c) <= address ? c : index      (start(c): words 8c, 8c + 1 of the table)
+        in a pool = address < end(index)                                                                                 (words 8 index + 2, + 3)
+        in a pool: return the word at the physical address  address + delta(index)  (words + 4, + 5; the carry into the high word);  else: return 0
+    with the 64-bit comparisons and the carry written as the translator writes them. So a function that passes reads exactly what cache_raw_loads' function reads.
+    Three blocks, nothing but arithmetic, comparisons, table reads and the one access. → {ret, lo, hi (the types), table, tptr, ity, word, pptr, mem}, else None"""
+    a, e = m.function_range(f)
+    body = m.ins[a:e + 1]
+    if len(body) < 8 or body[1][0] & 0xffff != OP_FUNCTION_PARAMETER or body[2][0] & 0xffff != OP_FUNCTION_PARAMETER or body[3][0] & 0xffff != OP_LABEL: return None
+    w32 = lambda t: (m.int_type(t) or (0,))[0] == 32
+    bits32 = lambda t: w32(t) or (m.op(t) == OP_TYPE_FLOAT and m.types[t][2] == 32)
+    rty, plo, phi = body[0][1], body[1], body[2]
+    if not (w32(rty) and w32(plo[1]) and w32(phi[1])): return None
+    bty = m.find_type(OP_TYPE_BOOL)
+    memo = {}
+    def N(*k): return None if None in k else memo.setdefault(k, len(memo))
+    vn = {plo[2]: N('p', 0), phi[2]: N('p', 1)}
+    def V(i):
+        if i in vn: return vn[i]
+        c = m.consts.get(i)
+        return N('c', c[1][0]) if c and len(c[1]) == 1 and w32(c[0]) else None
+    labels, rets, ptrs, phys = [], [], {}, {}
+    table = tptr = ity = cu = load = merge = branch = None
+    last = OP_RETURN_VALUE   # (as after a block: a label comes first)
+    for x in body[3:-1]:
+        op = x[0] & 0xffff
+        if (last in (OP_BRANCH_CONDITIONAL, OP_RETURN_VALUE)) != (op == OP_LABEL): return None   # a block ends with its branch or return, and nothing follows them
+        if (last == OP_SELECTION_MERGE) != (op == OP_BRANCH_CONDITIONAL): return None
+        last = op
+        if op == OP_LABEL: labels.append(x[1])
+        elif op in (OP_IADD, OP_IMUL) and w32(x[1]): vn[x[2]] = N(op, V(x[3]), V(x[4]))
+        elif op in (OP_ULESS_THAN, OP_ULESS_THAN_EQUAL, OP_IEQUAL, OP_LOGICAL_AND, OP_LOGICAL_OR) and x[1] == bty: vn[x[2]] = N(op, V(x[3]), V(x[4]))
+        elif op == OP_SELECT and w32(x[1]): vn[x[2]] = N(op, V(x[3]), V(x[4]), V(x[5]))
+        elif op in (OP_BITCAST, OP_COPY_OBJECT) and bits32(x[1]): vn[x[2]] = V(x[3])
+        elif op == OP_BITCAST and m.int_type(x[1]) == (64, 0): vn[x[2]] = N('u64', V(x[3]))
+        elif op == OP_COMPOSITE_CONSTRUCT and len(x) == 5 and m.op(x[1]) == OP_TYPE_VECTOR and m.types[x[1]][3] == 2 and w32(m.types[x[1]][2]): vn[x[2]] = N('v2', V(x[3]), V(x[4]))
+        elif op == OP_ACCESS_CHAIN:
+            if len(x) != 6 or m.vars.get(x[3], (0, None))[1] not in (SC_UNIFORM, SC_STORAGE_BUFFER) or m.consts.get(x[4], (0, [1]))[1] != [0] or table not in (None, x[3]): return None
+            if tptr not in (None, x[1]) or not w32(m.pointee(x[1])[1]): return None
+            table, tptr, ity = x[3], x[1], m.consts[x[4]][0]
+            ptrs[x[2]] = V(x[5])
+        elif op == OP_LOAD and len(x) == 4 and x[3] in ptrs: vn[x[2]] = N('tw', ptrs[x[3]])
+        elif op == OP_LOAD and x[3] in phys and load is None: load = x; vn[x[2]] = N('mem', phys[x[3]])
+        elif op == OP_CONVERT_U_TO_PTR and cu is None:
+            sc, pt = m.pointee(x[1])
+            if sc != SC_PHYSICAL_STORAGE_BUFFER or not w32(pt): return None
+            cu = x; phys[x[2]] = N('ptr', V(x[3]))
+        elif op == OP_SELECTION_MERGE and merge is None and len(x) == 3: merge = x
+        elif op == OP_BRANCH_CONDITIONAL and branch is None and len(x) == 4: branch = x
+        elif op == OP_RETURN_VALUE: rets.append((labels[-1], x[1]))
+        else: return None
+    if len(labels) != 3 or None in (table, cu, load, merge, branch) or last != OP_RETURN_VALUE: return None
+    if branch[2:] != labels[1:] or merge[1] != labels[2] or [r[0] for r in rets] != labels[1:]: return None
+    lo, hi = N('p', 0), N('p', 1)
+    C = lambda v: N('c', v)
+    def tw(entry, w): return N('tw', N(OP_IADD, entry, C(w)))
+    def below(ah, al, bh, bl, op): return N(OP_LOGICAL_OR, N(OP_ULESS_THAN, ah, bh), N(OP_LOGICAL_AND, N(OP_IEQUAL, ah, bh), N(op, al, bl)))   # (ah:al) < (bh:bl), or <=
+    index = C(0)
+    for s in range(GMEM_MAP_LOG2 - 1, -1, -1):
+        cand = N(OP_IADD, index, C(1 << s)); entry = N(OP_IMUL, cand, C(GMEM_MAP_ENTRY_WORDS))
+        index = N(OP_SELECT, below(tw(entry, 1), tw(entry, 0), hi, lo, OP_ULESS_THAN_EQUAL), cand, index)
+    found = N(OP_IMUL, index, C(GMEM_MAP_ENTRY_WORDS))
+    in_pool = below(hi, lo, tw(found, 3), tw(found, 2), OP_ULESS_THAN)
+    host_lo = N(OP_IADD, lo, tw(found, 4))
+    host_hi = N(OP_IADD, N(OP_IADD, hi, tw(found, 5)), N(OP_SELECT, N(OP_ULESS_THAN, host_lo, lo), C(1), C(0)))
+    word = N('mem', N('ptr', N('u64', N('v2', host_lo, host_hi))))
+    if V(branch[1]) != in_pool or vn.get(load[2]) != word or V(rets[0][1]) != word or V(rets[1][1]) != C(0): return None
+    return {'ret': rty, 'lo': plo[1], 'hi': phi[1], 'table': table, 'tptr': tptr, 'ity': ity, 'word': m.pointee(cu[1])[1], 'pptr': cu[1], 'mem': load[4:]}
+
+
+# instructions that may not lie between the calls of one run: they write memory, order memory, end the invocation or call something else
+_RUN_BREAKERS = {63, 64, OP_IMAGE_WRITE, 218, 219, 220, 221, OP_CONTROL_BARRIER, OP_MEMORY_BARRIER, OP_KILL, 4416, 4448, 5294, 5295, 5364, 5365, 5380} | set(range(227, 243))
+
+
+def _store_class(m, defs, p):   # the storage class of the variable a pointer is into (through access chains), or None
+    while p in defs and defs[p][0] & 0xffff in (OP_ACCESS_CHAIN, OP_IN_BOUNDS_ACCESS_CHAIN, OP_COPY_OBJECT): p = defs[p][3]
+    return m.vars[p][1] if p in m.vars else None
+
+
+class _Numbers:
+    """Value numbers of one function's values for cache_raw_loads' addresses, by BlockValues' rules (a load of a Function variable is the value last stored to it in
+    the block, or its (variable, version, block), a version every store, copy and call taking the variable moves; a bit cast or copy is its operand; an OpIAdd is
+    its operands' numbers), each number one integer: an id, or a negative number for a load or a sum. Two values with one number hold the same bits; comparing two
+    numbers is one comparison whatever the expression's depth (BlockValues' numbers are nested tuples). see(x) for every instruction of the function, in order"""
+    def __init__(self): self.tab, self.adds, self.vn, self.fvars, self.fbase, self.ver, self.stored, self.blk = {}, {}, {}, set(), {}, {}, {}, 0
+    def __call__(self, i): return self.vn.get(i, i)
+    def num(self, *k): return self.tab.setdefault(k, -1 - len(self.tab))
+    def bump(self, p):
+        b = self.fbase.get(p, p); self.ver[b] = self.ver.get(b, 0) + 1; self.stored.pop(b, None)
+    def see(self, m, x):
+        op = x[0] & 0xffff
+        if op == OP_LABEL: self.stored = {}; self.blk += 1
+        elif (op == OP_VARIABLE and x[3] == SC_FUNCTION) or (op == OP_FUNCTION_PARAMETER and m.op(x[1]) == OP_TYPE_POINTER): self.fvars.add(x[2])
+        elif op in (OP_ACCESS_CHAIN, OP_IN_BOUNDS_ACCESS_CHAIN) and (x[3] in self.fvars or x[3] in self.fbase): self.fbase[x[2]] = self.fbase.get(x[3], x[3])
+        elif op in (OP_STORE, 63, 64) and (x[1] in self.fvars or x[1] in self.fbase):
+            self.bump(x[1])
+            if op == OP_STORE and x[1] in self.fvars: self.stored[x[1]] = self(x[2])
+        elif op == OP_LOAD and x[3] in self.fvars: self.vn[x[2]] = self.stored[x[3]] if x[3] in self.stored else self.num('ld', x[3], self.ver.get(x[3], 0), self.blk)
+        elif op in (OP_BITCAST, OP_COPY_OBJECT): self.vn[x[2]] = self(x[3])
+        elif op == OP_IADD:
+            a, b = self(x[3]), self(x[4])
+            self.vn[x[2]] = v = self.num(OP_IADD, a, b); self.adds[v] = (a, b)
+        elif op == OP_FUNCTION_CALL:
+            for p in x[4:]:
+                if p in self.fvars or p in self.fbase: self.bump(p)
+
+
+def cache_raw_loads(m, helpers):
+    """The calls of the raw load helpers (helpers: {function: _raw_load_helper's facts}) replaced by calls of one generated function per helper and run length
+    (_cached_load_fn), which reads through the pool table entry of the last access: its start, the end of what it alone answers for and its delta, kept in six
+    Function variables of the calling function and passed by pointer. A run is up to GMEM_RUN_WORDS consecutive calls of one helper in one block at one 64-bit
+    address + c, c + 4, ... (the translator splits a 128-bit load into four calls and computes each high word with its carry), with nothing between them that writes
+    or orders memory, ends the invocation or calls anything; its words are read by one call at the first one's place. A run inside the kept entry reads no table
+    word and takes one branch; any other looks each word up as the helper does and keeps the entry it finds. The helper's 12-step search ran at every call:
+    Ocarina of Time's mesh shader 17c8ab6419068d4b has 506 of them, each two table reads a step.
+    The cache is Function variables, not Private ones (Banana Native's are Private): Qualcomm's 891.x drivers mixed Private temporaries between invocations in the
+    mesh fallback (vk_android_mesh.py _localize_generated). It starts empty in each calling function (start ~0, end 0: no address is in it), so a function called
+    again looks its first address up again. What is kept is a table entry, never a word read: a store between two loads of one address is read back as before.
+    → (calls replaced, {run length: runs}); (0, {}) when the module has fewer than GMEM_CACHE_MIN_CALLS such calls, and it is then unchanged"""
+    if not helpers: return 0, {}
+    m.index()
+    fns = [x[2] for x in m.ins if x[0] & 0xffff == OP_FUNCTION]
+    c32 = lambda i: m.consts[i][1][0] if i > 0 and i in m.consts and len(m.consts[i][1]) == 1 and (m.int_type(m.consts[i][0]) or (0,))[0] == 32 else None
+    runs = []   # (function, [(index in its body, the call, its address)])
+    for f in fns:
+        if f in helpers: continue
+        a, e = m.function_range(f)
+        body = m.ins[a:e + 1]
+        if not any(x[0] & 0xffff == OP_FUNCTION_CALL and x[3] in helpers for x in body): continue
+        defs = {x[2]: x for x in body if len(x) > 2 and (x[0] & 0xffff) not in NO_RESULT_OPS and x[0] & 0xffff != OP_LABEL}
+        V = _Numbers()
+        def addr(lo, hi):
+            """(B, H, c): the call's address is (H:B) + c, c a 32-bit constant, when its low word is B + c and its high word H + (B + c < B ? 1 : 0), as the
+            translator writes an address with an offset; else the two words as they are and c = 0. B and H are value numbers (equal numbers hold equal bits)"""
+            vl, vh = V(lo), V(hi)
+            sl, sh = V.adds.get(vl), V.adds.get(vh)
+            if sl and sh and (c32(sl[0]) is None) != (c32(sl[1]) is None):
+                b, c = (sl[1], c32(sl[0])) if c32(sl[0]) is not None else (sl[0], c32(sl[1]))
+                for h, s in ((sh[0], sh[1]), (sh[1], sh[0])):
+                    s = defs.get(s)
+                    if s is None or s[0] & 0xffff != OP_SELECT or c32(s[4]) != 1 or c32(s[5]) != 0: continue
+                    lt = defs.get(V(s[3]))
+                    if lt is not None and lt[0] & 0xffff == OP_ULESS_THAN and V(lt[3]) == vl and V(lt[4]) == b: return (b, h, c)
+            return (vl, vh, 0)
+        cur = []
+        for k, x in enumerate(body):
+            op = x[0] & 0xffff
+            if op == OP_FUNCTION_CALL and x[3] in helpers and len(x) == 6:
+                ad = addr(x[4], x[5])
+                if cur and x[3] == cur[-1][1][3] and ad[:2] == cur[-1][2][:2] and ad[2] == cur[-1][2][2] + 4 and len(cur) < GMEM_RUN_WORDS: cur.append((k, x, ad))
+                else:
+                    if cur: runs.append((f, cur))
+                    cur = [(k, x, ad)]
+            elif op == OP_LABEL or op in _RUN_BREAKERS or op == OP_FUNCTION_CALL or (op == OP_STORE and _store_class(m, defs, x[1]) != SC_FUNCTION):
+                if cur: runs.append((f, cur))
+                cur = []
+            V.see(m, x)
+        if cur: runs.append((f, cur))
+    if sum(len(c) for _, c in runs) < GMEM_CACHE_MIN_CALLS: return 0, {}
+    # declarations (they move the functions: positions are taken again below)
+    u32 = m.add_type(OP_TYPE_INT, 32, 0)
+    T = dict(bool=m.add_type(OP_TYPE_BOOL), u32=u32, v2=m.add_type(OP_TYPE_VECTOR, u32, 2), v4=m.add_type(OP_TYPE_VECTOR, u32, 4), u64=m.add_type(OP_TYPE_INT, 64, 0),
+             pfu=m.add_type(OP_TYPE_POINTER, SC_FUNCTION, u32), U={v: m.add_const(u32, v) for v in (0, 1, 4, 8, 12, 0xffffffff)}, z4=None)
+    U = T['U']
+    if any(len(c) > 1 for _, c in runs): T['z4'] = m.new_id(); m._insert_decl([3 << 16 | OP_CONSTANT_NULL, T['v4'], T['z4']])
+    gfns = {}
+    for f, h in helpers.items():
+        for n in sorted({len(c) for g, c in runs if c[0][1][3] == f}): gfns[f, n] = _cached_load_fn(m, h, n, T)
+    done, hist = 0, {}
+    for f in fns:
+        mine = [c for g, c in runs if g == f]
+        if not mine: continue
+        a, e = m.function_range(f)
+        body = m.ins[a:e + 1]
+        cache = [m.new_id() for _ in range(6)]   # start (low, high), kept end (low, high), delta (low, high)
+        rep = {}
+        for c in mine:
+            k0, x0, _ = c[0]; n = len(c); r = m.new_id()
+            new = [[12 << 16 | OP_FUNCTION_CALL, u32 if n == 1 else T['v4'], r, gfns[x0[3], n], x0[4], x0[5], *cache]]
+            for j, (_, x, _) in enumerate(c):
+                w = r
+                if n > 1: w = m.new_id(); new.append([5 << 16 | OP_COMPOSITE_EXTRACT, u32, w, r, j])
+                new.append([4 << 16 | (OP_COPY_OBJECT if x[1] == u32 else OP_BITCAST), x[1], x[2], w])
+            rep[k0] = new
+            for k, _, _ in c[1:]: rep[k] = []
+            done += n; hist[n] = hist.get(n, 0) + 1
+        out = []
+        for k, x in enumerate(body): out += rep.get(k, [x])
+        k = next(k for k, x in enumerate(out) if x[0] & 0xffff == OP_LABEL) + 1
+        out[k:k] = [[4 << 16 | OP_VARIABLE, T['pfu'], v, SC_FUNCTION] for v in cache]
+        while out[k][0] & 0xffff == OP_VARIABLE: k += 1
+        out[k:k] = [[3 << 16 | OP_STORE, v, U[0xffffffff] if i < 2 else U[0]] for i, v in enumerate(cache)]   # empty: start ~0, end 0
+        m.ins[a:e + 1] = out
+    called = {x[3] for x in m.ins if x[0] & 0xffff == OP_FUNCTION_CALL}
+    for f in helpers:   # a helper no call is left to
+        if f in called: continue
+        a, e = m.function_range(f)
+        gone = {x[1] if x[0] & 0xffff == OP_LABEL else x[2] for x in m.ins[a:e + 1] if (x[0] & 0xffff) not in NO_RESULT_OPS and len(x) > 2 or x[0] & 0xffff == OP_LABEL}
+        del m.ins[a:e + 1]
+        m.ins = [y for y in m.ins if not (y[0] & 0xffff in (OP_NAME, OP_DECORATE) and y[1] in gone)]
+    m.index()
+    return done, hist
+
+
+def _cached_load_fn(m, h, n, T):
+    """cache_raw_loads' function for runs of n words of the load helper with the facts h: (low, high of the first word's address, the six cache variables) → the
+    word's bits as a uint for n = 1, else a uvec4 of the n words (the rest 0). What it computes is, word for word, what the helper does (_raw_load_helper's reference):
+      hit: start <= address, address of the last word < kept end (and, for n > 1, first <= last: no wrap of the 64-bit address) → each word read at its address +
+           delta. The kept range is one the helper's search answers with this entry for every address in it: [start(i), min(end(i), start(i + 1))) of a table sorted
+           by start (dmsh_abi.h), so the search's result for such an address is i, the address is below end(i), and the helper reads the same physical word;
+      else, for each word: the helper's search as a loop (12 steps of two table reads, DontUnroll), in a pool = address < end(index); in a pool the entry is kept
+           (its end cut to the next entry's start; entry 4,095 has none) and the word read at address + delta; in no pool the word is 0 and nothing is read
+           (this ABI's table has no sink word to read instead, so the access stays under its branch, as in the helper)."""
+    ins = []
+    bty, u32, v2, v4, u64, pfu, z4, U = T['bool'], T['u32'], T['v2'], T['v4'], T['u64'], T['pfu'], T['z4'], T['U']
+    ity, tptr, table = h['ity'], h['tptr'], h['table']
+    tword = m.pointee(tptr)[1]
+    first_step, last_entry = 1 << (GMEM_MAP_LOG2 - 1), (1 << GMEM_MAP_LOG2) - 1
+    I = {v: m.add_const(ity, v) for v in (0, 1, 2, 3, 4, 5, GMEM_MAP_ENTRY_WORDS, first_step, last_entry)}
+    un = m.add_const(u32, n)
+    rty = u32 if n == 1 else v4
+    fty = m.add_type(OP_TYPE_FUNCTION_, rty, h['lo'], h['hi'], *[pfu] * 6)
+    def op(o, *w): ins.append([(len(w) + 1) << 16 | o, *w])
+    def val(o, ty, *w):
+        r = m.new_id(); ins.append([(len(w) + 3) << 16 | o, ty, r, *w]); return r
+    def cast(v, frm, to): return v if frm == to else val(OP_BITCAST, to, v)
+    def word(idx, w):   # table word w of entry idx (a value of the index type) → uint
+        p = val(OP_ACCESS_CHAIN, tptr, table, I[0], val(OP_IADD, ity, val(OP_IMUL, ity, idx, I[GMEM_MAP_ENTRY_WORDS]), I[w]))
+        return cast(val(OP_LOAD, tword, p), tword, u32)
+    def lt(ahi, alo, bhi, blo, eq=False):   # (ahi:alo) < (bhi:blo), or <=
+        return val(OP_LOGICAL_OR, bty, val(OP_ULESS_THAN, bty, ahi, bhi),
+                   val(OP_LOGICAL_AND, bty, val(OP_IEQUAL, bty, ahi, bhi), val(OP_ULESS_THAN_EQUAL if eq else OP_ULESS_THAN, bty, alo, blo)))
+    def add64(alo, ahi, blo, bhi):   # the helper's sum: the low words, then the high words and the carry (low sum < low word)
+        lo = val(OP_IADD, u32, alo, blo)
+        return lo, val(OP_IADD, u32, val(OP_IADD, u32, ahi, bhi), val(OP_SELECT, u32, val(OP_ULESS_THAN, bty, lo, alo), U[1], U[0]))
+    def access(alo, ahi):   # the word at a physical address
+        p = val(OP_CONVERT_U_TO_PTR, h['pptr'], val(OP_BITCAST, u64, val(OP_COMPOSITE_CONSTRUCT, v2, alo, ahi)))
+        return cast(val(OP_LOAD, h['word'], p, *h['mem']), h['word'], u32)
+    fid, plo, phi = m.new_id(), m.new_id(), m.new_id()
+    pc = [m.new_id() for _ in range(6)]
+    E, HOT, COLD, M, LH, LB, LC, LM, SH, SB, SC, SM, AT, AM = (m.new_id() for _ in range(14))
+    ins += [[5 << 16 | OP_FUNCTION, rty, fid, 0, fty], [3 << 16 | OP_FUNCTION_PARAMETER, h['lo'], plo], [3 << 16 | OP_FUNCTION_PARAMETER, h['hi'], phi]]
+    ins += [[3 << 16 | OP_FUNCTION_PARAMETER, pfu, p] for p in pc]
+    op(OP_LABEL, E)
+    lu, hu = cast(plo, h['lo'], u32), cast(phi, h['hi'], u32)
+    al, ah = [lu], [hu]
+    for k in range(1, n):
+        x, y = add64(lu, hu, U[4 * k], U[0]); al.append(x); ah.append(y)
+    c = [val(OP_LOAD, u32, p) for p in pc]
+    hit = val(OP_LOGICAL_AND, bty, lt(c[1], c[0], hu, lu, eq=True), lt(ah[-1], al[-1], c[3], c[2]))
+    if n > 1: hit = val(OP_LOGICAL_AND, bty, hit, lt(hu, lu, ah[-1], al[-1], eq=True))
+    op(OP_SELECTION_MERGE, M, 0); op(OP_BRANCH_CONDITIONAL, hit, HOT, COLD)
+    # every word in the kept entry
+    op(OP_LABEL, HOT)
+    hv = [access(*add64(al[k], ah[k], c[4], c[5])) for k in range(n)]
+    hr = hv[0] if n == 1 else val(OP_COMPOSITE_CONSTRUCT, v4, *hv, *[U[0]] * (4 - n))
+    op(OP_BRANCH, M)
+    # each word looked up
+    op(OP_LABEL, COLD)
+    k0, acc, k1, acc2, x0, s0, x1, s1 = (m.new_id() for _ in range(8))
+    if n == 1: x, y, into = lu, hu, COLD
+    else:
+        op(OP_BRANCH, LH)
+        op(OP_LABEL, LH)
+        ins.append([7 << 16 | OP_PHI, u32, k0, U[0], COLD, k1, LC]); ins.append([7 << 16 | OP_PHI, v4, acc, z4, COLD, acc2, LC])
+        op(OP_LOOP_MERGE, LM, LC, LOOP_DONT_UNROLL); op(OP_BRANCH, LB)
+        op(OP_LABEL, LB)
+        x, y = add64(lu, hu, val(OP_IMUL, u32, k0, U[4]), U[0]); into = LB
+    op(OP_BRANCH, SH)
+    op(OP_LABEL, SH)   # the search: index = 0; step = 2048 .. 1: candidate = index + step, taken when its start is at or below the address
+    ins.append([7 << 16 | OP_PHI, ity, x0, I[0], into, x1, SC]); ins.append([7 << 16 | OP_PHI, ity, s0, I[first_step], into, s1, SC])
+    op(OP_LOOP_MERGE, SM, SC, LOOP_DONT_UNROLL); op(OP_BRANCH, SB)
+    op(OP_LABEL, SB)
+    nx = val(OP_IADD, ity, x0, s0)
+    at_or_below = lt(word(nx, 1), word(nx, 0), y, x, eq=True)
+    ins.append([6 << 16 | OP_SELECT, ity, x1, at_or_below, nx, x0])
+    ins.append([5 << 16 | OP_SHR_LOGICAL, ity, s1, s0, I[1]])
+    more = val(OP_INOT_EQUAL, bty, s1, I[0])
+    op(OP_BRANCH, SC); op(OP_LABEL, SC); op(OP_BRANCH_CONDITIONAL, more, SH, SM)
+    op(OP_LABEL, SM)
+    end = [word(x1, 2), word(x1, 3)]
+    found = lt(y, x, end[1], end[0])   # in a pool: the address below the entry's end
+    op(OP_SELECTION_MERGE, AM, 0); op(OP_BRANCH_CONDITIONAL, found, AT, AM)
+    op(OP_LABEL, AT)
+    start, dl = [word(x1, 0), word(x1, 1)], [word(x1, 4), word(x1, 5)]
+    has_next = val(OP_ULESS_THAN, bty, x1, I[last_entry])
+    nxt = val(OP_SELECT, ity, has_next, val(OP_IADD, ity, x1, I[1]), x1)   # (the last entry reads its own start, which is not used)
+    ns = [val(OP_SELECT, u32, has_next, word(nxt, w), U[0xffffffff]) for w in (0, 1)]
+    cut = lt(ns[1], ns[0], end[1], end[0])   # the next entry starts below this one's end: this one answers only up to there
+    kept = [val(OP_SELECT, u32, cut, ns[w], end[w]) for w in (0, 1)]
+    for p, v in zip(pc, start + kept + dl): op(OP_STORE, p, v)
+    got = access(*add64(x, y, dl[0], dl[1]))
+    op(OP_BRANCH, AM)
+    op(OP_LABEL, AM)
+    g = val(OP_PHI, u32, got, AT, U[0], SM)
+    if n == 1:
+        op(OP_BRANCH, M); op(OP_LABEL, M)
+        op(OP_RETURN_VALUE, val(OP_PHI, rty, hr, HOT, g, AM))
+    else:
+        ins.append([6 << 16 | OP_VECTOR_INSERT_DYNAMIC, v4, acc2, acc, g, k0])
+        ins.append([5 << 16 | OP_IADD, u32, k1, k0, U[1]])
+        more2 = val(OP_ULESS_THAN, bty, k1, un)
+        op(OP_BRANCH, LC); op(OP_LABEL, LC); op(OP_BRANCH_CONDITIONAL, more2, LH, LM)
+        op(OP_LABEL, LM); op(OP_BRANCH, M)
+        op(OP_LABEL, M)
+        op(OP_RETURN_VALUE, val(OP_PHI, rty, hr, HOT, acc2, LM))
+    op(OP_FUNCTION_END)
+    m.ins += ins
+    return fid
+
+
+def raw_global_memory(m, tables=None):
+    """The raw global memory passes on a module that has a raw helper (raw_helpers), in the order they need: value_params on each helper, promote_locals on the
+    module (the helpers' steps and the callers' addresses become values), _raw_load_helper (which helpers are the 32-bit load; tables: the pool table variables the
+    reflection found, when given: the helper must read one of them), loop_pool_search on each helper, cache_raw_loads on the load helpers' calls.
+    → None for a module without a raw helper, which is not touched (its bytes stay as they were, so its library entry does); else the counts
+    {helpers, by_value, promoted, promote_skipped, load_helpers, loops, unlooped, cached, runs, left, untouched}. When no search became a loop and no call was
+    replaced (helpers of a shape these passes do not know) the module is left as it was and untouched is 1: promotion alone is not worth a changed module"""
+    hs = raw_helpers(m)
+    if not hs: return None
+    w = Module(m.data())
+    st = {'helpers': len(hs), 'by_value': sum(value_params(w, f) for f in hs)}
+    st['promoted'], st['promote_skipped'] = promote_locals(w)
+    shapes = {f: h for f in hs for h in [_raw_load_helper(w, f)] if h and (tables is None or h['table'] in tables)}
+    st['load_helpers'] = len(shapes)
+    st['loops'] = sum(1 for f in hs if loop_pool_search(w, f))
+    st['unlooped'] = len(hs) - st['loops']
+    st['cached'], runs = cache_raw_loads(w, shapes)
+    st['runs'] = {str(n): c for n, c in sorted(runs.items())}
+    st['left'] = sum(1 for x in w.ins if x[0] & 0xffff == OP_FUNCTION_CALL and x[3] in hs)
+    st['untouched'] = int(not st['loops'] and not st['cached'])
+    if not st['untouched']: m.header, m.ins = w.header, w.ins; m.index()
+    return st
+
+
+# ---------- Mesh plane stores deferred to one scatter (defer_mesh_plane_stores) ----------
+# A Switch 2 mesh program writes its outputs through the translator's plane stores (SpirvMeshEntry.cs mesh_plane_store: the plane word and its value → a chain of
+# guarded stores, one per plane, into the mesh outputs). Drivers inline every function call, so each call site carries the whole chain: Ocarina of Time's foliage
+# mesh shader 73dc0b90c4082e43 calls a 190-instruction store (292 once vk_android_mesh.py lowers it to compute) 130 times, and with its 118 raw load calls the
+# function Turnip's compiler built held ~80,000 instructions; Turnip V39 and V39-patched died compiling it on the Adreno 830 (2026-11-12, every run, the process's
+# memory maps exhausted). Here each call stores the word into a Workgroup copy of the planes and sets its bit in a written mask; after the body's barrier one loop
+# hands every written word to the original store, which is inlined once, and a barrier follows (the GL depth rewrite after it reads what the store keeps). A word is
+# written at most by the same invocations, in the same order, as before; a word no call wrote is not stored, as before. Done only with MESH_DEFER_MIN_CALLS calls or
+# more and when the copy keeps the module's workgroup memory within MESH_DEFER_MAX_BYTES: the native mesh limit is at least 28 KiB (maxMeshSharedMemorySize), the
+# compute fallback's is the device's maxComputeSharedMemorySize (32 KiB on the Adreno 7xx/8xx, at least 16 KiB anywhere), and the copy's bytes are added to the
+# program's shared memory in its facts, so a device with less refuses the fallback (vka_pso.c cs_obtain) instead of running it with less. The largest Ocarina of
+# Time mesh programs, 626fbf48041cb82b and 4c7d6be5a7717c8d (160 vertices, 234 and 216 calls), take 20.5 and 19.2 KiB with the copy
+MESH_DEFER_MIN_CALLS = 16
+MESH_DEFER_MAX_BYTES = 24576
+OP_UMOD, OP_ATOMIC_OR, OP_TYPE_VOID_ = 137, 241, 19
+EXEC_OUTPUT_VERTICES, EXEC_OUTPUT_PRIMITIVES, EXEC_LOCAL_SIZE = 26, 5270, 17
+BUILTIN_LOCAL_INVOCATION_INDEX, SCOPE_WORKGROUP = 29, 2
+
+
+def defer_mesh_plane_stores(m):
+    """The pass above on a MeshEXT module. → {'calls': deferred calls, 'words': plane words kept, 'bytes': workgroup bytes added}, or None when it does not apply
+    (the module is then unchanged)"""
+    if m.model != 'ms': return None
+    store = next((i for i, n in m.names.items() if n == 'mesh_plane_store'), None)
+    if store is None: return None
+    a, e = m.function_range(store)
+    body = m.ins[a:e + 1]
+    params = [x for x in body if x[0] & 0xffff == OP_FUNCTION_PARAMETER]
+    if len(params) != 2: return None
+    word = params[0][2]
+    if sum(1 for x in m.ins if x[0] & 0xffff == OP_FUNCTION_CALL and x[3] == store) < MESH_DEFER_MIN_CALLS: return None
+    def c32(i):
+        c = m.consts.get(i)
+        return c[1][0] if c and len(c[1]) == 1 and (m.int_type(c[0]) or (0,))[0] == 32 else None
+    # the plane words: the vertex chunks below the per-primitive base, then the primitive chunks (MeshShaderInfo.PlaneWords)
+    pb = next((c32(x[4]) for x in body if x[0] & 0xffff == OP_ULESS_THAN and x[3] == word and c32(x[4]) is not None), None)
+    vc = next((c32(x[4]) for x in body if x[0] & 0xffff == OP_UMOD and x[3] == word and c32(x[4]) is not None), None)
+    sub = next((x[2] for x in body if x[0] & 0xffff == OP_ISUB and x[3] == word and c32(x[4]) == pb), None)
+    pc = next((c32(x[4]) for x in body if sub is not None and x[0] & 0xffff == OP_UMOD and x[3] == sub and c32(x[4]) is not None), None)
+    mode = lambda k: next((x[1] for x in m.modes if x[0] == k), None)
+    maxv, maxp, local = mode(EXEC_OUTPUT_VERTICES), mode(EXEC_OUTPUT_PRIMITIVES), next((x[1:4] for x in m.modes if x[0] == EXEC_LOCAL_SIZE), None)
+    if not pb or not vc or not maxv or not maxp or not local or pb != (maxv + 31) // 32 * vc: return None
+    words = pb + ((maxp + 31) // 32 * pc if sub is not None and pc else 0)
+    nmask = (words + 31) // 32
+    have = 0
+    for v, (p, sc) in m.vars.items():
+        if sc != SC_WORKGROUP: continue
+        t, n = m.strip_arrays(m.pointee(p)[1])
+        if m.op(t) not in (OP_TYPE_INT, OP_TYPE_FLOAT) or m.types[t][2] != 32 or not n: return None
+        have += 4 * n
+    if have + 4 * (words + nmask) > MESH_DEFER_MAX_BYTES: return None
+    lid_var = next((v for v in m.interface() if m.vars.get(v, (0, 0))[1] == SC_INPUT and m.decos.get(v, {}).get(DEC_BUILTIN) == [BUILTIN_LOCAL_INVOCATION_INDEX]), None)
+    if lid_var is None: return None
+    main = m.entry_function()
+    def body_call(target):   # main's call of the function that calls target, between two barriers
+        ma, me = m.function_range(main)
+        for k in range(ma, me):
+            x = m.ins[k]
+            if x[0] & 0xffff != OP_FUNCTION_CALL: continue
+            fa, fe = m.function_range(x[3])
+            if any(m.ins[j][0] & 0xffff == OP_FUNCTION_CALL and m.ins[j][3] == target for j in range(fa, fe)): return k
+        return None
+    run = body_call(store)
+    if run is None or m.ins[run - 1][0] & 0xffff != OP_CONTROL_BARRIER or m.ins[run + 1][0] & 0xffff != OP_CONTROL_BARRIER: return None
+    barrier = list(m.ins[run + 1])
+    threads = local[0] * local[1] * local[2]
+    # declarations
+    void = m.find_type(OP_TYPE_VOID_)
+    u32 = m.add_type(OP_TYPE_INT, 32, 0); bty = m.add_type(OP_TYPE_BOOL)
+    fvoid = m.add_type(OP_TYPE_FUNCTION_, void)
+    pw = m.add_type(OP_TYPE_POINTER, SC_WORKGROUP, u32)
+    C = lambda v: m.add_const(u32, v)
+    k0, k1, kth, kw, kn, k31, k5, kscope = C(0), C(1), C(threads), C(words), C(nmask), C(31), C(5), C(SCOPE_WORKGROUP)
+    planes, mask = m.new_id(), m.new_id()
+    for v, n in ((planes, words), (mask, nmask)):
+        m._insert_decl([4 << 16 | OP_VARIABLE, m.add_type(OP_TYPE_POINTER, SC_WORKGROUP, m.add_type(OP_TYPE_ARRAY, u32, C(n))), v, SC_WORKGROUP])
+    m.index()
+    ent = m.entry
+    ent += [planes, mask]; ent[0] = len(ent) << 16 | OP_ENTRY_POINT
+    fns = []
+    def val(ins, o, ty, *w):
+        r = m.new_id(); ins.append([(len(w) + 3) << 16 | o, ty, r, *w]); return r
+    def op(ins, o, *w): ins.append([(len(w) + 1) << 16 | o, *w])
+    def loop(count, each):   # a function: for (i = the invocation's index; i < count; i += threads) each(ins, i)
+        f = m.new_id(); ins = [[5 << 16 | OP_FUNCTION, void, f, 0, fvoid]]
+        E, LH, LB, LC, LM = (m.new_id() for _ in range(5))
+        op(ins, OP_LABEL, E); lid = val(ins, OP_LOAD, u32, lid_var); op(ins, OP_BRANCH, LH)
+        op(ins, OP_LABEL, LH); i, nxt = m.new_id(), m.new_id()
+        ins.append([7 << 16 | OP_PHI, u32, i, lid, E, nxt, LC])
+        more = val(ins, OP_ULESS_THAN, bty, i, count)
+        op(ins, OP_LOOP_MERGE, LM, LC, LOOP_DONT_UNROLL); op(ins, OP_BRANCH_CONDITIONAL, more, LB, LM)
+        op(ins, OP_LABEL, LB); each(ins, i); op(ins, OP_BRANCH, LC)
+        op(ins, OP_LABEL, LC); ins.append([5 << 16 | OP_IADD, u32, nxt, i, kth]); op(ins, OP_BRANCH, LH)
+        op(ins, OP_LABEL, LM); op(ins, OP_RETURN); op(ins, OP_FUNCTION_END)
+        fns.append(ins); return f
+    def clear(ins, i): op(ins, OP_STORE, val(ins, OP_ACCESS_CHAIN, pw, mask, i), k0)
+    init = loop(kn, clear)
+    wt, vt = params[0][1], params[1][1]
+    def flush_one(ins, i):
+        T, S = m.new_id(), m.new_id()
+        bits = val(ins, OP_LOAD, u32, val(ins, OP_ACCESS_CHAIN, pw, mask, val(ins, OP_SHR_LOGICAL, u32, i, k5)))
+        bit = val(ins, OP_SHL_LOGICAL, u32, k1, val(ins, OP_BITWISE_AND, u32, i, k31))
+        written = val(ins, OP_INOT_EQUAL, bty, val(ins, OP_BITWISE_AND, u32, bits, bit), k0)
+        op(ins, OP_SELECTION_MERGE, S, 0); op(ins, OP_BRANCH_CONDITIONAL, written, T, S)
+        op(ins, OP_LABEL, T)
+        v = val(ins, OP_LOAD, u32, val(ins, OP_ACCESS_CHAIN, pw, planes, i))
+        val(ins, OP_FUNCTION_CALL, void, store, i if wt == u32 else val(ins, OP_BITCAST, wt, i), v if vt == u32 else val(ins, OP_BITCAST, vt, v))
+        op(ins, OP_BRANCH, S)
+        op(ins, OP_LABEL, S)
+    flush = loop(kw, flush_one)
+    # the deferred store: (word, value) → the copy and the mask; a word outside the planes is dropped, as the original store drops it
+    defer, pword, pval = m.new_id(), m.new_id(), m.new_id()
+    ins = [[5 << 16 | OP_FUNCTION, void, defer, 0, body[0][4]], [3 << 16 | OP_FUNCTION_PARAMETER, wt, pword], [3 << 16 | OP_FUNCTION_PARAMETER, vt, pval]]
+    E, T, M = m.new_id(), m.new_id(), m.new_id()
+    op(ins, OP_LABEL, E)
+    w_ = pword if wt == u32 else val(ins, OP_BITCAST, u32, pword)
+    v_ = pval if vt == u32 else val(ins, OP_BITCAST, u32, pval)
+    inside = val(ins, OP_ULESS_THAN, bty, w_, kw)
+    op(ins, OP_SELECTION_MERGE, M, 0); op(ins, OP_BRANCH_CONDITIONAL, inside, T, M)
+    op(ins, OP_LABEL, T)
+    op(ins, OP_STORE, val(ins, OP_ACCESS_CHAIN, pw, planes, w_), v_)
+    val(ins, OP_ATOMIC_OR, u32, val(ins, OP_ACCESS_CHAIN, pw, mask, val(ins, OP_SHR_LOGICAL, u32, w_, k5)), kscope, k0,
+        val(ins, OP_SHL_LOGICAL, u32, k1, val(ins, OP_BITWISE_AND, u32, w_, k31)))
+    op(ins, OP_BRANCH, M)
+    op(ins, OP_LABEL, M); op(ins, OP_RETURN); op(ins, OP_FUNCTION_END)
+    fns.append(ins)
+    # the calls go to the deferred store; main clears the mask before the body's first barrier and hands the words over after its second
+    n = 0
+    for x in m.ins:
+        if x[0] & 0xffff == OP_FUNCTION_CALL and x[3] == store: x[3] = defer; n += 1
+    for f in fns: m.ins += f
+    run = body_call(defer)
+    m.ins[run + 2:run + 2] = [[4 << 16 | OP_FUNCTION_CALL, void, m.new_id(), flush], barrier]
+    m.ins[run - 1:run - 1] = [[4 << 16 | OP_FUNCTION_CALL, void, m.new_id(), init]]
+    at = next(k for k, x in enumerate(m.ins) if x[0] & 0xffff == OP_NAME and x[1] == store)
+    m.ins[at + 1:at + 1] = [[(2 + len(s)) << 16 | OP_NAME, f, *s] for f, s in ((defer, lit_string('mesh_plane_defer')), (flush, lit_string('mesh_plane_flush')),
+                                                                                (init, lit_string('mesh_plane_clear')))]
+    m.index()
+    return {'calls': n, 'words': words, 'bytes': 4 * (words + nmask)}

@@ -75,6 +75,46 @@ final class Frontend {
         return null;
     }
 
+    /** The phone's storage provider, the one whose document IDs are &lt;volume&gt;:&lt;path in the volume&gt; */
+    static final String EXTERNAL_STORAGE = "com.android.externalstorage.documents";
+    static final String DOWNLOADS = "com.android.providers.downloads.documents", MEDIA = "com.android.providers.media.documents";
+
+    /**
+     * A SAF document (or tree) ID → the file's path, or null when the ID carries none (then mediaStoreId may): raw:&lt;path&gt; and msf:&lt;path&gt; (the Downloads
+     * provider's direct paths), an ID that is a path itself (some file managers), and &lt;volume&gt;:&lt;path&gt; (primary, home: the Documents folder, or an SD card's
+     * volume ID mounted under /storage or /mnt/media_rw: dirExists). Only the phone's storage provider (authority null too) is taken at its word for the last
+     * form: another provider's &lt;x&gt;:&lt;y&gt; is a path only when that file is there (exists), never a made-up one
+     */
+    static String documentIdPath(String authority, String id, String primary, java.util.function.Predicate<String> dirExists, java.util.function.Predicate<String> exists) {
+        if (id == null || id.isEmpty()) return null;
+        if (id.startsWith("raw:")) return id.substring(4).startsWith("/") ? id.substring(4) : null;
+        if (id.startsWith("msf:")) return id.substring(4).startsWith("/") ? id.substring(4) : null;   // MediaStore numbers: mediaStoreId; some devices put a path after the prefix
+        if (id.startsWith("/")) return exists.test(id) ? id : null;
+        int colon = id.indexOf(':');
+        if (colon <= 0) return null;
+        boolean storage = authority == null || authority.equals(EXTERNAL_STORAGE);
+        String volume = id.substring(0, colon), rel = id.substring(colon + 1);
+        String root;
+        if (volume.equals("primary")) root = primary;
+        else if (volume.equals("home") && storage) root = primary + "/Documents";   // the provider's Documents root
+        else {   // an SD card or USB drive: its volume ID names its mount
+            root = null;
+            for (String p : new String[] {"/storage/" + volume, "/mnt/media_rw/" + volume}) if (dirExists.test(p)) { root = p; break; }
+            if (root == null) return null;
+        }
+        String p = volumePath(root, rel);   // relative to the volume, or (some pickers) the whole path
+        return storage || exists.test(p) ? p : null;
+    }
+
+    /** A document ID that is a MediaStore number: the Downloads provider's msf:&lt;n&gt; (Downloads, Recent: Android 10 and later), the media provider's &lt;kind&gt;:&lt;n&gt;; else null */
+    static Long mediaStoreId(String authority, String id) {
+        if (id == null) return null;
+        String n = null;
+        if (id.matches("msf:[0-9]{1,18}")) n = id.substring(4);
+        else if (MEDIA.equals(authority) && id.matches("(document|image|video|audio):[0-9]{1,18}")) n = id.substring(id.indexOf(':') + 1);
+        return n == null ? null : Long.parseLong(n);
+    }
+
     /**
      * A SAF document ID's path within its volume (the part after "primary:" or "<volume ID>:") → the file's path under the volume's root. Most providers give
      * it relative to the volume ("Switch2/x.nup"); some (the HyperOS picker, issue #19) give the file's whole path ("/storage/emulated/0/Switch2/x.nup" or

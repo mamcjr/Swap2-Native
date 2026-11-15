@@ -30,7 +30,9 @@ final class GameState {
 
     /** live: the service's (or job.json's) state of the job the launcher follows (Ondevice.state), own: this game's job.json as its check read it */
     static GameState of(Game g, PrepareState live, PrepareState own, PackFacts facts) {
-        PrepareState j = live != null && live.isFor(g.gameDir) ? live : own != null && own.isFor(g.gameDir) ? own : null;
+        PrepareState l = live != null && live.isFor(g.gameDir) ? live : null;
+        PrepareState o = own != null && own.isFor(g.gameDir) ? own : null;
+        PrepareState j = l != null && (o == null || GameFlow.preferLiveJob(l.alive, l.updated, o.updated)) ? l : o;
         return new GameState(GameFlow.decide(j == null ? null : j.facts(), facts), j, facts, g.name, g.titleId);
     }
 

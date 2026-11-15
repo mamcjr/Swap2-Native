@@ -169,7 +169,7 @@ def is_image(path):
 
 def _resolve(path):
     p = _os.path.abspath(_os.fsdecode(path))
-    if '.nup:' in p:
+    if _nup.split(p):   # <file>.nup:<rest>, the extension in any case
         found = _nup.resolve(p)
         if found: return _NupView(*found), ''
     parts = p.split('/')

@@ -18,6 +18,8 @@
 #include <zlib.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
+#include <unistd.h>
 
 _Atomic uint32_t vka_env_gen = 1;   // 1: call sites' zeroed caches read their switch on the first call
 
@@ -59,12 +61,15 @@ double vka_env_slow(vka_envc *c, const char *key, double def) {
 // Switches read once (at start, or when a device object is made): a live change is logged as taking effect at the next start
 static const char *const g_restart[] = {"DM_VK_VALIDATE", "DM_VK_DRIVER", "DM_VK_HOOKDIR", "DM_VK_PLACED", "DM_VK_PREFAULT", "DM_VK_PCACHE", "DM_VK_GUEST_FPCR", "DM_VK_SHLIB", "DM_VK_SHLIB_CHECK", "DM_VK_GS_CLAIM", "DM_VK_SUBGROUP_PIN", "DM_VK_GPL", "DM_VK_MESH", "DM_VK_SUBGROUP_GS", "DM_VK_SHUFFLE_LDS", "DM_VK_ADPF", "DM_VK_ADPF_PIPELINE", "DM_VK_GPU_FLOOR_KGSL", "DM_VK_NANSCAN",
                                         "DM_VK_NANSCAN_STEP", "DM_VK_NANSCAN_DRAWS", "DM_VK_NANSCAN_SERIAL", "DM_VK_NANSCAN_FS", "DM_VK_WORKER",
-                                        "DM_VK_WORKER_FRAMES", "DM_VK_TEST_HANG", "DM_LSFG_DLL", "DM_FPS", "NXHOST_VK_SELFTEST", "DM_CTL", "DM_VK_PREWARM", "DM_VK_PREWARM_MAX", "DM_VK_PREWARM_FILE", "DM_VK_LC_GLOBAL", NULL};
+                                        "DM_VK_WORKER_FRAMES", "DM_VK_TEST_HANG", "DM_LSFG_DLL", "DM_FPS", "NXHOST_VK_SELFTEST", "DM_CTL", "DM_VK_PREWARM", "DM_VK_PREWARM_MAX", "DM_VK_PREWARM_FILE", "DM_VK_LC_GLOBAL",
+                                        "DM_VK_PSO_ASYNC", "DM_NVN_GPU_TS", "DM_VK_POOL_FB", "DM_VK_POOL_FB_EARLY", "DM_VK_EAGER_TEX", NULL};
 // Switches the replay reads again after a change (VKA_ENV, or at use); a table, so the log line can say which kind a key is
 static const char *const g_live[] = {"DM_VK_DRAW", "DM_VK_STATS", "DM_VK_HANG_S", "DM_VK_HANG_EXIT", "DM_VK_FRAME_RATE", "DM_VK_FRAME_RATE_HOLD", "DM_VK_GENLOCK", "DM_VK_PCACHE_SAVE_S", "DM_VK_GPL_GIVEUP", "DM_VK_GPL_PROBE", "DM_VK_PREWARM_KEEP", "DM_VK_PRETRANSFORM", "DM_VK_FSR", "DM_VK_FSR_SHARP", "DM_VK_TEX_TRACK",
                                      "DM_VK_CHUNK", "DM_VK_PASS_CLEARS", "DM_VK_PASS_KEEP", "DM_VK_DYN_FILTER", "DM_VK_PROF", "DM_VK_ROWS", "DM_VK_SYNCLOG", "DM_VK_UBWC", "DM_VK_IMG_UPGRADE", "DM_VK_DONE_LAST", "DM_VK_AFF_REPLAY", "DM_VK_AFF_ALL",
                                      "DM_VK_NANSCAN_DUMP", "DM_VK_VB_FILTER", "DM_VK_ENC_BATCH", "DM_VK_BAR_KEEP", "DM_VK_DRV_MEMO", "DM_VK_PUSH_DELTA", "DM_VK_UPLOAD_MT", "DM_VK_UPLOAD_MT_MIN",
-                                     "DM_LSFG", "DM_LSFG_MULT", "DM_LSFG_TARGET", "DM_LSFG_FLOW", NULL};
+                                     "DM_VK_NDSR", "DM_VK_NDSR_INPUT", "DM_VK_NDSR_MAP", "DM_VK_NDSR_LOG", "DM_VK_PRESENT_NEAREST", "DM_VK_STRETCH",
+                                     "DM_LSFG", "DM_LSFG_MULT", "DM_LSFG_TARGET", "DM_LSFG_FLOW", "DM_VK_POOL_FB_BLIND_EAGER", "DM_VK_POOL_FB_DEAD", "DM_VK_PRUNE_RETIRED", "DM_VK_PRUNE_DRY", "DM_VK_DISPATCH_ORDER", "DM_VK_BAR_NARROW",
+                                     "DM_VK_RP_SCOPE", "DM_VK_RP_SCOPE_NARROW", "DM_VK_BAR_DEDUP", "DM_VK_MESH_GUEST_BAR", "DM_VK_POOL_SLOT_DEDUP", NULL};
 static int in(const char *const *t, const char *k) { for (; *t; t++) if (!strcmp(*t, k)) return 1; return 0; }
 
 void dm_gfx_ctl_env(const char *key, const char *val) {   // the control thread
@@ -143,7 +148,92 @@ static void stats_line(uint64_t f) {
     { char im[600]; vka_imem_stats(im, sizeof im); VLOG("ctl: %s", im); }
     { char bs[1000]; vka_tex_big_stats(bs, sizeof bs); if (bs[0]) VLOG("ctl: %s", bs); }
 }
+static uint64_t census_value(const char *text, const char *field) {
+    size_t n = strlen(field);
+    for (const char *p = text; *p;) {
+        if (!strncmp(p, field, n)) return strtoull(p + n, NULL, 10);
+        const char *end = strchr(p, '\n'); if (!end) break; p = end + 1;
+    }
+    return 0;
+}
+static void census_read(const char *path, char *out, size_t size) {
+    out[0] = 0; FILE *f = fopen(path, "re"); if (!f) return;
+    size_t n = fread(out, 1, size - 1, f); out[n] = 0; fclose(f);
+}
+// What the census says of the system and of the kind of memory the process holds, since 2026-11-14: a game killed from outside (signal 9) in the first frame of a
+// scene on a Redmagic 11 Air, five runs, with "available 5337 MiB" in its last census and "swap PSS 0 MiB" in every one (Ocarina of Time's note). Whether that phone
+// has swap at all, how full it is, how much of the resident set is anonymous (cannot go anywhere without swap) or file pages (can), and whether huge pages inflate a
+// sparsely touched heap were not in the log. The system's side once (census_system) and a second line with each census; and a census as soon as the resident set
+// moved 256 MiB (statm, read each second: cheap, unlike smaps_rollup), because the ten-second one never caught a scene's first seconds
+static void census_line(const char *path, char *out, size_t size) {   // a one-line file, or "not readable (<why>)"
+    FILE *f = fopen(path, "re"); if (!f) { snprintf(out, size, "not readable (%s)", strerror(errno)); return; }
+    size_t n = fread(out, 1, size - 1, f); out[n] = 0; fclose(f);
+    while (n && (out[n - 1] == '\n' || out[n - 1] == ' ')) out[--n] = 0;
+    for (char *p = out; *p; p++) if (*p == '\n') *p = ';';
+}
+static void census_system(void) {
+    char thp[160], cg[400], adj[32], swp[32]; census_line("/sys/kernel/mm/transparent_hugepage/enabled", thp, sizeof thp); census_line("/proc/self/cgroup", cg, sizeof cg);
+    census_line("/proc/self/oom_score_adj", adj, sizeof adj); census_line("/proc/sys/vm/swappiness", swp, sizeof swp);
+    VLOG("memory census system: transparent huge pages %s; swappiness %s; this process: oom_score_adj %s, cgroup %s", thp, swp, adj, cg);
+    // The memory limits of the process's cgroup, when it has a memory controller and the app may read them (a kill by the kernel for a cgroup's limit reads as
+    // signal 9 with memory to spare in the system): the unified hierarchy's "0::<path>" under /sys/fs/cgroup, or a v1 "N:memory:<path>" under /dev/memcg
+    char path[300] = "", *p; int v2 = 0;
+    for (p = cg; p && *p; p = strchr(p, ';') ? strchr(p, ';') + 1 : NULL) {
+        char *c1 = strchr(p, ':'), *c2 = c1 ? strchr(c1 + 1, ':') : NULL, *end = strchr(p, ';'); if (!c2) break;
+        int mem = c2 - c1 == 7 && !strncmp(c1 + 1, "memory", 6), uni = c2 == c1 + 1;
+        if (mem || (uni && !path[0])) { snprintf(path, sizeof path, "%s%.*s", mem ? "/dev/memcg" : "/sys/fs/cgroup", (int)(end ? end - c2 - 1 : (long)strlen(c2 + 1)), c2 + 1); v2 = !mem; if (mem) break; }
+    }
+    if (path[0]) {
+        static const char *const f2[] = {"memory.max", "memory.high", "memory.current", "memory.swap.max", "memory.events"}, *const f1[] = {"memory.limit_in_bytes", "memory.usage_in_bytes", "memory.memsw.limit_in_bytes", "memory.swappiness", "memory.oom_control"};
+        char line[900]; int n = snprintf(line, sizeof line, "memory census cgroup %s:", path);
+        for (int i = 0; i < 5 && n < (int)sizeof line - 200; i++) { char file[400], val[160]; snprintf(file, sizeof file, "%s/%s", path, v2 ? f2[i] : f1[i]); census_line(file, val, sizeof val);
+            n += snprintf(line + n, sizeof line - (size_t)n, " %s %s;", v2 ? f2[i] : f1[i], val); }
+        VLOG("%s", line);
+    }
+}
+static uint64_t census_rss_kb(void) {   // /proc/self/statm: size resident shared ... in pages
+    char b[128]; census_read("/proc/self/statm", b, sizeof b); unsigned long long sz = 0, rss = 0;
+    return sscanf(b, "%llu %llu", &sz, &rss) == 2 ? rss * (uint64_t)sysconf(_SC_PAGESIZE) / 1024 : 0;
+}
+static void *memory_census_main(void *arg) {
+    (void)arg; pthread_setname_np(pthread_self(), "vk-memstats"); setpriority(PRIO_PROCESS, 0, 10);
+    uint64_t rss_logged = 0; int since = 0, first = 1;
+    for (;;) {
+        int seconds = VKA_ENV("DM_VK_MEM_CENSUS_S", 10);
+        struct timespec delay = {1, 0}; nanosleep(&delay, NULL);
+        if (seconds <= 0 || vka_hung()) continue;
+        uint64_t rss_now = census_rss_kb(); int moved = rss_logged && (rss_now > rss_logged ? rss_now - rss_logged : rss_logged - rss_now) >= 256 * 1024;
+        if (++since < seconds && !moved) continue;
+        since = 0; rss_logged = rss_now;
+        if (first) { first = 0; census_system(); }
+        char mem[2048], roll[4096]; census_read("/proc/meminfo", mem, sizeof mem);
+        // (the rollup walks every mapping and its page tables under the process's mmap lock, which the game's threads need for mprotect and page faults: timed, since a slow
+        // read here would be a hitch every DM_VK_MEM_CENSUS_S seconds)
+        struct timespec r0, r1; clock_gettime(CLOCK_MONOTONIC, &r0); census_read("/proc/self/smaps_rollup", roll, sizeof roll); clock_gettime(CLOCK_MONOTONIC, &r1);
+        double roll_ms = (r1.tv_sec - r0.tv_sec) * 1e3 + (r1.tv_nsec - r0.tv_nsec) / 1e6;
+        struct timespec at; clock_gettime(CLOCK_MONOTONIC, &at);
+        int images = 0, active = 0, queued = 0; uint64_t gpu = 0;
+        uint64_t bytes = vka_tex_mem(&images, &gpu), pending = vka_tex_retired_bytes();
+        uint32_t blocks = 0; uint64_t staging = vka_scratch_bytes(&blocks);
+        vka_pso_work_stats(&active, &queued);
+        struct rusage usage = {0}; getrusage(RUSAGE_SELF, &usage);
+        VLOG("memory census t=%lld: RSS %.0f MiB, resident PSS %.0f MiB, swap PSS %.0f MiB (rollup %s in %.1f ms); available %.0f MiB; renderer accounting images %.0f MiB (%d, GPU-written %.0f, pending %.0f), pools %.0f, staging %.0f (%u blocks); compiler %d active/%d queued; major faults %ld",
+             (long long)at.tv_sec, census_value(roll, "Rss:") / 1024.0, census_value(roll, "Pss:") / 1024.0, census_value(roll, "SwapPss:") / 1024.0, roll[0] ? "read" : "unavailable", roll_ms,
+             census_value(mem, "MemAvailable:") / 1024.0, bytes / 1048576.0, images, gpu / 1048576.0, pending / 1048576.0, vka_mem_placed_nolock() / 1048576.0, staging / 1048576.0, blocks, active, queued, usage.ru_majflt);
+        VLOG("memory census kinds%s: this process anonymous %.0f MiB, file %.0f MiB, shared memory %.0f MiB (PSS), anonymous huge pages %.0f MiB, swapped %.0f MiB; the system: total %.0f MiB, free %.0f MiB, file cache %.0f MiB, swap %.0f of %.0f MiB free",
+             moved ? " (the resident set moved 256 MiB)" : "", census_value(roll, "Pss_Anon:") / 1024.0, census_value(roll, "Pss_File:") / 1024.0, census_value(roll, "Pss_Shmem:") / 1024.0,
+             census_value(roll, "AnonHugePages:") / 1024.0, census_value(roll, "Swap:") / 1024.0, census_value(mem, "MemTotal:") / 1024.0, census_value(mem, "MemFree:") / 1024.0,
+             census_value(mem, "Cached:") / 1024.0, census_value(mem, "SwapFree:") / 1024.0, census_value(mem, "SwapTotal:") / 1024.0);
+        char detail[700]; vka_imem_stats(detail, sizeof detail); VLOG("memory census allocator: %s", detail);
+    }
+    return NULL;
+}
+static void memory_census_start(void) {
+    pthread_t thread;
+    if (!pthread_create(&thread, NULL, memory_census_main, NULL)) pthread_detach(thread);
+}
 void vka_ctl_frame(uint64_t f) {   // mtl_set_frame: frame f begins
+    static pthread_once_t census_once = PTHREAD_ONCE_INIT; pthread_once(&census_once, memory_census_start);
     snap(&g_rec[f % NREC], f);
     long c = atomic_load_explicit(&g_capture, memory_order_relaxed);
     if (c > 0) { if (!g_cap_from) { g_cap_from = f; g_cap_to = f + (uint64_t)c; VLOG("ctl: capture of frames %llu-%llu begins", (unsigned long long)f, (unsigned long long)(g_cap_to - 1)); } atomic_store(&g_capture, 0); }
@@ -269,6 +359,11 @@ void vka_ctl_shot_done(VkFence fence) {   // present thread, after the present's
 
 // ---------- Commands ----------
 int dm_gfx_ctl(const char *line) {   // the control thread (hle_hid.c ctl_main): 1 = a replay command, taken
+    if (!strncmp(line, "framecapture ", 13)) {
+        int vka_capture_arm(const char *path);
+        VLOG("ctl: framecapture %s", vka_capture_arm(line + 13) ? "queued for the next complete frame" : "refused (absolute path required, or request pending)");
+        return 1;
+    }
     if (!strncmp(line, "capture", 7) && (!line[7] || line[7] == ' ')) {
         long n = line[7] ? atol(line + 8) : 60; if (n <= 0) n = 60; if (n > NREC - 16) n = NREC - 16;
         if (g_cap_from) { VLOG("ctl: capture: one is running (frames %llu-%llu)", (unsigned long long)g_cap_from, (unsigned long long)(g_cap_to - 1)); return 1; }

@@ -1367,7 +1367,22 @@ obs += region_obs
 FRAME_STEP = PATCHES['FRAME_STEP']
 FS_STATE_OFF = 0
 RENDER_SCALE = 0   # 1 = the build has a render-scale stub (state +0x10): the fixups table says so (RENDER_SCALE), and the iOS launcher offers the setting (dm/games/settings.tsv)
+# An exefs mod (DM_EXEFS_MODS: the labels of the mods scripts/pack_android.py applied to this module) may change a frame-step site itself: the frame-rate mods players use
+# (Ocarina's Dynamic-fps branches from main+0x6e6cc4, the stub's site) do the same job their own way. The stubs are an option (inert at target 0), so they yield: a dry pass
+# of the build's FRAME_STEP checks every site first, and when a mod changed one, the module gets no frame step (no state page, no FPS_STATE_OFF: the host sets no target).
+# Without mods a changed site still stops the rewrite: the build's patch data is wrong
+FS_MODS = os.environ.get('DM_EXEFS_MODS', '')
 if BUILD_ID in FRAME_STEP and NAME == 'main':
+    fs_changed = []
+    def fs_check(off, orig):
+        ob = bytes.fromhex(orig)
+        if IMG[off:off + len(ob)] != ob: fs_changed.append(f'{off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}, not {orig}')
+    use_area(0); FRAME_STEP[BUILD_ID](types.SimpleNamespace(here=here, emit=lambda w, kind=None: None, site=fs_check, put=lambda off, words, why: None,
+                                                            state=KEY_PAGE_OFF + 0x4000, render_scale=0))
+    if fs_changed:
+        assert FS_MODS, 'frame step original bytes mismatch ' + '; '.join(fs_changed)
+        print(f'frame step: left out, an exefs mod ({FS_MODS}) changed its site ' + '; '.join(fs_changed), flush=True)
+if BUILD_ID in FRAME_STEP and NAME == 'main' and not fs_changed:
     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
     if FAR:
         # The loader supplies zero-filled BSS/key pages for a front patch area.

@@ -10,6 +10,7 @@ int nvn_dirty_tracked(const void *addr, size_t len);
 void nvn_dirty_protect(const void *addr, size_t len);              // Set the covered pages read-only
 void nvn_dirty_hold(const void *addr, size_t len);                 // Unprotect (and stamp) every protected page of [addr, addr+len) and protect nothing more until nvn_dirty_unhold
 void nvn_dirty_unhold(void);                                       // (a placement swapping those pages, vka_mem.c place: the tracker's protections must not change under it)
+uint64_t nvn_dirty_release_all(void);                              // Unprotect (and stamp) every protected page of every live range, so the kernel can merge the split mappings; the pages released
 uint64_t nvn_dirty_now(void);                                      // Current generation: take the content's stamp before nvn_dirty_protect and before reading it
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp); // Covered pages were written after the stamp -> 1
 const void *nvn_dirty_span(const void *addr, size_t len);          // The tracked range holding the span (a handle to keep; NULL = untracked)
@@ -22,3 +23,6 @@ void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns);   // Cu
 void nvn_dirty_mp_fail(uint64_t *fails, int *err, uintptr_t *addr, size_t *len, int *prot);
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total); // Currently live slots, slot table high-water mark, total number of registrations
 void nvn_dirty_debug(const void *span, const void *addr, size_t len, uint64_t stamp, char *out, size_t n);   // diagnostics: the range and page states behind a span
+size_t nvn_dirty_block_at_least(size_t bytes);
+size_t nvn_dirty_block_bytes(void);
+

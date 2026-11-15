@@ -274,6 +274,13 @@ To enroll a cut for any game's own module:
   - The engine region's gate sits on a store that reads x10 (`str x1, [x10, #0x280]`, Octopath Traveler 0 `main+0x12e20`), which the old rule refused: [Unreal's engine address region and its options](memory.md#unreals-engine-address-region-and-its-options).
 - **Note:** the gate table takes the original instruction as a word value (`aa1303e0`), the cut table as bytes (`e00313aa`).
 
+### Frame-step site changed by an exefs mod
+
+- **Symptom:** Prepare stops at the rewrite step with `AssertionError: frame step original bytes mismatch 0x6e6cc4: 4f7dd594` (`patch_nso.py exit code 1 on main` in `ondevice/logs/rewrite.log`), after a change to the game's mods (or anything else) makes the main module rewrite again.
+- **Cause:** the player's frame-rate mod (Ocarina's Dynamic-fps `.ips`) writes a `bl` to its own code at the instruction the profile's `FRAME_STEP` stub replaces. `pack_android.py` applies exefs mods before the rewriter runs, so the stub's site no longer holds the build's original bytes, and the frame step's site check (an assertion, as for a registered cut) stopped the whole rewrite.
+- **Fix:** since 2026-11-13 `pack_android.py` names the module's mods to the rewriter (`DM_EXEFS_MODS`, the labels its log lists), and `patch_nso.py` checks every frame-step site in a dry pass of the build's `FRAME_STEP` before anything is written. When a mod changed one, the module gets no frame step: a `frame step: left out, an exefs mod (…) changed its site …` line, no state page and no `FPS_STATE_OFF` in the fixups (so the host sets no target), and the mod's own code runs. Without mods a changed site still stops the rewrite (the build's patch data is wrong). Registered cuts are unchanged: a mod over one still stops the rewrite ([android/README.md, Mods](../../android/README.md#mods-exefs-patches)).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md): 0.1.7-beta with Dynamic-fps on, after the Occlusion-Off mod was turned off (2026-11-13).
+
 ## Functions, unwind entries and data in text
 
 ### Code before the first unwind entry is one function

@@ -250,6 +250,13 @@ class Launcher(unittest.TestCase):
         self.assertEqual(self.java('legacy', pack, GAME, '444444444444'), 'none', 'never the current version')
         self.assertEqual(self.java('legacy', pack, '0100000000001000', cur), 'none', 'never another game\'s')
 
+    def test_playable_audited_mesh_base_abi(self):
+        pack = self.tmp / 'mesh-base-pack'
+        write_lib(pack / 'shaders/v-111111111111/dmsh_vk.lib', '111111111111', abi='674db0a4ff79')
+        self.assertEqual(self.java('playable', pack, GAME, '222222222222', '623c0a2f1e8a'), 'v-111111111111')
+        self.assertEqual(self.java('playable', pack, GAME, '222222222222', '0123456789ab'), 'none')
+        self.assertEqual(self.java('playable', pack, '0100000000001000', '222222222222', '623c0a2f1e8a'), 'none')
+
     def test_restamp(self):
         pack = self.tmp / 'rs'; cur = '6607c8d19abc'; abi = '01b52a48538b'
         sh = [('00000000000000aa', [spirv(10, 1)], b''), ('00000000000000bb', [spirv(40, 2)], b'x' * 33)]

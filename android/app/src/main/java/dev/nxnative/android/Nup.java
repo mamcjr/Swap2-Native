@@ -1,8 +1,12 @@
 package dev.nxnative.android;
 
+import java.io.Closeable;
+import java.io.EOFException;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -21,8 +25,12 @@ import java.util.regex.Pattern;
  * is streamed through the hash, not kept) and keeps the package records; a package's tree (exefs/main, main.npdm, whether romfs/ has files) is then read from the
  * TOC by position. Files are read whole or by their first bytes, raw or zstd (Zstd); a whole read is checked against the file's SHA-256.
  * <p>
- * Naming (NUP.md "Naming a package"): {@code <file>.nup:<selector>[/<path>]}, split at the last ".nup:", with the selector {@code base}, {@code update/<version>}
+ * Naming (NUP.md "Naming a package"): {@code <file>.nup:<selector>[/<path>]}, split at the last ".nup:" (the extension in any case), with the selector {@code base}, {@code update/<version>}
  * or {@code addon/<16 hex digits>}. {@link #parse} reads one, {@link #spec} writes one. No Android classes: the JVM test runs it on the Mac.
+ * <p>
+ * Reading goes through a {@link Source}: a plain file, or, for a .nup the user picked with the system file picker (no path the app may open without All files
+ * access: PickedNup), a descriptor from the {@link #opener} the app installs. Such a file has a stand-in path in app storage that names it wherever a path
+ * names a game; nothing exists at that path.
  */
 final class Nup {
     static final int BASE = 0, UPDATE = 1, ADDON = 2;
@@ -33,6 +41,7 @@ final class Nup {
     static final class Pkg {
         final int index, kind, flags;
         final long titleId, version, rootDir, exefsDir, romfsDir;
+        long metaOffset, metaSize;   // where its meta block is (icon, name, version...), 0 if it has none
 
         Pkg(int index, long titleId, long rootDir, long exefsDir, long romfsDir, long version, int kind, int flags) {
             this.index = index;
@@ -79,13 +88,75 @@ final class Nup {
         }
     }
 
+    /**
+     * Where a .nup's bytes come from: a channel read by position (pread), its size, and what identifies its content for the caches (path or document, size, time).
+     * close() closes the channel and what it came from (a file, or a descriptor the provider gave).
+     */
+    static final class Source implements Closeable {
+        final FileChannel ch;
+        final long size;
+        final String key;
+        private final Closeable owner;
+
+        Source(FileChannel ch, long size, String key, Closeable owner) { this.ch = ch; this.size = size; this.key = key; this.owner = owner; }
+
+        /** n bytes at pos into b[off..], all of them (EOFException when the file ends first) */
+        void read(long pos, byte[] b, int off, int n) throws IOException {
+            ByteBuffer bb = ByteBuffer.wrap(b, off, n);
+            while (bb.hasRemaining()) {
+                int k = ch.read(bb, pos + (bb.position() - off));
+                if (k < 0) throw new EOFException("the file ends at byte " + (pos + bb.position() - off) + ", before byte " + (pos + n));
+            }
+        }
+
+        @Override public void close() throws IOException {
+            try { ch.close(); } finally { if (owner != null) owner.close(); }
+        }
+    }
+
+    /** Opens the .nup files that are not plain files (PickedNup: a document picked with the system file picker) */
+    interface Opener {
+        /** Whether f is one of its stand-in paths (then {@link #open} answers for it; nothing exists at f itself) */
+        boolean owns(File f);
+
+        /** f's bytes; an IOException with a sentence when it cannot be opened (moved, deleted, its permission taken back) */
+        Source open(File f) throws IOException;
+    }
+
+    /** Set once per process by the app (NxApp); null on the JVM unless a test sets one */
+    static volatile Opener opener;
+
+    /** Whether f is a picked .nup (read through the opener, not by its path) */
+    static boolean picked(File f) {
+        Opener o = opener;
+        return f != null && o != null && o.owns(f);
+    }
+
+    /** f's source: the opener's for a picked .nup, else the file's */
+    static Source source(File f) throws IOException {
+        Opener o = opener;
+        if (o != null && o.owns(f)) return o.open(f);
+        if (!f.isFile()) throw new IOException(f + " is not a file");
+        RandomAccessFile r = new RandomAccessFile(f, "r");
+        try {
+            return new Source(r.getChannel(), r.length(), f.getAbsolutePath() + "|" + r.length() + "|" + f.lastModified(), r);
+        } catch (IOException | RuntimeException e) {
+            r.close();
+            throw e;
+        }
+    }
+
     final File file;
+    /** Its source's key when it was read: what changes when the file does (BuildCheck's cache) */
+    final String identity;
     final long fileSize, tocOffset, tocSize, blobOffset, dirCount, fileCount, poolOff, poolSize;
     final List<Pkg> packages;
     private final long offDir, offFile, offKids;
 
-    private Nup(File file, long fileSize, long tocOffset, long tocSize, long blobOffset, long dirCount, long fileCount, long poolOff, long poolSize, List<Pkg> packages) {
+    private Nup(File file, String identity, long fileSize, long tocOffset, long tocSize, long blobOffset, long dirCount, long fileCount, long poolOff, long poolSize,
+                List<Pkg> packages) {
         this.file = file;
+        this.identity = identity;
         this.fileSize = fileSize;
         this.tocOffset = tocOffset;
         this.tocSize = tocSize;
@@ -100,11 +171,33 @@ final class Nup {
         offKids = offFile + 0x50 * fileCount;
     }
 
-    /** Whether a path is a .nup file by its name (ends with ".nup", lower case, as the host's and the tools' split at ".nup:" needs) */
-    static boolean isNup(File f) { return f != null && f.getName().endsWith(EXT) && f.getName().length() > EXT.length() && !f.isDirectory(); }
+    /** Whether a name ends with the extension in any case (".nup", ".NUP", ".Nup": phones and PCs copy names as they are), with a name before it */
+    static boolean hasExt(String name) { return name != null && name.length() > EXT.length() && name.regionMatches(true, name.length() - EXT.length(), EXT, 0, EXT.length()); }
 
-    /** A .nup named with another case of the extension: the tools and the host would not take it */
-    static boolean wrongCase(File f) { return f != null && !f.getName().endsWith(EXT) && f.getName().toLowerCase(Locale.ROOT).endsWith(EXT) && f.isFile(); }
+    /** Whether a path is a .nup file by its name (ends with ".nup" in any case; the host and the tools split at ".nup:" in any case too: nup_image.h, nup.py) */
+    static boolean isNup(File f) { return f != null && hasExt(f.getName()) && !f.isDirectory(); }
+
+    /**
+     * A .nup shorter than its header says that may still be being copied: the library's search tries it again later (LibraryScan). One cut at FAT32's largest
+     * file ({@link #FAT32_MAX}: a file over 4 GB copied to a FAT32 card) never grows, so it is a plain IOException, said at once with its exFAT hint
+     */
+    static final class Incomplete extends IOException {
+        private static final long serialVersionUID = 1L;
+
+        Incomplete(String m) { super(m); }
+    }
+
+    /** FAT32's largest file, 4 GiB - 1 bytes: where a copy of a bigger .nup to a FAT32 card stops */
+    static final long FAT32_MAX = 0xFFFFFFFFL;
+
+    /** Whether a .nup of len bytes whose header says size may still be being copied (Incomplete): shorter, and not cut at FAT32's limit */
+    static boolean copying(long len, long size) { return len < size && len != FAT32_MAX; }
+
+    /** Whether an error is, or was caused by, an incomplete .nup (Incomplete; Pack.titleIdOf wraps it) */
+    static boolean incomplete(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) if (t instanceof Incomplete) return true;
+        return false;
+    }
 
     // ---- Naming ----
 
@@ -119,11 +212,18 @@ final class Nup {
         @Override public String toString() { return selector == null ? path : path + ":" + selector + (sub.isEmpty() ? "" : "/" + sub); }
     }
 
-    /** null when the name has no ".nup:" and does not end with ".nup"; IllegalArgumentException for a bad selector */
+    /** The index of the last ".nup:" in a name, the extension in any case; -1 when none */
+    static int lastSplit(String spec) {
+        for (int k = spec.length() - EXT.length() - 1; k >= 0; k--)
+            if (spec.charAt(k + EXT.length()) == ':' && spec.regionMatches(true, k, EXT, 0, EXT.length())) return k;
+        return -1;
+    }
+
+    /** null when the name has no ".nup:" and does not end with ".nup" (either in any case); IllegalArgumentException for a bad selector */
     static Ref parse(String spec) {
         if (spec == null) return null;
-        int k = spec.lastIndexOf(EXT + ":");
-        if (k < 0) return spec.endsWith(EXT) && spec.length() > EXT.length() ? new Ref(spec, null, "") : null;
+        int k = lastSplit(spec);
+        if (k < 0) return hasExt(spec) ? new Ref(spec, null, "") : null;
         String path = spec.substring(0, k + EXT.length()), rest = spec.substring(k + EXT.length() + 1);
         if (rest.isEmpty()) return new Ref(path, null, "");
         Matcher m = SEL.matcher(rest);
@@ -148,14 +248,18 @@ final class Nup {
 
     private static final Map<String, Nup> cache = new LinkedHashMap<>();
 
-    /** The .nup checked (superblock, TOC SHA-256); cached by path, size and time, so a card's checks do not hash the TOC again */
+    /** The .nup checked (superblock, TOC SHA-256); cached by path (or picked document), size and time, so a card's checks do not hash the TOC again */
     static Nup open(File f) throws IOException {
-        String key = f.getAbsolutePath() + "|" + f.length() + "|" + f.lastModified();
-        synchronized (cache) {
-            Nup n = cache.get(key);
-            if (n != null) return n;
+        Nup n;
+        String key;
+        try (Source src = source(f)) {
+            key = f.getAbsolutePath() + "|" + src.key;
+            synchronized (cache) {
+                n = cache.get(key);
+                if (n != null) return n;
+            }
+            n = read(f, src, true);
         }
-        Nup n = read(f, true);
         synchronized (cache) {
             cache.put(key, n);
             while (cache.size() > 4) cache.remove(cache.keySet().iterator().next());
@@ -164,66 +268,72 @@ final class Nup {
     }
 
     /** Only the superblock and the package records, TOC not hashed: quick, for the UI's "is it a dump" (never for what is read from it) */
-    static Nup peek(File f) throws IOException { return read(f, false); }
-
-    private static Nup read(File f, boolean verify) throws IOException {
-        if (!f.isFile()) throw new IOException(f + " is not a file");
-        try (RandomAccessFile r = new RandomAccessFile(f, "r")) {
-            long len = r.length();
-            if (len < 0x80) throw new IOException(f.getName() + " is too short for a .nup");
-            byte[] sb = new byte[0x80];
-            r.readFully(sb);
-            if (sb[0] != 'N' || sb[1] != 'U' || sb[2] != 'P') throw new IOException(f.getName() + " is not a .nup (no NUP magic)");
-            if (sb[3] != 1) throw new IOException(f.getName() + " is .nup format " + (sb[3] & 0xff) + "; this app reads format 1");
-            int headerSize = u16(sb, 4);
-            long tocOff = u64(sb, 8), tocSize = u64(sb, 0x10), blob = u64(sb, 0x38), size = u64(sb, 0x40);
-            long pkgCount = u32(sb, 0x48), flags = u32(sb, 0x4C);
-            if (headerSize < 0x80) throw new IOException(f.getName() + ": header size " + headerSize);
-            if (tocOff != headerSize) throw new IOException(f.getName() + ": the TOC is not right after the header");
-            if ((blob & 15) != 0 || tocSize < 0x30 || blob < tocOff + tocSize) throw new IOException(f.getName() + ": the TOC and blob offsets do not fit");
-            if (size != len) throw new IOException(f.getName() + " is " + len + " bytes, its header says " + size + ": it is incomplete (still being copied?) or damaged");
-            if (flags != 0) throw new IOException(f.getName() + " has flags " + flags + " this app does not know");
-            if (pkgCount < 1 || pkgCount > 65536) throw new IOException(f.getName() + " has " + pkgCount + " packages");
-            if (0x30 + 0x40 * pkgCount > tocSize) throw new IOException(f.getName() + ": the package records do not fit in the TOC");
-            byte[] head = new byte[(int) (0x30 + 0x40 * pkgCount)];
-            r.seek(tocOff);
-            r.readFully(head);
-            if (verify) {
-                MessageDigest h = sha256();
-                h.update(head);
-                byte[] buf = new byte[1 << 16];
-                long left = tocSize - head.length;
-                while (left > 0) {
-                    int n = r.read(buf, 0, (int) Math.min(buf.length, left));
-                    if (n < 0) throw new IOException(f.getName() + ": the TOC ends early");
-                    h.update(buf, 0, n);
-                    left -= n;
-                }
-                if (!Arrays.equals(h.digest(), Arrays.copyOfRange(sb, 0x18, 0x38)))
-                    throw new IOException(f.getName() + ": its table of contents does not match its SHA-256: the file is damaged");
-            }
-            if (head[0] != 'T' || head[1] != 'O' || head[2] != 'C' || head[3] != 1) throw new IOException(f.getName() + ": no TOC magic");
-            if (u32(head, 4) != pkgCount) throw new IOException(f.getName() + ": the TOC and the header count different packages");
-            long dirs = u64(head, 8), files = u64(head, 0x10), poolOff = u64(head, 0x18), poolSize = u64(head, 0x20);
-            long kidsEnd = 0x30 + 0x40 * pkgCount + 0x18 * dirs + 0x50 * files;
-            if (dirs > tocSize / 0x18 || files > tocSize / 0x50 || kidsEnd > tocSize || poolOff < kidsEnd || poolOff + poolSize > tocSize)
-                throw new IOException(f.getName() + ": the TOC's tables do not fit in it");
-            List<Pkg> pk = new ArrayList<>();
-            int bases = 0;
-            for (int i = 0; i < pkgCount; i++) {
-                int o = 0x30 + 0x40 * i;
-                int kind = head[o + 0x18] & 0xff;
-                if (kind >= 5) throw new IOException(f.getName() + ": package " + i + " is of kind " + kind + ", which this app does not know");
-                Pkg p = new Pkg(i, u64(head, o), u32(head, o + 8), u32(head, o + 0xC), u32(head, o + 0x10), u32(head, o + 0x14), kind, head[o + 0x19] & 0xff);
-                for (long d : new long[] {p.rootDir, p.exefsDir, p.romfsDir})
-                    if (d != NONE && d >= dirs) throw new IOException(f.getName() + ": package " + i + " names a directory past the table");
-                if (p.rootDir == NONE) throw new IOException(f.getName() + ": package " + i + " has no root");
-                if (kind == BASE) bases++;
-                pk.add(p);
-            }
-            if (bases > 1) throw new IOException(f.getName() + " has " + bases + " base packages");
-            return new Nup(f, len, tocOff, tocSize, blob, dirs, files, poolOff, poolSize, pk);
+    static Nup peek(File f) throws IOException {
+        try (Source src = source(f)) {
+            return read(f, src, false);
         }
+    }
+
+    private static Nup read(File f, Source r, boolean verify) throws IOException {
+        long len = r.size;
+        if (len < 0x80) throw new Incomplete(f.getName() + " is too short for a .nup (" + len + " bytes): it is incomplete (still being copied?) or damaged");
+        byte[] sb = new byte[0x80];
+        r.read(0, sb, 0, sb.length);
+        if (sb[0] != 'N' || sb[1] != 'U' || sb[2] != 'P') throw new IOException(f.getName() + " is not a .nup (no NUP magic)");
+        if (sb[3] != 1) throw new IOException(f.getName() + " is .nup format " + (sb[3] & 0xff) + "; this app reads format 1 (the file was made by a newer nup tool)");
+        int headerSize = u16(sb, 4);
+        long tocOff = u64(sb, 8), tocSize = u64(sb, 0x10), blob = u64(sb, 0x38), size = u64(sb, 0x40);
+        long pkgCount = u32(sb, 0x48), flags = u32(sb, 0x4C);
+        if (headerSize < 0x80) throw new IOException(f.getName() + ": header size " + headerSize);
+        if (tocOff != headerSize) throw new IOException(f.getName() + ": the TOC is not right after the header");
+        if ((blob & 15) != 0 || tocSize < 0x30 || blob < tocOff + tocSize) throw new IOException(f.getName() + ": the TOC and blob offsets do not fit");
+        if (size != len) {
+            String m = f.getName() + " is " + len + " bytes, its header says " + size + ": it is incomplete (still being copied?) or damaged. A file over 4 GB is cut on a FAT32 memory card: the card must be exFAT";
+            throw copying(len, size) ? new Incomplete(m) : new IOException(m);
+        }
+        if (flags != 0) throw new IOException(f.getName() + " has flags " + flags + " this app does not know (made by a newer nup tool?)");
+        if (pkgCount < 1 || pkgCount > 65536) throw new IOException(f.getName() + " has " + pkgCount + " packages");
+        if (0x30 + 0x40 * pkgCount > tocSize) throw new IOException(f.getName() + ": the package records do not fit in the TOC");
+        byte[] head = new byte[(int) (0x30 + 0x40 * pkgCount)];
+        r.read(tocOff, head, 0, head.length);
+        if (verify) {
+            MessageDigest h = sha256();
+            h.update(head);
+            byte[] buf = new byte[1 << 16];
+            long at = tocOff + head.length, left = tocSize - head.length;
+            while (left > 0) {
+                int n = (int) Math.min(buf.length, left);
+                try { r.read(at, buf, 0, n); } catch (EOFException e) { throw new IOException(f.getName() + ": the TOC ends early"); }
+                h.update(buf, 0, n);
+                at += n;
+                left -= n;
+            }
+            if (!Arrays.equals(h.digest(), Arrays.copyOfRange(sb, 0x18, 0x38)))
+                throw new IOException(f.getName() + ": its table of contents does not match its SHA-256: the file is damaged");
+        }
+        if (head[0] != 'T' || head[1] != 'O' || head[2] != 'C' || head[3] != 1) throw new IOException(f.getName() + ": no TOC magic");
+        if (u32(head, 4) != pkgCount) throw new IOException(f.getName() + ": the TOC and the header count different packages");
+        long dirs = u64(head, 8), files = u64(head, 0x10), poolOff = u64(head, 0x18), poolSize = u64(head, 0x20);
+        long kidsEnd = 0x30 + 0x40 * pkgCount + 0x18 * dirs + 0x50 * files;
+        if (dirs > tocSize / 0x18 || files > tocSize / 0x50 || kidsEnd > tocSize || poolOff < kidsEnd || poolOff + poolSize > tocSize)
+            throw new IOException(f.getName() + ": the TOC's tables do not fit in it");
+        List<Pkg> pk = new ArrayList<>();
+        int bases = 0;
+        for (int i = 0; i < pkgCount; i++) {
+            int o = 0x30 + 0x40 * i;
+            int kind = head[o + 0x18] & 0xff;
+            if (kind >= 5) throw new IOException(f.getName() + ": package " + i + " is of kind " + kind + ", which this app does not know");
+            Pkg p = new Pkg(i, u64(head, o), u32(head, o + 8), u32(head, o + 0xC), u32(head, o + 0x10), u32(head, o + 0x14), kind, head[o + 0x19] & 0xff);
+            for (long d : new long[] {p.rootDir, p.exefsDir, p.romfsDir})
+                if (d != NONE && d >= dirs) throw new IOException(f.getName() + ": package " + i + " names a directory past the table");
+            if (p.rootDir == NONE) throw new IOException(f.getName() + ": package " + i + " has no root");
+            long mo = u64(head, o + 0x20), ms = u32(head, o + 0x28);
+            if (mo != 0 && ms != 0 && ms <= META_MAX && mo + ms <= len) { p.metaOffset = mo; p.metaSize = ms; }   // a block that doesn't fit is just ignored, it's only used for display
+            if (kind == BASE) bases++;
+            pk.add(p);
+        }
+        if (bases > 1) throw new IOException(f.getName() + " has " + bases + " base packages");
+        return new Nup(f, r.key, len, tocOff, tocSize, blob, dirs, files, poolOff, poolSize, pk);
     }
 
     // ---- Packages ----
@@ -270,7 +380,7 @@ final class Nup {
 
     // ---- The tree ----
 
-    private Node node(RandomAccessFile r, long id) throws IOException {
+    private Node node(Source r, long id) throws IOException {
         if (id < dirCount) {
             byte[] b = toc(r, offDir + 0x18 * id, 0x18);
             return new Node(true, id, name(r, u32(b, 0), u32(b, 4)), 0, 0, 0, 0, null, u32(b, 8), u32(b, 12));
@@ -285,16 +395,15 @@ final class Nup {
         return new Node(false, fi, name(r, u32(b, 0), u32(b, 4)), size, eo, es, codec, Arrays.copyOfRange(b, 0x20, 0x40), 0, 0);
     }
 
-    private String name(RandomAccessFile r, long off, long len) throws IOException {
+    private String name(Source r, long off, long len) throws IOException {
         if (off + len > poolSize || len > 4096) throw new IOException(file.getName() + ": a name outside the string pool");
         return new String(toc(r, poolOff + off, (int) len), StandardCharsets.UTF_8);
     }
 
-    private byte[] toc(RandomAccessFile r, long off, int n) throws IOException {
+    private byte[] toc(Source r, long off, int n) throws IOException {
         if (off + n > tocSize) throw new IOException(file.getName() + ": a TOC read past its end");
         byte[] b = new byte[n];
-        r.seek(tocOffset + off);
-        r.readFully(b);
+        r.read(tocOffset + off, b, 0, n);
         return b;
     }
 
@@ -302,7 +411,7 @@ final class Nup {
     List<Node> children(Node dir) throws IOException {
         List<Node> out = new ArrayList<>();
         if (!dir.dir) return out;
-        try (RandomAccessFile r = new RandomAccessFile(file, "r")) {
+        try (Source r = source(file)) {
             long kids = (offKids + 4 * (dir.firstChild + dir.childCount));
             if (kids > poolOff) throw new IOException(file.getName() + ": a directory's children past the table");
             byte[] ids = toc(r, offKids + 4 * dir.firstChild, (int) (4 * dir.childCount));
@@ -314,7 +423,7 @@ final class Nup {
     /** A directory by its index (a package's root, exefs or romfs) */
     Node dir(long index) throws IOException {
         if (index == NONE) return null;
-        try (RandomAccessFile r = new RandomAccessFile(file, "r")) {
+        try (Source r = source(file)) {
             return node(r, index);
         }
     }
@@ -342,18 +451,16 @@ final class Nup {
         if (f.size == 0) return new byte[0];
         if (f.extentSize > Integer.MAX_VALUE - 16 || (max < 0 && f.size > Integer.MAX_VALUE - 16)) throw new IOException(f.name + " is too large to read into memory");
         byte[] out;
-        try (RandomAccessFile r = new RandomAccessFile(file, "r")) {
+        try (Source r = source(file)) {
             if (f.codec == 0) {
                 if (f.extentSize != f.size) throw new IOException(f.name + ": a raw extent of another size than the file");
                 int n = (int) (max < 0 ? f.size : Math.min(f.size, max));
                 out = new byte[n];
-                r.seek(f.extentOffset);
-                r.readFully(out);
+                r.read(f.extentOffset, out, 0, n);
                 if (max >= 0) return out;
             } else {
                 byte[] z = new byte[(int) f.extentSize];
-                r.seek(f.extentOffset);
-                r.readFully(z);
+                r.read(f.extentOffset, z, 0, z.length);
                 out = Zstd.decode(z, 0, z.length, max);
                 if (max >= 0) return out;
                 if (out.length != f.size) throw new IOException(f.name + ": decompressed to " + out.length + " bytes, the TOC says " + f.size);
@@ -362,6 +469,90 @@ final class Nup {
             throw new IOException(file.getName() + ": " + f.name + ": " + e.getMessage(), e);
         }
         if (!Arrays.equals(sha256().digest(out), f.sha256)) throw new IOException(file.getName() + ": " + f.name + " does not match its SHA-256: the file is damaged");
+        return out;
+    }
+
+    // ---- The meta block (SPEC section 5): the icon, version and publisher the game cards show ----
+
+    static final int META_MAX = 8 << 20;
+    /** The parts of a meta block the cards use. The icon is the image file's bytes (a JPEG or PNG, 256x256 like on the console). Anything missing is null */
+    static final class Meta {
+        byte[] icon;
+        String version, title, publisher;
+
+        /**
+         * Reads a meta block: a list of records, each a type, a size and the data. In the spec the icon is type 3, the version 4, the title 5 and the publisher 6.
+         * Since 2026-11-04 the nup packer writes every type one too low (a55uka/nup 1d904e10 made its constants an enum starting at 0). The spec has no type 0,
+         * so if a file has a type 0 record anywhere, we read it with the shifted numbers. Types we don't know are skipped.
+         */
+        static Meta parse(byte[] b) { return parse(b, shifted(b)); }
+
+        /** True if the block has a type 0 record, which means it was written by the packer version with the shifted numbers */
+        static boolean shifted(byte[] b) {
+            if (b == null) return false;
+            for (int o = 0; o + 8 <= b.length; ) {
+                long n = u32(b, o + 4);
+                if (n > b.length - o - 8) break;
+                if (u16(b, o) == 0) return true;
+                o += 8 + (int) n;
+            }
+            return false;
+        }
+
+        static Meta parse(byte[] b, boolean shifted) {
+            int shift = shifted ? 1 : 0;
+            Meta m = new Meta();
+            for (int o = 0; o + 8 <= b.length; ) {
+                int t = u16(b, o) + shift; long n = u32(b, o + 4);
+                if (n > b.length - o - 8) break;
+                int at = o + 8, len = (int) n;
+                switch (t) {
+                    case 3: if (len > 4 && (b[at] & 0xff) == 0xFF && (b[at + 1] & 0xff) == 0xD8 || len > 8 && (b[at] & 0xff) == 0x89 && b[at + 1] == 'P') m.icon = Arrays.copyOfRange(b, at, at + len); break;   // the spec asks to check the image's first bytes rather than trust the type
+                    case 4: m.version = text(b, at, len); break;
+                    case 5: m.title = text(b, at, len); break;
+                    case 6: m.publisher = text(b, at, len); break;
+                    default: break;
+                }
+                o = at + len;
+            }
+            return m;
+        }
+
+        private static String text(byte[] b, int at, int len) {
+            String s = new String(b, at, len, StandardCharsets.UTF_8).trim();
+            return s.isEmpty() ? null : s;
+        }
+    }
+
+    /** The raw bytes of a package's meta block, or null if it has none */
+    byte[] metaBlock(Pkg p) throws IOException {
+        if (p.metaSize == 0) return null;
+        byte[] b = new byte[(int) p.metaSize];
+        try (Source r = source(file)) { r.read(p.metaOffset, b, 0, b.length); }
+        return b;
+    }
+
+    /**
+     * The game's details as the cards show them. The icon, title and publisher come from the base package (or the first package if there's no base, as the spec
+     * says), the version from the newest update (or the base). If one package lacks something, the other one is used.
+     */
+    Meta gameMeta() throws IOException {
+        Pkg app = null, upd = null;
+        for (Pkg p : packages) {
+            if (p.kind == BASE && app == null) app = p;
+            if (p.kind == UPDATE && (upd == null || p.version > upd.version)) upd = p;
+        }
+        if (app == null && !packages.isEmpty()) app = packages.get(0);
+        byte[] ab = app == null ? null : metaBlock(app), ub = upd == null || upd == app ? null : metaBlock(upd);
+        boolean shifted = Meta.shifted(ab) || Meta.shifted(ub);   // the shifted numbering applies to the whole file, also to blocks without a type 0 record
+        Meta out = new Meta(), a = ab == null ? null : Meta.parse(ab, shifted), u = ub == null ? null : Meta.parse(ub, shifted);
+        for (Meta m : new Meta[] {a, u}) {
+            if (m == null) continue;
+            if (out.icon == null) out.icon = m.icon;
+            if (out.title == null) out.title = m.title;
+            if (out.publisher == null) out.publisher = m.publisher;
+        }
+        out.version = u != null && u.version != null ? u.version : a != null ? a.version : null;
         return out;
     }
 

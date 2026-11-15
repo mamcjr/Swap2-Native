@@ -5,6 +5,7 @@
 // asynchronous inside: mavc_decode waits briefly for a picture while none is held, and a flush sends end-of-stream and drains. A new SPS / PPS makes a new decoder, as on Apple
 #include "../dm.h"
 #include "../hle_movie_avc.h"
+#include "../hle_movie_av1.h"
 #include "../android/av_android.h"
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
@@ -20,21 +21,22 @@ struct mavc {
     int pending, eos_sent, eos_done;
     uint8_t *au; size_t aucap;
     int red, red_fmt, rgba;
-    int av1, hw, hh;   // AV1 (mavc_new_av1): video/av01, the size Initialize gave, no parameter sets
+    mav1 *av1dec;
+    // AV1 uses mav1; H.264 keeps its own MediaCodec state.
 };
 
 mavc *mavc_new(void) { mavc *a = calloc(1, sizeof *a); if (!a) die("movie: AVC decoder allocation failed"); return a; }
-// AV1: the phone's AMediaCodec "video/av01" (a hardware decoder where the SoC has one, Android's own software decoder otherwise, Android 10+). Its input is the stream's
-// temporal units as the SDK submits them (low-overhead OBUs, the sequence header among them), so no csd and no parsing: the packet goes in whole
-mavc *mavc_new_av1(int w, int h) { mavc *a = mavc_new(); a->av1 = 1; a->hw = w > 0 ? w : 1920; a->hh = h > 0 ? h : 1080; return a; }
+// Recoverable AV1 backend: hardware where supported, dav1d on failure or unsupported devices.
+mavc *mavc_new_av1(int w, int h) { (void)w; (void)h; mavc *a = mavc_new(); a->av1dec = mav1_new(); return a; }
 static void close_codec(mavc *a) { if (a->c) { AMediaCodec_stop(a->c); AMediaCodec_delete(a->c); a->c = NULL; } a->pending = a->eos_sent = a->eos_done = 0; }
 void mavc_drop(mavc *a) {
     for (int i = 0; i < a->nq; i++) free(a->q[i].nv12);
     a->nq = 0;
+    if (a->av1dec) mav1_reset(a->av1dec);
     if (a->c && (a->pending || a->eos_sent)) AMediaCodec_flush(a->c);   // the decoder's own pictures belong to the old position too; csd given at configure is sent again by MediaCodec
     a->pending = a->eos_sent = a->eos_done = 0;
 }
-void mavc_free(mavc *a) { if (!a) return; mavc_drop(a); close_codec(a); free(a->au); free(a); }
+void mavc_free(mavc *a) { if (!a) return; mavc_drop(a); close_codec(a); if (a->av1dec) mav1_free(a->av1dec); free(a->au); free(a); }
 int mavc_queued(const mavc *a) { return a->nq; }
 void mavc_set_rgba(mavc *a) { if (a) a->rgba = 1; }   // converted at mavc_take: the decoder stays as it is
 
@@ -72,27 +74,7 @@ void mavc_avcc(mavc *a, const uint8_t *p, size_t n) {
     }
 }
 
-static int open_av1(mavc *a) {
-    close_codec(a);
-    a->c = AMediaCodec_createDecoderByType("video/av01");
-    if (!a->c) { if (!a->red++) LOG("[RED] movie: the phone has no AV1 decoder (video/av01), no pictures"); return 0; }
-    AMediaFormat *f = AMediaFormat_new();
-    AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, "video/av01");
-    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, a->hw); AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, a->hh);
-    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 21);
-    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, a->hw * a->hh * 3 / 2 > (1 << 20) ? a->hw * a->hh * 3 / 2 : 1 << 20);
-    media_status_t st = AMediaCodec_configure(a->c, f, NULL, NULL, 0);
-    AMediaFormat_delete(f);
-    if (st == AMEDIA_OK) st = AMediaCodec_start(a->c);
-    if (st != AMEDIA_OK) { if (!a->red++) LOG("[RED] movie: AMediaCodec refuses the AV1 configuration (%d, %d×%d), no pictures", (int)st, a->hw, a->hh); AMediaCodec_delete(a->c); a->c = NULL; return 0; }
-    char *name = NULL; AMediaCodec_getName(a->c, &name); snprintf(a->name, sizeof a->name, "%s", name ? name : "AMediaCodec"); if (name) AMediaCodec_releaseName(a->c, name);
-    a->cw = a->hw; a->chh = a->hh;
-    a->L = (nx_yuv_layout){NXYUV_NV12, a->hw, a->hh, 0, 0, a->hw, a->hh}; a->bt709 = a->hh >= 720; a->full = 0;
-    LOG("[movie] AV1: %s decoding %d×%d", a->name, a->hw, a->hh);
-    return 1;
-}
 static int open_codec(mavc *a) {
-    if (a->av1) return open_av1(a);
     close_codec(a);
     if (!a->nsps || !a->npps) { if (!a->red++) LOG("[RED] movie: AVC has no SPS / PPS, no pictures"); return 0; }
     int w = 1920, h = 1080; if (!avc_sps_size(a->sps, (size_t)a->nsps, &w, &h) && !a->red++) LOG("[RED] movie: AVC SPS size not readable, configuring 1920×1080");
@@ -176,13 +158,27 @@ static void au_add(void *ctx, const uint8_t *nal, size_t n) {   // the access un
     if (c->len + 4 + n > a->aucap) { a->aucap = (c->len + 4 + n) * 2; a->au = realloc(a->au, a->aucap); if (!a->au) die("movie: AVC buffer allocation failed"); }
     uint8_t *o = a->au + c->len; o[0] = o[1] = o[2] = 0; o[3] = 1; memcpy(o + 4, nal, n); c->len += 4 + n;
 }
+// Keep the existing nn::codec queue contract while AV1 uses the recoverable hardware/dav1d backend.
+static int av1_picture(mavc *a, const uint8_t *data, size_t n, int64_t pts) {
+    mav1_picture p = {0}; mav1_set_time(a->av1dec, pts);
+    int r = mav1_decode(a->av1dec, data, n, &p);
+    if (r <= 0) return r;
+    if (a->nq == QMAX) return -1;
+    int w = (p.w + 1) & ~1, h = (p.h + 1) & ~1;
+    uint8_t *f = malloc((size_t)w * h * 3 / 2);
+    if (!f) return -1;
+    memset(f, 16, (size_t)w * h); memset(f + (size_t)w * h, 128, (size_t)w * h / 2);
+    for (int y = 0; y < p.h; y++) memcpy(f + (size_t)y * w, p.y + (size_t)y * p.ystride, (size_t)p.w);
+    for (int y = 0; y < (p.h + 1) / 2; y++) memcpy(f + (size_t)w * h + (size_t)y * w, p.uv + (size_t)y * p.uvstride, (size_t)w);
+    a->bt709 = p.matrix == 2; a->full = p.full_range;
+    a->q[a->nq].nv12 = f; a->q[a->nq].w = w; a->q[a->nq].h = h;
+    a->q[a->nq].pts = p.has_pts ? p.pts : pts; a->nq++;
+    return 0;
+}
 int mavc_decode(mavc *a, const uint8_t *p, int n, int64_t pts_us) {
     au_ctx c = {a, 0, 0};
-    if (a->av1) {   // a temporal unit, as it is
-        if (n <= 0) return 0;
-        if ((size_t)n > a->aucap) { a->aucap = (size_t)n * 2; a->au = realloc(a->au, a->aucap); if (!a->au) die("movie: AV1 buffer allocation failed"); }
-        memcpy(a->au, p, (size_t)n); c.len = (size_t)n; c.picture = 1;
-    } else each_nal(p, (size_t)n, au_add, &c);
+    if (a->av1dec) return av1_picture(a, p, n > 0 ? (size_t)n : 0, pts_us);
+    each_nal(p, (size_t)n, au_add, &c);
     if (!c.len) return 0;
     if ((a->dirty || !a->c) && !open_codec(a)) return -1;
     if (a->eos_sent) { AMediaCodec_flush(a->c); a->pending = a->eos_sent = a->eos_done = 0; }   // packets after the end of a stream without a seek: a new stream
@@ -206,8 +202,8 @@ static void end_of_stream(mavc *a) {   // flush: every picture still inside the 
     for (int k = 0; k < 50 && !a->eos_done && !a->nq; k++) drain(a, 20000);
 }
 int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
-    if (a->c) drain(a, 0);
-    if (!a->nq && flush) end_of_stream(a);
+    if (a->av1dec) { if (!a->nq && flush) av1_picture(a, NULL, 0, -1); }
+    else { if (a->c) drain(a, 0); if (!a->nq && flush) end_of_stream(a); }
     if (!a->nq) return 0;
     uint8_t *f = a->q[0].nv12; int pw = a->q[0].w, ph = a->q[0].h; if (pts_us) *pts_us = a->q[0].pts;
     memmove(a->q, a->q + 1, --a->nq * sizeof a->q[0]);

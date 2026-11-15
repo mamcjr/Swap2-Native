@@ -24,6 +24,13 @@
         <item name="android:windowSplashScreenAnimatedIcon">@drawable/s2_splash_v6</item>
     </style>
 
+    <!-- The game's window (GameActivity): the device's full-screen theme as before, on the loading curtain's dark stage (PlayCurtain), with no starting window, so
+         the launcher's Play transition stays on screen until the game's own curtain draws over the same picture. No night variant: the game is never re-themed -->
+    <style name="Theme.Swap2.Game" parent="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@color/s2_play_stage</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+
     <style name="Theme.Banana.Dialog" parent="android:Theme.Material.Light.Dialog.Alert">
         <item name="android:colorAccent">@color/bn_accent</item>
         <item name="android:colorControlActivated">@color/bn_accent</item>

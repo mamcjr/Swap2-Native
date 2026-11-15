@@ -28,7 +28,10 @@ final class PerformanceOverlay extends View {
     };
     private float downX, downY, startX, startY;
     private Overlay.Sample data = new Overlay.Sample();
-    private String gpu = "GPU", driver = "", brand = "GPU";
+    private String gpu = "GPU", driver = "", brand = "GPU", custom = "";
+    // Turnip (Mesa's open driver, VK_DRIVER_ID_MESA_TURNIP = 18) in place of Qualcomm's own: marked on the overlay, as it changes what runs (native mesh on some builds,
+    // other compile times and frame rates), so a screenshot or video says which driver it came from
+    private boolean turnip;
     private final OnLayoutChangeListener parentLayout = (v,l,t,r,b,ol,ot,or,ob) -> { if (r-l != or-ol || b-t != ob-ot) { requestLayout(); post(this::place); } };
 
     PerformanceOverlay(Context c) {
@@ -47,8 +50,10 @@ final class PerformanceOverlay extends View {
         });
     }
 
-    void gpu(String name, String driverName) {
-        gpu = name == null ? "GPU" : name; driver = driverName == null ? "" : driverName;
+    void gpu(String name, String driverName, String driverId, String customName) {
+        gpu = name == null ? "GPU" : name; driver = driverName == null ? "" : driverName; custom = customName == null ? "" : customName;
+        turnip = driver.toLowerCase(Locale.ROOT).contains("turnip") || "18".equals(driverId) || custom.toLowerCase(Locale.ROOT).contains("turnip");
+        requestLayout();
         String n = gpu.toLowerCase(Locale.ROOT);
         brand = n.contains("adreno") ? "QUALCOMM" : n.contains("mali") || n.contains("immortalis") ? "ARM" : n.contains("nvidia") ? "NVIDIA" : n.contains("xclipse") ? "SAMSUNG" : "GPU";
         invalidate();
@@ -80,8 +85,8 @@ final class PerformanceOverlay extends View {
     @Override protected void onMeasure(int w, int h) {
         int maxW = getParent() instanceof View ? ((View)getParent()).getWidth() : 0;
         int maxH = getParent() instanceof View ? ((View)getParent()).getHeight() : 0;
-        float fit = Math.min(scale, Math.min((maxW > 0 ? maxW : MeasureSpec.getSize(w)) / ((detail ? 270f : 520f) * dp), (maxH > 0 ? maxH : MeasureSpec.getSize(h)) / ((detail ? 286f : 34f) * dp)));
-        setMeasuredDimension(Math.max(1, Math.round((detail ? 270 : 520)*dp*fit)), Math.max(1, Math.round((detail ? 286 : 34)*dp*fit)));
+        float fit = Math.min(scale, Math.min((maxW > 0 ? maxW : MeasureSpec.getSize(w)) / ((detail ? 270f : compactWidth()) * dp), (maxH > 0 ? maxH : MeasureSpec.getSize(h)) / ((detail ? 286f : 34f) * dp)));
+        setMeasuredDimension(Math.max(1, Math.round((detail ? 270 : compactWidth())*dp*fit)), Math.max(1, Math.round((detail ? 286 : 34)*dp*fit)));
     }
     @Override protected void onSizeChanged(int w,int h,int ow,int oh) { post(this::place); }
     @Override public android.view.WindowInsets onApplyWindowInsets(android.view.WindowInsets insets) { requestLayout(); post(this::place); return super.onApplyWindowInsets(insets); }
@@ -113,12 +118,14 @@ final class PerformanceOverlay extends View {
         }
         return true;
     }
+    private float compactWidth() { return turnip ? 600 : 520; }   // (room for the TURNIP badge after the battery temperature)
+    private void badge(Canvas c,String label,float x,float y,float w,int fill,int color) { paint.setColor(fill);c.drawRoundRect(new RectF(x,y,x+w,y+20),5,5,paint);text(c,label,x+6,y+14,10,color); }
     private void text(Canvas c,String value,float x,float y,float size,int color) { paint.setColor(color);paint.setTextSize(size);paint.setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL));c.drawText(value,x,y,paint); }
     private static String number(float n) { return Float.isFinite(n) ? String.format(Locale.ROOT,"%.1f",n) : "--"; }
     private String fps() { return number(data.fps)+(Float.isFinite(data.presented) && data.presented > data.fps+1 ? " > "+number(data.presented) : ""); }
     @Override protected void onDraw(Canvas raw) {
-        super.onDraw(raw); raw.save(); raw.scale(getWidth() / (detail ? 270f : 520f),getHeight() / (detail ? 286f : 34f));
-        Canvas c=raw; float width=detail ? 270 : 520;
+        super.onDraw(raw); raw.save(); raw.scale(getWidth() / (detail ? 270f : compactWidth()),getHeight() / (detail ? 286f : 34f));
+        Canvas c=raw; float width=detail ? 270 : compactWidth();
         paint.setColor(0xE6101829); c.drawRoundRect(new RectF(0,0,width,detail?286:34),10,10,paint);
         paint.setColor(0xFF50DBEB);c.drawRoundRect(new RectF(0,8,3,detail?278:26),2,2,paint);
         if (!detail) {
@@ -127,16 +134,18 @@ final class PerformanceOverlay extends View {
             text(c,"RAM "+(data.rss<0?"--":String.format(Locale.ROOT,"%.0f MB",data.rss/1048576f)),235,23,13,0xFFE3EAF5);
             text(c,"SoC "+number(data.soc)+"°",360,23,13,0xFFFFD477);
             text(c,"BAT "+number(data.battery)+"°",443,23,13,0xFFFFD477);
+            if (turnip) badge(c,"TURNIP",522,7,66,0xFF4A2A12,0xFFFF9F43);
         } else {
             // Manufacturer wordmark badge, not an unofficial recreation of a corporate logo.
-            paint.setColor(0xFF203A50);c.drawRoundRect(new RectF(178,9,260,29),5,5,paint);text(c,brand,184,23,10,0xFF6DE6EF);
+            if (turnip) badge(c,"TURNIP",178,9,82,0xFF4A2A12,0xFFFF9F43);
+            else { paint.setColor(0xFF203A50);c.drawRoundRect(new RectF(178,9,260,29),5,5,paint);text(c,brand,184,23,10,0xFF6DE6EF); }
             text(c,"SWAP2 / MONITOR",12,23,10,0xFF92A5BC);
             String title=gpu; paint.setTextSize(12);while(title.length()>1 && paint.measureText(title)>245) title=title.substring(0,title.length()-1);
             text(c,title,12,47,12,0xFFFFFFFF);
             text(c,fps()+" FPS",12,72,19,0xFF6DE6EF);text(c,number(data.ms)+" ms",175,72,15,0xFFFFFFFF);
             chart(c,0,82,0xFF50DBEB,"FPS"); chart(c,1,123,0xFFFFCE78,"ms"); chart(c,2,164,0xFFA699FF,"RAM MB");
             text(c,"GPU "+number(data.gpuMs)+" ms  |  RAM "+(data.rss<0?"--":String.format(Locale.ROOT,"%.0f MB",data.rss/1048576f)),12,212,11,0xFFE3EAF5);
-            text(c,"CPU cap "+data.cpu,12,229,10,0xFFE3EAF5);
+            text(c,"CPU cap "+data.cpu+(turnip ? "  |  "+(custom.isEmpty() ? "Turnip (Mesa)" : custom.length() > 26 ? custom.substring(0,25)+"…" : custom) : ""),12,229,10,turnip ? 0xFFFF9F43 : 0xFFE3EAF5);
             text(c,"SoC "+number(data.soc)+"°  BAT "+number(data.battery)+"°  "+(data.batteryLevel<0?"--":data.batteryLevel+"%"),12,246,11,0xFFFFD477);
             text(c,"Free RAM "+(data.total<=0?"--":String.format(Locale.ROOT,"%.1f / %.1f GB",data.available/1073741824f,data.total/1073741824f))+"  T:"+(data.thermal<0?"--":data.thermal),12,263,10,0xFFE3EAF5);
             text(c,getContext().getString(R.string.s2_overlay_sample_note),12,279,9,0xFF92A5BC);

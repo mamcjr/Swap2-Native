@@ -40,5 +40,18 @@ class PsoGPU(unittest.TestCase):
             self.assertIn(': pso_gpu takes 1-4 whitespace-separated GPU architectures', out, rows)
 
 
+class MemoryPoolDefault(unittest.TestCase):
+    def test_runtime_default_and_opt_out(self):
+        for rows, expected in (('', '1'), ('mem_map_limit\toff\n', '0'), ('mem_map_limit\ton\n', '1')):
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, ID).mkdir()
+                Path(d, ID, 'game.tsv').write_text(TSV + rows)
+                out = Path(d, 'runtime.tsv')
+                r = subprocess.run([sys.executable, str(GAME), 'runtime', ID, str(out)],
+                                   env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn('MEM_MAP_LIMIT\t' + expected + '\n', out.read_text())
+
+
 if __name__ == '__main__':
     unittest.main()

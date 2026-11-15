@@ -1,0 +1,12 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+layout(local_size_x=32) in;
+struct Payload { uint words[64]; };
+taskPayloadSharedEXT Payload payload;
+void main() {
+    uint t=gl_WorkGroupID.x, count=t%3u;
+    for(uint i=gl_LocalInvocationIndex;i<64u;i+=32u) payload.words[i]=0u;
+    barrier();
+    if(gl_LocalInvocationIndex==0u) { payload.words[1]=count; payload.words[4]=t; }
+    EmitMeshTasksEXT(count,1,1);
+}

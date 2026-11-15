@@ -35,14 +35,14 @@
 import ast, collections, concurrent.futures as cf, ctypes, hashlib, json, mmap, os, re, shutil, struct, subprocess, sys, tempfile, threading
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-import dmsh_chain, dmsh_abi as abi, dmsh_ampere, tool_lock, vk_android_spv as spv, vk_android_delta as delta
+import dmsh_chain, dmsh_abi as abi, dmsh_ampere, tool_lock, vk_android_spv as spv, vk_android_delta as delta, vk_android_mesh
 
 try: from compression import zstd   # Python 3.14; before it, pip install backports.zstd (shader_split.py needs it too)
 except ImportError:
     try: from backports import zstd   # pyright: ignore[reportMissingImports]
     except ImportError: zstd = None
 ABI_VK = os.path.join(GFX, 'nvn', 'dmsh_abi_vk.h'); HEADER_VK = os.path.join(GFX, 'nvn', 'dmsh_chain_vk.h')
-VK_FILES = ['tools/vk_android_build.py', 'tools/vk_android_spv.py', 'tools/vk_android_delta.py', 'nvn/dmsh_abi_vk.h']
+VK_FILES = ['tools/vk_android_build.py', 'tools/vk_android_spv.py', 'tools/vk_android_delta.py', 'tools/vk_android_mesh.py', 'nvn/dmsh_abi_vk.h']
 SAME_TSV = os.path.join(HERE, 'vk_android_same.tsv')
 vk_values = delta.vk_values
 
@@ -594,10 +594,27 @@ def finish(key, w, job, c1):
     if stage == 'ms':   # the translator adds the constant itself (job gl_depth_spec: a mesh program may not read its outputs back)
         gl = any(d.get(spv.DEC_SPEC_ID) == [VK['SPEC_GL_DEPTH']] for d in m.decos.values())
     alpha = stage == 'ps' and spv.alpha_test(m, VK['SPEC_ALPHA_FUNC'])
+    # Raw global memory (vk_android_spv.py raw_global_memory): in a module with a GlobalToStorage raw helper, the helpers' temporaries as values, the pool table search one
+    # loop, the load calls read through the pool entry kept last. The base module's last rewrite, so every module made from it below has it (a task or mesh program's
+    # compute module, the shuffle and integer-output modules). fm is the module as it was before: what the facts and the variants' choices are read from, so they stay
+    # what they were (a promoted temporary would show a store of integer bits or of a constant that the translator's form hides). A module without a raw helper is not
+    # touched, and its library entry stays byte for byte the same
+    fm, raw = m, None
+    if not hmma and spv.raw_helpers(m):
+        fm = spv.Module(m.data())
+        raw = spv.raw_global_memory(m, {e['id'] for e in binds if e['kind'] == abi.KIND_GMEM_MAP})
+    # A mesh program's plane stores into a workgroup copy, handed to the outputs by one loop after the body (vk_android_spv.py defer_mesh_plane_stores): the driver
+    # inlines the store chain once instead of at each of its calls. Before the fallback is lowered from the module, so both have it
+    defer = spv.defer_mesh_plane_stores(m) if stage == 'ms' else None
     mods = [(VK['MOD_BASE'], m.data())]
+    mesh_fallback = None
+    if stage in ('ts', 'ms'):
+        cs, vs, mesh_fallback = vk_android_mesh.lower(m.data())
+        mods.append((VK['MOD_MESH_COMPUTE'], cs))
+        if vs: mods.append((VK['MOD_MESH_VERTEX'], vs))
     uint_mask = 0
     if stage == 'ps':   # the variants of the same module (dmsh_abi_vk.h DMSH_VK_MOD_*)
-        mods_, uint_mask = ps_variants(key, m)
+        mods_, uint_mask = ps_variants(key, m, fm)
         mods += mods_
     if stage == 'cs':   # its subgroup shuffles through workgroup memory, for drivers without an arbitrary-index shuffle instruction (vk_android_spv.py shuffle_lds)
         x = spv.Module(m.data())
@@ -605,7 +622,8 @@ def finish(key, w, job, c1):
     for variant, data in mods:
         err = validate(data, w, f'{key}_{variant}')
         if err: return 'spirv-val failed', err, None
-    fa = facts_of(key, stage, m, job, res)
+    fa = facts_of(key, stage, fm, job, res)
+    if mesh_fallback: fa['flags'] |= VK['F_MESH_FALLBACK']
     if hmma: fa['flags'] |= VK['F_HMMA']; fa['hmma_fns'] = [spv.HMMA_NAME]   # (lowered: the helper function is gone)
     if gl: fa['flags'] |= VK['F_GL_DEPTH']
     if alpha: fa['flags'] |= VK['F_ALPHA_TEST']
@@ -613,27 +631,28 @@ def finish(key, w, job, c1):
     if prim or (stage == 'ms' and (res.get('mesh') or {}).get('primitive_locations')): fa['flags'] |= VK['F_MESH_PRIM']
     fa['uint_mask'] = uint_mask; fa['variants'] = [v for v, _ in mods]
     name, k = loc[key]
-    shared = job.get('shared') or 0
+    shared = (job.get('shared') or 0) + (defer['bytes'] if defer else 0)   # (the plane copy: workgroup memory the compute fallback takes too)
     sp = res.get('shared_spill')   # shared memory moved to a storage buffer (Program.cs): the slice the shader addresses, and what stays in workgroup memory (the HMMA scratch)
     for e in binds:
         if e['kind'] == abi.KIND_SHARED_SPILL:
             if not sp: e['kind'] = abi.KIND_UNKNOWN; continue   # (the replay then refuses the shader)
             e['bytes'] = sp['bytes']; shared = sp['workgroup']
     refl = {'key': key, 'stage': stage, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'c1': c1.hex(), 'local': job.get('local') or [1, 1, 1], 'shared': shared,
-            'notes': res['notes'], 'vs_pad': pad, 'mesh': res.get('mesh'), 'ps_prim': prim, 'caps_dropped': dropped, 'caps_added': added, 'precise': n_precise, 'hmma_lds': hmma, 'shuffle_cse': list(scse), 'base_instance': base_inst[0], 'base_instance_left': base_inst[1], 'drv_reads': drv_reads(binds, m), 'tf': job.get('tf'), **fa,
+            'notes': res['notes'], 'vs_pad': pad, 'mesh': res.get('mesh'), 'ps_prim': prim, 'caps_dropped': dropped, 'caps_added': added, 'precise': n_precise, 'hmma_lds': hmma, 'shuffle_cse': list(scse), 'base_instance': base_inst[0], 'base_instance_left': base_inst[1], 'drv_reads': drv_reads(binds, fm), 'tf': job.get('tf'), **fa,
+            'mesh_fallback': mesh_fallback, 'raw': raw, 'mesh_defer': defer,
             'bindings': [{kk: v for kk, v in e.items() if kk not in ('id', 'tbind', 'index')} for e in binds]}
     loose = os.environ.get('DMSH_VK_LOOSE') == '1'
     return 'ok', '', (refl, [(variant, len(data), *pack_module(data), data if loose else None) for variant, data in mods])   # compressed here, in parallel
 
 
-def ps_variants(key, m):
+def ps_variants(key, m, fm):
     """A pixel shader's extra modules (dmsh_build.py fs_uint / fs_dual on SPIR-V): MOD_UINT when it writes an output from integer bits or only constants (a clear into an
     integer target), MOD_UINT_MIXED when it also writes float outputs (uint_mask: the integer ones), MOD_DUAL for the profile's dual_want.tsv shaders writing exactly
-    colours 0 and 1. → ([(variant, SPIR-V)], uint_mask)"""
+    colours 0 and 1. fm: the module those stores are looked for in (m before the raw global memory passes, or m itself). → ([(variant, SPIR-V)], uint_mask)"""
     out, mask = [], 0
     fl = {l for l, (_, t) in m.io(spv.SC_OUTPUT).items() if not m.int_type(m.scalar_of(t))}
-    from_int = spv.int_outputs(m) & fl
-    if from_int or spv.const_written_outputs(m):
+    from_int = spv.int_outputs(fm) & fl
+    if from_int or spv.const_written_outputs(fm):
         u = spv.Module(m.data())
         if spv.retype_outputs(u, fl): out.append((VK['MOD_UINT'], u.data()))
         if from_int and fl - from_int:
@@ -674,6 +693,11 @@ def entry_parts(key, refl, nmods):
     lx, ly, lz = (list(refl['local']) + [1, 1, 1])[:3]
     entry = delta.ENTRY.pack(key_int(key), vin_types, STAGE[refl['stage']], nmods, refl['flags'], 0, 0, len(refl['bindings']), fout_types,
                              lx, ly, lz, fout_mask, refl.get('uint_mask', 0), refl['shared'], 0, len(c1), vin_mask)
+    if mf := refl.get('mesh_fallback'):
+        entry = bytearray(entry)
+        struct.pack_into('<I', entry, 52, mf['stride'])
+        struct.pack_into('<I', entry, 60, mf['payload_words'] | mf['max_primitives'] << 16 | (mf['topology'] == 1) << 25)
+        entry = bytes(entry)
     return entry, bytes(binds), c1
 
 
@@ -764,7 +788,7 @@ def result_head(path):
             if len(d) != 12 or d[:8] != RESULT_MAGIC: return None
             h = json.loads(f.read(struct.unpack('<I', d[8:])[0]))
     except (OSError, ValueError): return None
-    return h if (h.get('vk'), h.get('inputs'), h.get('raw'), h.get('val'), h.get('key')) == (TOOLS, INPUTS, RAW, VAL_ID, os.path.basename(path)[:-2]) else None
+    return h if (h.get('vk') in (TOOLS, VKV) and (h.get('inputs'), h.get('raw'), h.get('val'), h.get('key')) == (INPUTS, RAW, VAL_ID, os.path.basename(path)[:-2])) else None
 
 
 def write_result(key, st, err, r, ps_in):
@@ -1057,4 +1081,16 @@ if hm: print(f"HMMA helper calls lowered at their sites (hmma_lds): {sum(x.get('
 _sc = [x.get('shuffle_cse') or [0, 0] for x in okr]
 if any(f or r for f, r in _sc): print(f"subgroup shuffles with constant addends taken out (shuffle_cse): {sum(f for f, _ in _sc)}; repeats in a block sharing an earlier one's result: {sum(r for _, r in _sc)}; in {sum(1 for f, r in _sc if f or r)} shaders")
 print(f"compute modules with their shuffles through workgroup memory (MOD_SHUFFLE_LDS): {sum(1 for x in okr if VK['MOD_SHUFFLE_LDS'] in x['variants'])}")
+_raw = [x['raw'] for x in okr if x.get('raw')]   # (vk_android_spv.py raw_global_memory's counts)
+if _raw:
+    _runs = collections.Counter()
+    for _r in _raw: _runs.update({int(n): c for n, c in _r['runs'].items()})
+    print(f"raw global memory: {len(_raw)} shaders with a raw helper ({sum(r['helpers'] for r in _raw)} helpers): searches made a loop {sum(r['loops'] for r in _raw)}, left unrolled {sum(r['unlooped'] for r in _raw)}; "
+          f"load calls read through the kept pool entry {sum(r['cached'] for r in _raw)} in {sum(_runs.values())} runs (" + ', '.join(f'{c} of {n}' for n, c in sorted(_runs.items())) + f"), "
+          f"helper calls left {sum(r['left'] for r in _raw)}; variables promoted {sum(r['promoted'] for r in _raw)}")
+    _rl = [x['key'] for x in okr if x.get('raw') and (x['raw']['untouched'] or x['raw']['unlooped'] or x['raw']['promote_skipped'])]
+    if _rl: print(f"[RED] raw global memory helpers of a shape the passes do not know, left as the translator wrote them (untouched {sum(r['untouched'] for r in _raw)} shaders, "
+                  f"unrolled searches {sum(r['unlooped'] for r in _raw)}, functions not promoted {sum(r['promote_skipped'] for r in _raw)}): {len(_rl)} shaders, e.g. " + ', '.join(sorted(_rl)[:5]))
+_dfr = [x['mesh_defer'] for x in okr if x.get('mesh_defer')]   # (vk_android_spv.py defer_mesh_plane_stores)
+if _dfr: print(f"mesh plane stores deferred to one scatter: {len(_dfr)} mesh programs, {sum(d['calls'] for d in _dfr)} calls, at most {max(d['bytes'] for d in _dfr)} workgroup bytes added")
 print(f'library: game {GAME.id}, inputs {INPUTS}, chain {CHAIN}, vk chain {VKV}' + (f' (tools {TOOLS}, vk_android_same.tsv)' if TOOLS != VKV else ''))

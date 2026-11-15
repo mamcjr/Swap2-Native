@@ -80,12 +80,15 @@ final class ShaderUi {
         if (!ready(a, g)) return;
         File pack = new File(g.packDir);
         String app = BuildConfig.VERSION_NAME + "/" + BuildConfig.VERSION_CODE;
-        run(a, g, a.getString(R.string.s2_shaders_exporting, g.name), p -> ShaderZip.export(pack, g.titleId, dir, app, BuildConfig.NX_XLATE_SOURCE, p), (r, f, gone) -> {
+        // with the game's prewarm list (the host's DM_TEMP/vk_pipelines.keys): the other phone makes these pipelines ahead instead of on its first visits
+        File keys = new File(AppStorage.temp(a, g.titleId), ShaderZip.PREWARM_LIST);
+        run(a, g, a.getString(R.string.s2_shaders_exporting, g.name), p -> ShaderZip.export(pack, g.titleId, dir, app, BuildConfig.NX_XLATE_SOURCE, keys, p), (r, f, gone) -> {
             if (gone) return;   // the activity was recreated meanwhile (a theme or language change): the zip is written, nothing to show on a window that is gone
             if (f != null) { a.error(message(a, g, f, true)); return; }
             ShaderZip.Exported e = (ShaderZip.Exported) r;
             String text = a.getString(R.string.s2_shaders_exported_message, e.zip.getPath(), SaveStore.size(e.size), e.shaders, e.version);
             if (e.reused) text += "\n\n" + a.getString(R.string.s2_shaders_exported_same);
+            if (e.prewarmKeys > 0) text += "\n\n" + a.getString(R.string.s2_shaders_exported_prewarm, e.prewarmKeys);
             if (!e.version.equals(BuildConfig.NX_DMSH_VK_CHAIN)) text += "\n\n" + a.getString(R.string.s2_shaders_exported_older, e.version);
             new AlertDialog.Builder(a).setTitle(R.string.s2_shaders_exported_title).setMessage(text).setPositiveButton(android.R.string.ok, null).show();
         });
@@ -160,7 +163,7 @@ final class ShaderUi {
         Game g = pending;
         pending = null;
         if (g == null) return true;
-        String p = PathUtil.documentToPath(doc);
+        String p = PathUtil.documentToPath(a, doc);
         File f = p == null ? null : new File(p);
         if (f != null && f.isFile() && f.canRead()) importRun(a, g, f, null, null);
         else importRun(a, g, null, doc, displayName(a, doc));
@@ -186,16 +189,23 @@ final class ShaderUi {
         return true;
     }
 
-    /** Imports a zip: a file (read by name: the entries' order does not matter), or a document's stream (doc, its name) */
-    private static void importRun(MainActivity a, Game g, File zip, Uri doc, String docName) {
+    /** Imports a loose library folder (ShaderLibs.loose: dmsh_vk.lib with its inputs.tsv, a library shared as a folder) into this game: the zip's checks, then its copy */
+    static void importFolder(MainActivity a, Game g, File folder) { importRun(a, g, null, null, null, folder); }
+
+    private static void importRun(MainActivity a, Game g, File zip, Uri doc, String docName) { importRun(a, g, zip, doc, docName, null); }
+
+    /** Imports a zip: a file (read by name: the entries' order does not matter), or a document's stream (doc, its name); or a loose library folder */
+    private static void importRun(MainActivity a, Game g, File zip, Uri doc, String docName, File folder) {
         if (!ready(a, g)) return;
         File gd = new File(g.gameDir);
         run(a, g, a.getString(R.string.s2_shaders_importing, g.name), p -> {
             File target = target(a, g);
             if (translating(a, g, target)) throw new ShaderZip.Failure(ShaderZip.Why.BUSY, "its Prepare job translates into " + target);
             ShaderZip.Target t = new ShaderZip.Target(target, g.titleId);
+            t.temp = AppStorage.temp(a, g.titleId);   // a zip's prewarm list goes beside the game's own (the host merges them: vka_pso.c pw_load)
             ShaderZip.Staged s;
-            if (zip != null) s = ShaderZip.read(zip, t, p);
+            if (folder != null) s = ShaderZip.readFolder(folder, t, p);
+            else if (zip != null) s = ShaderZip.read(zip, t, p);
             else try (InputStream in = a.getContentResolver().openInputStream(doc)) {
                 if (in == null) throw ShaderZip.io("cannot open " + doc, ShaderZip.IO_OPEN, docName);
                 s = ShaderZip.read(in, docName, t, p);
@@ -211,13 +221,15 @@ final class ShaderUi {
             if (gone) return;   // the activity was recreated meanwhile: the new one shows the card from the saved list
             a.refresh();
             AlertDialog.Builder b = new AlertDialog.Builder(a).setTitle(R.string.s2_shaders_imported_title);
+            String keys = res.prewarmKeys > 0 ? "\n\n" + a.getString(R.string.s2_shaders_imported_prewarm, res.prewarmKeys)
+                    : res.prewarmProblem != null ? "\n\n" + a.getString(R.string.s2_shaders_imported_prewarm_failed, res.prewarmProblem) : "";
             if (res.hadPack && ShaderZip.ready(res.packDir, g.titleId)) {
-                b.setMessage(a.getString(R.string.s2_shaders_imported_ready, res.shaders, res.version)).setPositiveButton(android.R.string.ok, null).show();
+                b.setMessage(a.getString(R.string.s2_shaders_imported_ready, res.shaders, res.version) + keys).setPositiveButton(android.R.string.ok, null).show();
                 return;
             }
             Job j = jobFor(a, g, res.packDir);
             String st = j == null ? "" : j.state();
-            String text = a.getString(R.string.s2_shaders_imported_prepare, res.shaders, res.version);
+            String text = a.getString(R.string.s2_shaders_imported_prepare, res.shaders, res.version) + keys;
             if (st.equals("paused") || st.equals("failed") || st.equals("pending")) text += "\n\n" + a.getString(R.string.s2_shaders_imported_resume);
             b.setMessage(text);
             if (Ondevice.isDump(gd)) b.setPositiveButton(R.string.s2_shaders_prepare_now, (x, w) -> Ondevice.prepare(a, gd, false)).setNegativeButton(android.R.string.cancel, null);

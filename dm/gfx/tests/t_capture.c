@@ -137,6 +137,8 @@ int main(void) {
     const char *lay = cap_layout(); cap_put(&w, CAP_LAYT, 0, lay, strlen(lay), 0);
     for (int r = 0; r < nregs; r++) { uint8_t b[sizeof(cap_regn) + 65536]; cap_regn h = {(uint32_t)r, r == 2, regs[r].lo, regs[r].size};
         memcpy(b, &h, sizeof h); memcpy(b + sizeof h, (const void *)(uintptr_t)regs[r].lo, (size_t)regs[r].size); cap_put(&w, CAP_REGN, 1, b, sizeof h + regs[r].size, 1); }
+    // Only part of pool A is GPU-addressable; CPU-visible pool B stays unplaced.
+    { cap_padd placed = {cap_addr(0, 0x5000), 0x1000}; cap_put(&w, CAP_PLAC, 1, &placed, sizeof placed, 0); }
     for (int i = 0; i < 3; i++) { uint8_t b[8 + 4096]; uint32_t hd[2] = {(uint32_t)i, (uint32_t)all[i]->n}; memcpy(b, hd, 8); memcpy(b + 8, enc_bytes[i], all[i]->n); cap_put(&w, CAP_SEGM, 1, b, 8 + all[i]->n, 1); }
     { tex_t t = game_tex; cap_tex_fields(&t, &enc, NULL); cap_put(&w, CAP_TOBJ, 1, &t, sizeof t, 0); }
     uint64_t raw = w.raw, stored = w.stored;
@@ -149,7 +151,7 @@ int main(void) {
 
     // replay side: read the chunks, regions at fresh addresses, objects rebuilt, segments decoded
     cap_reader rd; CHECK(cap_load(&rd, path) == 1, "load");
-    cap_chunk c; uint8_t *d; int nseg = 0, nreg = 0, layout_ok = 0; static uint8_t segbuf[3][4096 + 8]; size_t seglen[3] = {0};
+    cap_chunk c; uint8_t *d; int nseg = 0, nreg = 0, nplaced = 0, layout_ok = 0; static uint8_t segbuf[3][4096 + 8]; size_t seglen[3] = {0};
     tex_t new_tex = {0}; pool_t new_pool = {0}; prog_t new_prog = {0}; dpool_t new_dp = {0}; sync_t new_sync = {0};
     while (cap_next(&rd, &c, &d) == 1) {
         if (c.tag == CAP_LAYT) layout_ok = c.raw == strlen(cap_layout()) && !memcmp(d, cap_layout(), c.raw);
@@ -157,10 +159,18 @@ int main(void) {
             CHECK(!memcmp(new_base[h.index], (const void *)(uintptr_t)h.old_lo, (size_t)h.size), "region bytes round-trip"); nreg++; }
         if (c.tag == CAP_SEGM) { uint32_t i, n; memcpy(&i, d, 4); memcpy(&n, d + 4, 4); memcpy(segbuf[i], d + 8, n); seglen[i] = n; new_seg[i] = segbuf[i]; nseg++; }
         if (c.tag == CAP_TOBJ) memcpy(&new_tex, d, sizeof new_tex);
+        if (c.tag == CAP_PLAC) {
+            CHECK(c.submit == 1 && c.raw == sizeof(cap_padd), "placement retains its submission and extent");
+            cap_padd placed; memcpy(&placed, d, sizeof placed);
+            CHECK(cap_is_addr(placed.mem) && cap_addr_region(placed.mem) == 0 && cap_addr_off(placed.mem) == 0x5000 && placed.size == 0x1000, "GPU placement preserves a subrange rather than all CPU pools");
+            dec_addr(NULL, &placed.mem, placed.size, 0);
+            CHECK(placed.mem == (uint64_t)(uintptr_t)new_base[0] + 0x5000, "placement relocates with its captured region");
+            nplaced++;
+        }
         free(d);
     }
     cap_unload(&rd);
-    CHECK(layout_ok && nreg == 3 && nseg == 3, "every chunk read back");
+    CHECK(layout_ok && nreg == 3 && nseg == 3 && nplaced == 1, "every chunk read back");
     new_pool = game_pool; new_pool.mem = new_base[0];
     new_obj[CAP_K_TEX][0] = &new_tex; new_obj[CAP_K_PROG][0] = &new_prog; new_obj[CAP_K_DPOOL][0] = &new_dp; new_obj[CAP_K_SYNC][0] = &new_sync; new_obj[CAP_K_POOL][0] = &new_pool;
     cap_tex_fields(&new_tex, &dec, NULL);

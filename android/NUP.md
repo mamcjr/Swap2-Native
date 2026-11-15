@@ -77,13 +77,36 @@ the rest after it is unambiguous. Tools take these wherever they take the matchi
 
 ## App (android/app)
 
-- The extension is lower case: tools and host split at `.nup:`; the app refuses `.NUP` with "rename it to .nup".
-- Add game asks "a folder" or "a .nup file" (system file picker, turned into its /storage path; Recent and MediaStore
-  entries have none and are refused with a sentence). A picked folder holding `.nup` files (or dump subfolders) adds
+- The extension is case-insensitive (`.nup`, `.NUP`, `.Nup`); the existing readers accept it without renaming the dump.
+- Add game asks "a folder" or "a .nup file". The file picker selection is resolved with `PathUtil.documentToPath(Context, Uri)`:
+  local document IDs first, then MediaStore IDs when a local path is available. Previously MainActivity used the context-free overload,
+  so the MediaStore lookup could not run for some Recent/Downloads selections. Cloud-only files and providers without a readable local
+  path still require downloading locally and browsing to the file through Internal storage. The app does not copy the dump automatically.
+  A picked folder holding `.nup` files (or dump subfolders) adds
   all of them (`PackFind.gamesIn`; a title without a profile in this APK is named in the summary). adb: `--es game <file.nup>`, or
   `--es add_game <file.nup or folder>` for Add game's own path. A `.nup`'s pack is looked for beside it and in `Work/<title ID>/<any name>`
   and `<title ID>-work/<any name>` of its folder and up to three folders above it (`PackFind`; on the phone a `.nup` is in
   `Switch2/Games`, its work folder `Switch2/Work/<title ID>`: [README.md](README.md#the-switch2-folder)).
+  If the picker's ID maps to a path where no file exists, the app reads the file through the picker's permission
+  (`PickedNup`). It does not report an access problem in that case.
+- The library's own search (`LibraryScan`, `MainActivity.libraryScan`) runs once All files access is on. It runs at the launcher's
+  start and on every return to it, off the main thread and after the Switch2 folder's move (`Switch2Migration`). It creates
+  `Switch2/Games` when it is missing, then looks in the Switch2 folder (its `Games/`, one level of subfolders there, and the root of
+  the older layout) and in the library folder last picked. Each game with no card yet goes through Add game's checks with no dialog.
+  A toast names the games it added and the ones it could not add; **Refresh** (also shown in the empty library) checks everything
+  again and its summary gives each reason. The search does not check these again: a game it refused, until the file's size or
+  time changes; a game the user removed from the list (Add game and Refresh still add it). A file changed in the last 30 seconds,
+  or a `.nup` shorter than its header says (`Nup.Incomplete`: still being copied, or cut at 4 GB on a FAT32 card, which must be
+  exFAT), waits for the next look.
+- Add game, the search and Refresh run Play's own dump check (`DumpCheck.identify`) when a game has no usable pack: another
+  version or build, the base alone where the profile needs an update, or an update-only `.nup` without RomFS. Such a game is
+  refused with that sentence: one game gets a dialog, several get a line each in the summary. Before this, the card appeared
+  and only Play refused it.
+- Base and update in two `.nup` files of one title in the same folder: if the update `.nup` holds the whole game (its own ExeFS
+  and RomFS), it is added and the base-only `.nup` is noted as not needed. Picking the base `.nup` alone adds the update `.nup`
+  beside it instead. **Open:** combining a base `.nup` with an update `.nup` whose RomFS needs the base. The host, the tools and
+  Prepare take one file per game today, so such an update `.nup` is refused with the reason ("make one `.nup` of the game with
+  that update installed").
 - `Nup.java` reads the superblock and TOC (SHA-256 checked, cached by path, size and mtime), `Zstd.java` is a pure-Java zstd
   frame decoder (RFC 8878, no dictionaries) for main.npdm, NSO build IDs and the rewrite key check: the launcher process
   loads no native code.
@@ -91,11 +114,14 @@ the rest after it is unambiguous. Tools take these wherever they take the matchi
   renamed `.nup` still plays; a pack made from a folder falls back to `update/<pack version>` or `base`). `DM_AOC_DIR/<index>.nup`
   links to the game's own `.nup` when it holds that add-on, else to the `.nup` the aoc row names, else the game's own.
 - Prepare on the phone (PackService) passes `<N>` (the `.nup`) to pack_android.py and `<N>:update/<v>/romfs`,
-  `<N>:update/<v>/exefs/main` (`<N>:base/…` for version 0) to shader_split.py. It needs a `.nup` with a base and an update, or a base with its own ExeFS and RomFS when the profile's build is the base game (`Pack.isDump`); DumpCheck checks the TOC hash,
-  the base, the profile's update, main / main.npdm / RomFS and each module's build ID.
+  `<N>:update/<v>/exefs/main` (`<N>:base/…` for version 0) to shader_split.py. It needs a version with its own `exefs/main`, an `exefs/main.npdm` and a RomFS (its own or the base's): a base and an update, a base alone when the profile's build is the base game, or an update alone that carries the whole ExeFS and RomFS (a "merged" dump: `DumpLayout`, `Pack.isDump`); DumpCheck checks the TOC hash,
+  the profile's version, main / main.npdm / RomFS and each module's build ID.
 - Readiness: a "Game files" row per game (a `.nup` must open and pass its TOC hash).
+- The replayable [Getting started guide](../docs/SWAP2-NATIVE-TUTORIAL.md) explains local storage, file versus folder selection,
+  supported game builds and preparation. NUP import errors retain their actual diagnostic and offer Choose again or the guide.
 - Tests: `NupJvmTest` (javac + java, no Gradle runner yet; see its header): 293 checks on a synthetic `.nup`, 30 on the
-  real DKB one.
+  real DKB one. `LibraryScanJvmTest` (`dm/tools/tests/test_android_library_scan.py`) covers the library's search, the
+  incomplete-copy test and Add game's dump check on `.nup` files made by `nup_pack.py`.
 
 ## Test data
 

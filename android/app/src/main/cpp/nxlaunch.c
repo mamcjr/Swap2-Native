@@ -7,12 +7,14 @@
 #include <fcntl.h>
 #include <jni.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/inotify.h>
 #include <sys/prctl.h>
+#include <ucontext.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -94,14 +96,80 @@ static int log_open(const char *path) {
     return 0;
 }
 
+// ---- The run's exit record (ExitWatch.java): the launcher wrote "state=running" before the start; how the process ends is appended here, so the launcher can tell
+// the player what happened. A native crash or an abort appends "state=native" from a signal handler installed before the host's own (crash.c on_crash prints the
+// whole crash into the log and then hands the signal on to the handler that was there before: this one, which hands it on to debuggerd for the tombstone). Only
+// async-signal-safe calls in the handler: open, write, close, sigaction, raise; the numbers are formatted by hand ----
+static char g_exit_path[1024];
+static _Atomic int g_exit_written;
+static struct sigaction g_exit_prev[NSIG];
+static const int g_exit_sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGABRT, SIGFPE};
+static size_t rec_str(char *b, size_t n, const char *s) { while (*s) b[n++] = *s++; return n; }
+static size_t rec_num(char *b, size_t n, unsigned long long v, int hex) {
+    char t[24]; int k = 0;
+    if (hex) { n = rec_str(b, n, "0x"); do { t[k++] = "0123456789abcdef"[v & 15]; v >>= 4; } while (v); }
+    else do { t[k++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (k) b[n++] = t[--k];
+    return n;
+}
+static void exit_append(const char *text, size_t len) {
+    if (!g_exit_path[0]) return;
+    int fd = open(g_exit_path, O_WRONLY | O_APPEND | O_CLOEXEC);
+    if (fd < 0) return;
+    if (write(fd, text, len) < 0) {}
+    close(fd);
+}
+static void on_exit_signal(int sig, siginfo_t *si, void *uc_) {
+    if (!atomic_exchange(&g_exit_written, 1)) {   // the first crashing thread only
+        char b[160]; size_t n = 0;
+        n = rec_str(b, n, "state=native\nsig="); n = rec_num(b, n, (unsigned)sig, 0);
+        n = rec_str(b, n, "\naddr="); n = rec_num(b, n, (unsigned long long)(uintptr_t)si->si_addr, 1);
+#if defined(__aarch64__)
+        n = rec_str(b, n, "\npc="); n = rec_num(b, n, (unsigned long long)((ucontext_t *)uc_)->uc_mcontext.pc, 1);
+#endif
+        n = rec_str(b, n, "\n");
+        exit_append(b, n);
+    }
+    // On to the handler before this one (debuggerd's): a fault returns and runs the instruction again into it, the others are raised again (as crash.c does)
+    sigaction(sig, &g_exit_prev[sig], NULL);
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL || sig == SIGTRAP || sig == SIGFPE) return;
+    sigset_t un; sigemptyset(&un); sigaddset(&un, sig); pthread_sigmask(SIG_UNBLOCK, &un, NULL);
+    raise(sig);
+}
+static void exit_record_install(const char *path) {
+    if (!path || !*path || g_exit_path[0]) return;
+    snprintf(g_exit_path, sizeof g_exit_path, "%s", path);
+    struct sigaction sa = {.sa_sigaction = on_exit_signal, .sa_flags = SA_SIGINFO | SA_ONSTACK};
+    sigemptyset(&sa.sa_mask);
+    for (size_t i = 0; i < sizeof g_exit_sigs / sizeof *g_exit_sigs; i++) sigaction(g_exit_sigs[i], &sa, &g_exit_prev[g_exit_sigs[i]]);
+    fprintf(stderr, "[nxlaunch] exit record: %s\n", path);
+}
+// DM_TEST_CRASH=native (the test app only: the launcher drops the line in the play app and the release): a fault on a thread of its own 10 s after the start, to try the
+// crash path and the launcher's notice
+static void *test_crash_thread(void *p) {
+    (void)p; prctl(PR_SET_NAME, "nxtestcrash");
+    struct timespec ts = {10, 0}; nanosleep(&ts, NULL);
+    fprintf(stderr, "[RED] [nxlaunch] DM_TEST_CRASH=native: faulting on purpose\n");
+    *(volatile int *)(uintptr_t)8 = 1;
+    return NULL;
+}
+
 // ---- The host thread ----
 static struct { int argc; char **argv; } g_run;
 static _Atomic int g_started;
+// The window and the host's start. The screen gives its surface as soon as it has one, usually while the readiness check still holds the start back, and the host made
+// its Vulkan device when it was given a window (nxhost_set_window): before the game's environment was set, so every switch the device's creation reads (DM_VK_MESH,
+// DM_VK_PLACED, DM_VK_ALIAS, DM_VK_VALIDATE ... from env.txt or the game's Extra environment) was read as unset. Only DM_VK_DRIVER got through, set early by the
+// readiness check. So a window given before the start is kept here and handed to the host by start, right after the environment; one given later goes straight through.
+// Since 2026-11-14 nxhost_set_window makes no device (vka_present.c: the host thread does, off this UI thread); the order here stays, for whatever the host reads
+// of the environment when it takes a window (NXHOST_VK_SELFTEST)
+static pthread_mutex_t g_winmu = PTHREAD_MUTEX_INITIALIZER; static ANativeWindow *g_window; static int g_env_set;
 static void *host_thread(void *p) {
     (void)p; prctl(PR_SET_NAME, "nxhost");
     fprintf(stderr, "[nxlaunch] nxhost_main starts on its own thread (%u MiB stack)\n", HOST_STACK >> 20);
     int rc = nxhost_main(g_run.argc, g_run.argv);
     fprintf(stderr, "[nxlaunch] nxhost_main returned %d: the game ended\n", rc);
+    { char b[48]; size_t n = rec_str(b, 0, "state=host_exit\nrc="); if (rc < 0) { b[n++] = '-'; n = rec_num(b, n, (unsigned long long)-(long long)rc, 0); } else n = rec_num(b, n, (unsigned)rc, 0); b[n++] = '\n'; exit_append(b, n); }
     struct timespec ts = {0, 300000000}; nanosleep(&ts, NULL);   // logcat_tail's last lines
     _exit(rc);   // the host cannot be started twice in one process: the game process ends with it
 }
@@ -165,6 +233,21 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_start(JNIEnv *env, jclas
         if (eq) { *eq = 0; setenv(kv, eq + 1, 1); fprintf(stderr, "[nxlaunch] env %s=%s\n", kv, eq + 1); }
         free(kv);
     }
+    // DM_THP=0: no transparent huge pages for this process from here on (the guest's memory is not mapped yet). A diagnostic of 2026-11-14: a Redmagic 11 Air
+    // kills the game (signal 9, from outside) in a scene's loading bursts, and its kernel backs 70 to 290 MiB of the game with huge pages where the POCO F7
+    // Ultra, with the same "always" setting, backs none; the host changes guest memory a 4 KiB page at a time (protections, placed GPU memory, give-backs), each
+    // of which splits a huge page. Whether that is the cause is open (Ocarina of Time's note); the automatic diagnosis has a run with it
+    { const char *thp = getenv("DM_THP");
+      if (thp && !strcmp(thp, "0")) {
+          int rc = prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
+          fprintf(stderr, "[nxlaunch] DM_THP=0: transparent huge pages %s\n", rc ? "could not be turned off for this process ([RED] prctl failed)" : "are off for this process");
+      } }
+    pthread_mutex_lock(&g_winmu);   // (see g_winmu: the window kept until the environment was set)
+    g_env_set = 1;
+    if (g_window && nxhost_set_window) { fprintf(stderr, "[nxlaunch] window: given before the start, handed to the host now that the environment is set\n"); nxhost_set_window(g_window); }
+    pthread_mutex_unlock(&g_winmu);
+    exit_record_install(getenv("NX_EXIT_RECORD"));   // before the host thread: the host's crash handler (crash.c) takes this one as the handler before its own
+    { const char *tc = getenv("DM_TEST_CRASH"); pthread_t ct; if (tc && !strcmp(tc, "native") && !pthread_create(&ct, NULL, test_crash_thread, NULL)) pthread_detach(ct); }
     char *wd = jstr(env, cwd); if (chdir(wd)) fprintf(stderr, "[nxlaunch] chdir %s: %s\n", wd, strerror(errno)); free(wd);
     g_run.argc = (*env)->GetArrayLength(env, args);
     g_run.argv = calloc((size_t)g_run.argc + 1, sizeof *g_run.argv);
@@ -183,13 +266,14 @@ JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_note(JNIEnv *env, jclass
 }
 
 // ---- Surface, input and lifecycle, forwarded when the host has the entry points ----
-static ANativeWindow *g_window;
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_setSurface(JNIEnv *env, jclass cls, jobject surface) {
     (void)cls;
     ANativeWindow *w = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
-    if (nxhost_set_window) nxhost_set_window(w);
+    pthread_mutex_lock(&g_winmu);
+    if (g_env_set && nxhost_set_window) nxhost_set_window(w);   // before the start it only waits here (g_winmu above)
     if (g_window) ANativeWindow_release(g_window);   // the host takes its own reference when it keeps the window
     g_window = w;
+    pthread_mutex_unlock(&g_winmu);
 }
 JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_hasInput(JNIEnv *env, jclass cls) { (void)env; (void)cls; return nxhost_input_key != NULL; }
 JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_deviceAdded(JNIEnv *env, jclass cls, jint device, jstring name, jboolean labelled) {

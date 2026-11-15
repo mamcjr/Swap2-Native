@@ -8,7 +8,8 @@ void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
     if (p.x >= pc.size.x || p.y >= pc.size.y) return;
     vec4 v = texelFetch(img, ivec3(p, pc.layer), 0);
-    bool n = any(isnan(v)), i = any(isinf(v));
+    float big = uintBitsToFloat(pc.pad);   // DM_VK_NANSCAN_BIG: a finite texel over it counts with the infinite ones (0: none)
+    bool n = any(isnan(v)), i = any(isinf(v)) || (big > 0.0 && !n && any(greaterThan(abs(v), vec4(big))));
     if (n) atomicAdd(o.nan, 1u);
     if (i) atomicAdd(o.inf, 1u);
     if (n || i) atomicMin(o.first, p.y << 16 | p.x);

@@ -44,6 +44,9 @@ public final class GameFlowJvmTest {
     }
 
     public static void main(String[] a) {
+        eq("new completed import wins over idle stale service", false, GameFlow.preferLiveJob(false, 100, 200));
+        eq("active worker owns unsaved live state", true, GameFlow.preferLiveJob(true, 100, 200));
+        eq("newer live completion wins", true, GameFlow.preferLiveJob(false, 200, 100));
         // The friend's phone (2026-11-08): a job that failed on a full disk while its rewrite was marked running (an APK before error codes)
         String[] steps = {"done", "running", "pending", "pending", "pending"};
         eq("normalize failed", "[done, pending, pending, pending, pending]", Arrays.toString(GameFlow.normalizeSteps("failed", steps)));

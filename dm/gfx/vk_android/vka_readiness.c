@@ -10,6 +10,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include "vka_fd_alias.h"
+#include "vka_ahb_alias.h"
 
 typedef struct { char *p; int n, at; } outbuf;
 static void put(outbuf *o, const char *fmt, ...) {
@@ -28,11 +31,12 @@ static void put_ver(outbuf *o, const char *key, uint32_t v) { put(o, "%s=%u.%u.%
 
 // The extensions a requirement or the report may name; each one present is "ext.<name>=1"
 static const char *const k_exts[] = {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_MAP_MEMORY_2_EXTENSION_NAME, VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_MAP_MEMORY_2_EXTENSION_NAME, VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
     VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME, VK_KHR_ROBUSTNESS_2_EXTENSION_NAME, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME, VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME,
     VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME, VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME,
     VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME, VK_EXT_MESH_SHADER_EXTENSION_NAME, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME,
     VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME, VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME, "VK_QCOM_queue_perf_hint",
+    VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
 };
 
 // Formats whose sparse residency decides how large sparse texture arrays are made (vka_tex.c: a format without it gets a dense image, capped by DM_VK_SPARSE_DENSE_MB)
@@ -40,6 +44,81 @@ static const struct { const char *name; VkFormat f; } k_sparse_fmt[] = {
     {"rgba8", VK_FORMAT_R8G8B8A8_UNORM}, {"rgba16f", VK_FORMAT_R16G16B16A16_SFLOAT}, {"bc1", VK_FORMAT_BC1_RGBA_UNORM_BLOCK}, {"bc6h", VK_FORMAT_BC6H_UFLOAT_BLOCK},
     {"bc7", VK_FORMAT_BC7_UNORM_BLOCK}, {"astc4x4", VK_FORMAT_ASTC_4x4_UNORM_BLOCK}, {"astc8x8", VK_FORMAT_ASTC_8x8_UNORM_BLOCK},
 };
+
+// A driver that has placed maps without advertising them (vka_dev.c vka_placed_probe: Qualcomm 512.863 on the Adreno 740): a device of its own on queue family 0,
+// one placed map of a 64 KiB host-visible allocation at a reserved address through vkMapMemory2 (core 1.4 name). 1 when it lands there and reads back
+// ahb_ext: the hardware buffer alias (vka_ahb_alias.h) is probed too when neither of the others works. memory.fdAlias=1 stands for either alias (the launcher asks for
+// guest-address memory, not for one way to it); memory.ahbAlias and memory.ahbAliasProbe say which and why
+static int placed_unadvertised(PFN_vkGetInstanceProcAddr gipa, VkInstance inst, VkPhysicalDevice pd, int map2_ext, int fd_ext, int ahb_ext, outbuf *o, int *fd_alias) {
+    const char *e = getenv("DM_VK_PLACED_PROBE"); int try_placed = !e || strcmp(e, "0");
+#define I(f) PFN_##f f = (PFN_##f)gipa(inst, #f);
+    I(vkCreateDevice) I(vkGetDeviceProcAddr) I(vkGetPhysicalDeviceMemoryProperties)
+    I(vkGetPhysicalDeviceFeatures2)
+#undef I
+    if (!vkCreateDevice || !vkGetDeviceProcAddr || !vkGetPhysicalDeviceMemoryProperties) return 0;
+    float prio = 1; VkDeviceQueueCreateInfo q = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio};
+    const char *exts[4]; uint32_t next = 0;
+    if (map2_ext) exts[next++] = VK_KHR_MAP_MEMORY_2_EXTENSION_NAME;
+    if (fd_ext) exts[next++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+    if (ahb_ext) { exts[next++] = VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME; exts[next++] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME; }
+    VkPhysicalDeviceBufferDeviceAddressFeatures bda = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+    VkPhysicalDeviceFeatures2 features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &bda};
+    if (vkGetPhysicalDeviceFeatures2) vkGetPhysicalDeviceFeatures2(pd, &features);
+    VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &bda, .queueCreateInfoCount = 1, .pQueueCreateInfos = &q,
+                             .enabledExtensionCount = next, .ppEnabledExtensionNames = exts};
+    VkDevice dev; if (vkCreateDevice(pd, &dci, NULL, &dev)) return 0;
+#define D(f) PFN_##f f = (PFN_##f)vkGetDeviceProcAddr(dev, #f);
+    D(vkDestroyDevice) D(vkAllocateMemory) D(vkFreeMemory)
+#undef D
+    PFN_vkMapMemory2KHR map2 = (PFN_vkMapMemory2KHR)vkGetDeviceProcAddr(dev, "vkMapMemory2KHR");
+    if (!map2) map2 = (PFN_vkMapMemory2KHR)vkGetDeviceProcAddr(dev, "vkMapMemory2");
+    PFN_vkUnmapMemory2KHR unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(dev, "vkUnmapMemory2KHR");
+    if (!unmap2) unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(dev, "vkUnmapMemory2");
+    int ok = 0;
+    VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+    const VkMemoryPropertyFlags hv = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    uint32_t type = ~0u; for (uint32_t i = 0; i < mp.memoryTypeCount && type == ~0u; i++) if ((mp.memoryTypes[i].propertyFlags & hv) == hv) type = i;
+    put(o, "placed.probe.map2Available=%d\n", map2 && unmap2 ? 1 : 0);
+    if (try_placed && map2 && unmap2 && vkAllocateMemory && vkFreeMemory && type != ~0u) {
+        const VkDeviceSize n = 64 << 10;
+        VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = n, .memoryTypeIndex = type};
+        VkDeviceMemory mem;
+        if (!vkAllocateMemory(dev, &mai, NULL, &mem)) {
+            void *at = mmap(NULL, n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (at != MAP_FAILED) {
+                VkMemoryMapPlacedInfoEXT pi = {VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = at};
+                VkMemoryMapInfoKHR mi = {VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pi, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT, .memory = mem, .size = VK_WHOLE_SIZE};
+                void *got = NULL;
+                VkResult result = map2(dev, &mi, &got);
+                put(o, "placed.probe.result=%d\nplaced.probe.exactAddress=%d\n", result, !result && got == at ? 1 : 0);
+                if (!result) {
+                    if (got == at) { volatile uint32_t *w = got; w[0] = 0x5eed1234u; ok = w[0] == 0x5eed1234u; }
+                    VkMemoryUnmapInfoKHR ui = {VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .memory = mem}; unmap2(dev, &ui);
+                }
+                munmap(at, n);
+            }
+            vkFreeMemory(dev, mem, NULL);
+        }
+    }
+    if (!ok && fd_ext && vka_fd_enabled()) {
+        vka_fns f = {.vkGetPhysicalDeviceExternalBufferProperties = (PFN_vkGetPhysicalDeviceExternalBufferProperties)gipa(inst, "vkGetPhysicalDeviceExternalBufferProperties")};
+#define FD_LOAD(fn) f.fn = (PFN_##fn)vkGetDeviceProcAddr(dev, #fn);
+        FD_LOAD(vkCreateBuffer) FD_LOAD(vkDestroyBuffer) FD_LOAD(vkGetBufferMemoryRequirements) FD_LOAD(vkBindBufferMemory)
+        FD_LOAD(vkAllocateMemory) FD_LOAD(vkFreeMemory) FD_LOAD(vkMapMemory) FD_LOAD(vkUnmapMemory) FD_LOAD(vkGetMemoryFdKHR)
+#undef FD_LOAD
+        char why[160]; *fd_alias = vka_fd_probe(&f, pd, dev, &mp, bda.bufferDeviceAddress, why, sizeof why);
+        put(o, "memory.fdAliasProbe=%s\n", why);
+    }
+    if (!ok && !*fd_alias && ahb_ext && vka_ahb_enabled()) {
+        char why[240]; int a = vka_ahb_probe(vkGetDeviceProcAddr, (PFN_vkGetPhysicalDeviceExternalBufferProperties)gipa(inst, "vkGetPhysicalDeviceExternalBufferProperties"),
+                                             pd, dev, &mp, 0, bda.bufferDeviceAddress, why, sizeof why);
+        put(o, "memory.ahbAlias=%d\nmemory.ahbAliasProbe=%s\n", a, why);
+        if (a) *fd_alias = 2;
+    }
+    if (!ok) put(o, "memory.fdAlias=%d\n", *fd_alias ? 1 : 0);
+    if (vkDestroyDevice) vkDestroyDevice(dev, NULL);
+    return ok;
+}
 
 __attribute__((visibility("default"))) int nxhost_vk_readiness(char *buf, int n) {
     if (!buf || n < 64) return -1;
@@ -77,16 +156,23 @@ __attribute__((visibility("default"))) int nxhost_vk_readiness(char *buf, int n)
     // Extensions
     uint32_t nde = 0; vkEnumerateDeviceExtensionProperties(pd, NULL, &nde, NULL);
     VkExtensionProperties *de = calloc(nde ? nde : 1, sizeof *de); vkEnumerateDeviceExtensionProperties(pd, NULL, &nde, de);
-    int mesh = 0, placed = 0;
+    int mesh = 0, placed = 0, map2_ext = 0, fd_ext = 0, ahb_ext = 0, qff_ext = 0;
     for (size_t k = 0; k < sizeof k_exts / sizeof *k_exts; k++)
         for (uint32_t i = 0; i < nde; i++) if (!strcmp(de[i].extensionName, k_exts[k])) {
             put(&o, "ext.%s=1\n", k_exts[k]);
             if (!strcmp(k_exts[k], VK_EXT_MESH_SHADER_EXTENSION_NAME)) mesh = 1;
             if (!strcmp(k_exts[k], VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME)) placed = 1;
+            if (!strcmp(k_exts[k], VK_KHR_MAP_MEMORY_2_EXTENSION_NAME)) map2_ext = 1;
+            if (!strcmp(k_exts[k], VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) fd_ext = 1;
+            if (!strcmp(k_exts[k], VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME)) ahb_ext = 1;
+            if (!strcmp(k_exts[k], VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME)) qff_ext = 1;
             break;
         }
     put(&o, "ext.count=%u\n", nde);
     free(de);
+    // Placed maps the driver has but does not advertise count as present (the replay uses them the same way: vka_dev.c)
+    int fd_alias = 0, placed_hidden = !placed && placed_unadvertised(gipa, inst, pd, map2_ext, fd_ext, ahb_ext && qff_ext, &o, &fd_alias);
+    if (placed_hidden) put(&o, "ext.%s=1\next.%s=1\nplaced.unadvertised=1\n", VK_KHR_MAP_MEMORY_2_EXTENSION_NAME, VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME);
 
     // Driver identity (1.2 core) and the 1.1 / 1.3 properties the requirements may name
     if (v12 && vkGetPhysicalDeviceProperties2) {
@@ -142,6 +228,7 @@ __attribute__((visibility("default"))) int nxhost_vk_readiness(char *buf, int n)
     }
     if (v13) { B("dynamicRendering", f13.dynamicRendering) B("synchronization2", f13.synchronization2) B("subgroupSizeControl", f13.subgroupSizeControl) }
     if (placed) B("memoryMapPlaced", fmp.memoryMapPlaced)
+    if (placed_hidden) B("memoryMapPlaced", 1)
     if (mesh) { B("meshShader", fms.meshShader) B("taskShader", fms.taskShader) }
 #undef B
 

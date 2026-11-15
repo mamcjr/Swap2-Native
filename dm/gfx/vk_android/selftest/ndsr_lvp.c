@@ -253,6 +253,21 @@ int main(void) {
     printf("match rule: all checks passed\n");
     if (!init()) return 77;
     const double qtol = 2.5 / 64;   // R11G11B10F: 6-bit mantissas (5 in blue): a relative step of 1/64 (1/32); 2.5 steps with the GPU's rounding
+    // Nearest must pick exactly one source texel, including borders and both input encodings/store variants.
+    for (int enc = 0; enc < 2; enc++) for (int pack = 0; pack < 3; pack++) {
+        run_t nr = base(17, 13, 33, 25, enc, VKA_NDSR_KERNEL_NEAREST); nr.pack = pack;
+        float *out = run(&nr); double worst = 0;
+        for (int y = 0; y < nr.oh; y++) for (int x = 0; x < nr.ow; x++) {
+            float c[3]; in_at((int)floorf((x + .5f) * nr.iw / nr.ow), (int)floorf((y + .5f) * nr.ih / nr.oh), nr.iw, nr.ih, c);
+            for (int ch = 0; ch < 3; ch++) {
+                double ref = enc ? c[ch] * c[ch] : c[ch];
+                worst = fmax(worst, fabs(out[3 * (y * nr.ow + x) + ch] - ref) / fmax(ref, .02));
+            }
+        }
+        CHECK(unwritten(out, nr.ow * nr.oh) == 0 && worst < 2 * qtol, "nearest enc=%d pack=%d: error %.5f", enc, pack, worst);
+        free(out);
+    }
+    printf("nearest: encodings and float/packed stores checked\n");
     // 1. Bilinear kernel, sqrt input: the CPU reference everywhere (the mapping, the decode and the square)
     run_t R = base(1536, 864, 2048, 1152, 1, 1);
     float *o = run(&R); int N = R.ow * R.oh;

@@ -9,7 +9,6 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,7 +25,8 @@ import java.util.zip.ZipInputStream;
  *     A mismatch means the rewritten code is of another game version: the game would crash, so the launcher does not start it and offers Prepare again.</li>
  * <li>{@link #shaders}: the pack has this APK's shader library (Pack.libraryProblem).</li>
  * <li>{@link #code} (slower: hashes the modules, so it runs off the main thread): the pack's code was rewritten by this APK's rewriter. The key
- *     scripts/pack_android.py writes as &lt;module&gt;.android.key (rewrite_key: the rewriter's files, the module, the profile's patches.py and game.tsv) is
+ *     scripts/pack_android.py writes as &lt;module&gt;.android.key (rewrite_key: the rewriter's files, the module, the profile's patches.py, another profile's
+ *     patches.py that names the module's build, and game.tsv's build rows: RewriteKey, which also accepts the earlier formula's key of the same rewrite) is
  *     computed here from the tools in the APK (assets/pack/tools.zip) and the folder's module. Another key is not an error: a pack made by an earlier commit
  *     usually runs; the card says so and Prepare again brings the code up to date (the shaders are kept).</li>
  * <li>{@link #mods} (part of {@link #blocking}): the pack's code has the exefs patches the mods folder has for it now (ExefsMods; android/README.md "Mods (exefs
@@ -244,6 +244,8 @@ final class PackCheck {
             id.append('|').append(k.length()).append(':').append(k.lastModified()).append(':').append(mod(game, p.version, m).stamp());
         }
         id.append('|').append(ExefsMods.stamp(modsRoot(), p.titleId));
+        File gt = new File(p.dir, "game.tsv");   // the pack's copy: an earlier formula's key may have been made with it (RewriteKey)
+        id.append('|').append(gt.length()).append(':').append(gt.lastModified());
         synchronized (codeCache) {
             if (codeCache.containsKey(id.toString())) return codeCache.get(id.toString());
         }
@@ -257,55 +259,26 @@ final class PackCheck {
         if (t == null) return null;
         String gd = "dm/games/" + p.titleId + "/";
         if (!t.containsKey(gd + "game.tsv")) return null;   // the APK carries the profiles of its own games only: another game's pack is not this APK's to judge
+        byte[] packGt = null;   // the game.tsv the pack was made with (pack_android.py copies it after the rewrite): an earlier formula's key counts with it (RewriteKey)
+        File gtf = new File(p.dir, "game.tsv");
+        if (gtf.isFile()) {
+            try { packGt = Files.readAllBytes(gtf.toPath()); } catch (IOException e) { packGt = null; }
+        }
         for (String m : p.modules) {
             File kf = new File(p.dir, m + ".android.key");
             Mod nso = mod(game, p.version, m);
             if (!kf.isFile() || !nso.exists()) return null;
             try {
                 String have = new String(Files.readAllBytes(kf.toPath()), StandardCharsets.UTF_8).trim();
-                List<ExefsMods.Entry> mods = ExefsMods.find(modsRoot(), p.titleId, DumpCheck.nsoBuildId(nso.head(0x60), m));
-                if (!have.equals(rewriteKey(t, gd, m, nso, mods))) return false;
+                String bid = DumpCheck.nsoBuildId(nso.head(0x60), m);
+                List<ExefsMods.Entry> mods = ExefsMods.find(modsRoot(), p.titleId, bid);
+                String suffix = " target=android" + (mods.isEmpty() ? "" : " mods=" + ExefsMods.digest(mods));
+                if (!RewriteKey.keys(t, BuildConfig.NX_REWRITER.split(" "), !mods.isEmpty(), gd, m, nso::hash, bid.substring(0, 32), suffix, packGt).contains(have)) return false;
             } catch (IOException e) {
                 return null;
             }
         }
         return true;
-    }
-
-    /**
-     * scripts/pack_android.py rewrite_key: SHA-256 over name\0bytes of the REWRITER files (and exefs_patches.py when the module has mods), the module, the profile's
-     * patches.py (when there is one) and game.tsv, then " target=android" and, with mods, " mods=" and their digest (ExefsMods.digest)
-     */
-    static String rewriteKey(Map<String, byte[]> t, String gameDir, String module, Mod nso, List<ExefsMods.Entry> mods) throws IOException {
-        MessageDigest h;
-        try {
-            h = MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException e) {
-            throw new IOException(e);
-        }
-        for (String f : BuildConfig.NX_REWRITER.split(" ")) {
-            byte[] b = t.get("dm/tools/" + f);
-            if (b == null) throw new IOException("the APK's tools have no dm/tools/" + f);
-            part(h, f, b);
-        }
-        if (!mods.isEmpty()) {
-            byte[] b = t.get("dm/tools/exefs_patches.py");
-            if (b == null) throw new IOException("the APK's tools have no dm/tools/exefs_patches.py");
-            part(h, "exefs_patches.py", b);
-        }
-        h.update((module + "\0").getBytes(StandardCharsets.UTF_8));
-        nso.hash(h);
-        byte[] pp = t.get(gameDir + "patches.py");
-        if (pp != null) part(h, "patches.py", pp);
-        part(h, "game.tsv", t.get(gameDir + "game.tsv"));
-        StringBuilder s = new StringBuilder();
-        for (byte b : h.digest()) s.append(String.format(Locale.ROOT, "%02x", b & 0xff));
-        return s + " target=android" + (mods.isEmpty() ? "" : " mods=" + ExefsMods.digest(mods));
-    }
-
-    private static void part(MessageDigest h, String name, byte[] b) {
-        h.update((name + "\0").getBytes(StandardCharsets.UTF_8));
-        h.update(b);
     }
 
     /** dm/tools/*.py and dm/games/&lt;id&gt;/{patches.py,game.tsv} from assets/pack/tools.zip; null without it (-PnxPackEngine=fake) */

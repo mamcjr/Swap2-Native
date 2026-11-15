@@ -139,6 +139,8 @@ final class GameSettings {
         box.addView(new Ui.Setting(a, R.drawable.s2_ic_info, a.getString(R.string.s2_environment), v -> env(a, g, again))
                 .value(env.isEmpty() ? a.getString(R.string.s2_environment_none) : a.getResources().getQuantityString(R.plurals.s2_environment_lines, env.split("\n").length, env.split("\n").length) + ": " + env.replace('\n', ' '))
                 .chevron(a).view);
+        // The automatic diagnosis (AutoDiag): for a game that closes on this phone, runs of it with host switches, and one report to share
+        box.addView(new Ui.Setting(a, R.drawable.s2_ic_info, a.getString(R.string.s2_diag), v -> AutoDiag.begin(a, g)).value(a.getString(R.string.s2_diag_note)).chevron(a).view);
         Ui.Action restore = Ui.action(a, 0, a.getString(R.string.s2_restore_game), Ui.Kind.SOFT, v -> restore(a, g, again));
         LinearLayout.LayoutParams rl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, Ui.dp(a, SettingsFrame.compact(a) ? 48 : 52));   // the pane's gaps: SettingsFrame.fill
         rl.gravity = Gravity.CENTER_HORIZONTAL;
@@ -160,8 +162,9 @@ final class GameSettings {
             GpuDriver.choice(a, id, null);
             Prefs.gameEnv(a, id, null);
             Prefs.ndsr(a, id, null);
-            sceneWant(id, false);
-            Prefs.scene720(a, id, false);   // (the overlay's files stay in the app's folder: made again at once if 720p is chosen again)
+            GameGraphics.reset(a, id);
+            sceneWant(id, null);
+            Prefs.sceneScale(a, id, (String) null);   // (the overlay's files stay in the app's folder: made again at once if 720p is chosen again)
             Prefs.of(a).edit().remove(Prefs.gameKey("pause_return", id)).commit();
             again.run();
         });
@@ -182,18 +185,14 @@ final class GameSettings {
             box.addView(fixed.view);
         } else box.addView(new Ui.Setting(a, R.drawable.s2_ic_gauge, a.getString(R.string.s2_frame_cap), v -> cap(a, g, again)).value(a.getString(R.string.s2_frame_cap_note))
                 .override(a, Prefs.ownFpsCap(a, id), MainActivity.capLabel(Prefs.fpsCap(a, id))).chevron(a).view);
-        if (prof != null && prof.hasNdsr()) {   // only where agl's NDSR networks are in the game's shaders (Profile.ndsrEnv)
-            String cur = a.getString(Prefs.NDSR_FSR.equals(Prefs.ndsr(a, id)) ? R.string.s2_upscaler_fsr : R.string.s2_upscaler_net);
-            box.addView(new Ui.Setting(a, R.drawable.s2_ic_image, a.getString(R.string.s2_upscaler), v -> upscaler(a, g, again))
-                    .value(cur + " · " + a.getString(R.string.s2_upscaler_note)).chevron(a).view);
-        }
+        GameGraphics.rows(a, id, box, again, false);
         if (prof != null && prof.hasScene()) {   // only where the profile names the palette's scale (scene_scale_palette; SceneOverlay)
-            boolean on = Prefs.scene720(a, id);
-            String cur = a.getString(on ? R.string.s2_scene_720p : R.string.s2_scene_game);
+            String sc = Prefs.sceneScale(a, id, prof);
+            String cur = sc == null ? a.getString(R.string.s2_scene_game) : Prefs.sceneLabel(prof, sc);
             Ui.Setting row = new Ui.Setting(a, R.drawable.s2_ic_display, a.getString(R.string.s2_scene_res), v -> scene(a, g, again))
                     .value(cur + " · " + a.getString(R.string.s2_scene_note));
             box.addView(row.chevron(a).view);
-            if (on) sceneCheck(a, g, prof, row, cur);
+            if (sc != null) sceneCheck(a, g, prof, sc, row);
         }
         builtinMods(a, g, box);
         Ui.add(p, Ui.small(a, a.getString(R.string.s2_game_graphics_hint)), 8);
@@ -591,12 +590,20 @@ final class GameSettings {
     }
 
     private static void resolution(MainActivity a, Game g, Runnable done) {
-        String[] labels = new String[Prefs.WINDOWS.length + 1];
-        labels[0] = a.getString(R.string.s2_inherit_choice, Prefs.windowName(Prefs.window(a), false));
-        System.arraycopy(Prefs.WINDOW_NAMES, 0, labels, 1, Prefs.WINDOW_NAMES.length);
-        int checked = Prefs.ownWindow(a, g.titleId) ? 1 + Math.max(0, Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.gameWindow(a, g.titleId))) : 0;
+        Profile profile = Profile.of(g.titleId);
+        List<String> values = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < Prefs.WINDOWS.length; i++) {
+            if ("960x540".equals(Prefs.WINDOWS[i]) && (profile == null || !profile.supports540p())) continue;
+            values.add(Prefs.WINDOWS[i]);
+            names.add(Prefs.WINDOW_NAMES[i]);
+        }
+        String[] labels = new String[values.size() + 1];
+        labels[0] = a.getString(R.string.s2_inherit_choice, Prefs.windowName(Prefs.defaultWindow(a, g.titleId), false));
+        for (int i = 0; i < names.size(); i++) labels[i + 1] = names.get(i);
+        int checked = Prefs.ownWindow(a, g.titleId) ? 1 + Math.max(0, values.indexOf(Prefs.gameWindow(a, g.titleId))) : 0;
         new AlertDialog.Builder(a).setTitle(a.getString(R.string.s2_game_resolution) + " · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
-            Prefs.gameWindow(a, g.titleId, w == 0 ? null : Prefs.WINDOWS[w - 1]);
+            Prefs.gameWindow(a, g.titleId, w == 0 ? null : values.get(w - 1));
             x.dismiss();
             done.run();
         }).setNegativeButton(android.R.string.cancel, null).show();
@@ -622,27 +629,24 @@ final class GameSettings {
         }).setNegativeButton(android.R.string.cancel, null).show();
     }
 
-    /** Upscaler: the game's NDSR network or FSR 1 in its place (Prefs.ndsr, the profile's ndsr_default without a choice; the host's lines at the next start, Profile.ndsrEnv) */
-    private static void upscaler(MainActivity a, Game g, Runnable done) {
-        String[] labels = {a.getString(R.string.s2_upscaler_net), a.getString(R.string.s2_upscaler_fsr)};
-        int checked = Prefs.NDSR_FSR.equals(Prefs.ndsr(a, g.titleId)) ? 1 : 0;
-        new AlertDialog.Builder(a).setTitle(a.getString(R.string.s2_upscaler) + " · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
-            Prefs.ndsr(a, g.titleId, w == 1 ? Prefs.NDSR_FSR : Prefs.NDSR_NET);   // (one equal to the profile's default is not kept: Prefs.ndsr)
-            x.dismiss();
-            done.run();
-        }).setNegativeButton(android.R.string.cancel, null).show();
-    }
-
-    /** Scene resolution: the game's own palette (the default) or 720p, whose overlay is made from the player's files first (makeScene) when it is not there yet */
+    /**
+     * Scene resolution: the game's own palette (the default) or one of its profile's presets (720p, 540p, …: Profile.scenePresets), whose overlay is made from the
+     * player's files first (makeScene) when the one there was not made with that scale
+     */
     private static void scene(MainActivity a, Game g, Runnable done) {
         Profile prof = Profile.of(g.titleId);
         if (prof == null || !prof.hasScene()) return;
-        String[] labels = {a.getString(R.string.s2_scene_game), a.getString(R.string.s2_scene_720p)};
-        int checked = Prefs.scene720(a, g.titleId) ? 1 : 0;
+        java.util.List<String> scales = new java.util.ArrayList<>(prof.scenePresets().values());
+        String[] labels = new String[scales.size() + 1];
+        labels[0] = a.getString(R.string.s2_scene_game);
+        int i = 1;
+        for (String l : prof.scenePresets().keySet()) labels[i++] = l;
+        String cur = Prefs.sceneScale(a, g.titleId, prof);
+        int checked = cur == null ? 0 : scales.indexOf(cur) + 1;
         new AlertDialog.Builder(a).setTitle(a.getString(R.string.s2_scene_res) + " · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
             x.dismiss();
-            if (w == 0) { sceneWant(g.titleId, false); Prefs.scene720(a, g.titleId, false); done.run(); }
-            else makeScene(a, g, prof);
+            if (w == 0) { sceneWant(g.titleId, null); Prefs.sceneScale(a, g.titleId, (String) null); done.run(); }
+            else makeScene(a, g, prof, scales.get(w - 1));
         }).setNegativeButton(android.R.string.cancel, null).show();
     }
 
@@ -655,12 +659,12 @@ final class GameSettings {
         } catch (IOException | RuntimeException e) { return null; }
     }
 
-    /** A 720p row whose overlay no longer matches the pack (an update, another scale in the profile): says so; a tap on 720p makes it again */
-    private static void sceneCheck(MainActivity a, Game g, Profile prof, Ui.Setting row, String cur) {
+    /** A preset's row whose overlay no longer matches the pack (an update, another scale): says so; choosing the preset again makes it again */
+    private static void sceneCheck(MainActivity a, Game g, Profile prof, String scale, Ui.Setting row) {
         File files = a.getExternalFilesDir(null);
         new Thread(() -> {
             String[] in = sceneInputs(g);
-            boolean ok = files != null && in != null && SceneOverlay.current(files, g.titleId, prof.sceneScale(), prof.sceneExpect(), in[0]);
+            boolean ok = files != null && in != null && SceneOverlay.current(files, g.titleId, scale, prof.sceneExpect(), in[0]);
             if (!ok) UI.post(() -> row.value(a.getString(R.string.s2_scene_stale)));
         }, "nx-scene-check").start();
     }
@@ -673,23 +677,23 @@ final class GameSettings {
      * The player's last Scene resolution choice per game in this process (true: 720p): an overlay's answer turns 720p on only while that is still the choice, so
      * "Game default" or Restore defaults while it is being made win, and a second 720p (answered RUNNING) is turned on by the first run's answer
      */
-    private static final java.util.Map<String, Boolean> SCENE_WANT = new java.util.HashMap<>();
+    private static final java.util.Map<String, String> SCENE_WANT = new java.util.HashMap<>();   // the preset's scale last chosen per game in this process, null: the game's own
 
-    private static void sceneWant(String id, boolean on) {
-        synchronized (SCENE_WANT) { SCENE_WANT.put(id, on); }
+    private static void sceneWant(String id, String scale) {
+        synchronized (SCENE_WANT) { SCENE_WANT.put(id, scale); }
     }
 
-    private static boolean sceneWanted(String id) {
-        synchronized (SCENE_WANT) { return Boolean.TRUE.equals(SCENE_WANT.get(id)); }
+    private static boolean sceneWanted(String id, String scale) {
+        synchronized (SCENE_WANT) { return scale.equals(SCENE_WANT.get(id)); }
     }
 
-    private static void makeScene(MainActivity a, Game g, Profile prof) {
+    private static void makeScene(MainActivity a, Game g, Profile prof, String scale) {
         File files = a.getExternalFilesDir(null);
-        sceneWant(g.titleId, true);
+        sceneWant(g.titleId, scale);
         // Back closes it (the :pack process could end without an answer: the first run there also unpacks the packer); the answer still turns 720p on and says so
         AlertDialog wait = new AlertDialog.Builder(a).setMessage(R.string.s2_scene_making).setCancelable(true).create();
         wait.show();
-        String id = g.titleId, scale = prof.sceneScale(), expect = prof.sceneExpect();
+        String id = g.titleId, expect = prof.sceneExpect();
         new Thread(() -> {
             String[] in = sceneInputs(g);
             boolean have = files != null && in != null && SceneOverlay.current(files, id, scale, expect, in[0]);
@@ -697,7 +701,7 @@ final class GameSettings {
                 boolean gone = a.isFinishing() || a.isDestroyed();
                 if (in == null || files == null || have) {
                     if (!gone) { try { wait.dismiss(); } catch (RuntimeException ignored) { /* its window is gone */ } }
-                    if (have) { if (sceneWanted(id)) { Prefs.scene720(a, id, true); modToast(a, a.getString(R.string.s2_scene_made)); } }
+                    if (have) { if (sceneWanted(id, scale)) { Prefs.sceneScale(a, id, scale); modToast(a, a.getString(R.string.s2_scene_made)); } }
                     else if (gone) modToast(a, a.getString(R.string.s2_scene_failed, a.getString(R.string.s2_scene_no_pack)));
                     else a.error(a.getString(R.string.s2_scene_failed, a.getString(R.string.s2_scene_no_pack)));
                     if (!gone) a.gameSettingsChanged(g);
@@ -710,7 +714,7 @@ final class GameSettings {
                         if (!end) { try { wait.dismiss(); } catch (RuntimeException ignored) { /* its window is gone */ } }
                         if (code == 0) {
                             // made, but turned on only when the player has not chosen otherwise meanwhile (the overlay stays: a later 720p takes it at once)
-                            if (sceneWanted(id)) { Prefs.scene720(a, id, true); modToast(a, a.getString(R.string.s2_scene_made)); }
+                            if (sceneWanted(id, scale)) { Prefs.sceneScale(a, id, scale); modToast(a, a.getString(R.string.s2_scene_made)); }
                         } else if (code == SceneService.RUNNING) {
                             // an earlier run (its wait dialog closed with Back) is still making it; its answer turns 720p on while 720p is still the choice
                             modToast(a, a.getString(R.string.s2_scene_running));

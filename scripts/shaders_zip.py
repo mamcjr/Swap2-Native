@@ -2,11 +2,13 @@
 """A game's translated Android shader library as a shaders zip, the computer's side of the launcher's Import shaders… (android/SHADERS.md "Shader zips"):
 translate on the computer (scripts/pack_android.py, vk_android_build.py), carry the zip to the phone (Switch2/Shaders or Download), and the phone translates none.
 
-    python3 scripts/shaders_zip.py <library folder v-<V>> [--out DIR] [--pack DIR]
+    python3 scripts/shaders_zip.py <library folder v-<V>> [--out DIR] [--pack DIR] [--prewarm FILE]
 
 <library folder>: a v-<V> folder with dmsh_vk.lib (and its inputs.tsv): <work>/android-shaders/lib/v-<V> or <pack>/shaders/v-<V>. --pack: the pack folder made
 from the same dump (its pack.tsv gives the game version for the zip's name and the build rows). --out: where the zip goes (default: beside the library folder).
-The zip is the launcher's own layout (ShaderZip.java): STORED, manifest.tsv, inputs.tsv, dmsh_vk.lib in that order, named
+--prewarm: a phone's pipeline prewarm list of the game (its files/temp/<title ID>/vk_pipelines.keys, vka_pso.c "The prewarm list"), added as prewarm.keys
+(the zip is then format 2, which only launchers that know it take; the phone merges it into its own list at the game's next start).
+The zip is the launcher's own layout (ShaderZip.java): STORED, manifest.tsv, inputs.tsv, dmsh_vk.lib (then prewarm.keys) in that order, named
 swap2-shaders-<title ID>-<game version>-v-<V>.zip; written as <name>.partial, read back (names, order, sizes, SHA-256), then renamed. A zip of the same library
 already there is kept. Only a phone app of the same shader version (DMSH_VK_CHAIN) imports it. Exits non-zero on any error.
 """
@@ -25,7 +27,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 MAGIC, VERSION, HEADER = 0x4B56534D, 1, 128   # dm/gfx/nvn/dmsh_abi_vk.h DMSH_VK_LIB_MAGIC, DMSH_VK_LIB_VERSION, DMSH_VK_HEADER_SIZE
 ENTRY, BIND, MOD = 64, 24, 16
-LIB, INPUTS, MANIFEST = 'dmsh_vk.lib', 'inputs.tsv', 'manifest.tsv'
+LIB, INPUTS, MANIFEST, PREWARM = 'dmsh_vk.lib', 'inputs.tsv', 'manifest.tsv', 'prewarm.keys'
+MAX_PREWARM = 32 << 20   # ShaderZip.MAX_PREWARM
 CHUNK = 1 << 20
 
 
@@ -109,12 +112,22 @@ def digest(path):
     return sha.hexdigest(), crc
 
 
-def same_zip(z, sha, size):
-    """Whether a zip already there holds this library (its manifest's SHA-256 and size)"""
+def prewarm_list(path):
+    """A prewarm list's bytes and record count, checked as ShaderZip.prewarmList: the NXVKPW1 / NXVKPW2 magic, at least one record, at most MAX_PREWARM bytes"""
+    d = Path(path).read_bytes()
+    if len(d) < 24 or len(d) > MAX_PREWARM or d[:8] not in (b'NXVKPW1\0', b'NXVKPW2\0'): raise Error(f'{path} is not a prewarm list (vk_pipelines.keys)')
+    n = struct.unpack_from('<I', d, 12)[0]
+    if not n: raise Error(f'{path} holds no pipeline keys')
+    return d, n
+
+
+def same_zip(z, sha, size, keys_sha=''):
+    """Whether a zip already there holds this library and prewarm list (its manifest's SHA-256 and size)"""
     try:
         with zipfile.ZipFile(z) as zf:
             m = rows(zf.read(MANIFEST))
-            return one(m, 'kind') == 'swap2-shaders' and one(m, 'lib_sha256') == sha and one(m, 'lib_size') == str(size) and zf.getinfo(LIB).file_size == size
+            return (one(m, 'kind') == 'swap2-shaders' and one(m, 'lib_sha256') == sha and one(m, 'lib_size') == str(size) and zf.getinfo(LIB).file_size == size
+                    and one(m, 'prewarm_sha256') == keys_sha)
     except (OSError, KeyError, zipfile.BadZipFile):
         return False
 
@@ -132,7 +145,7 @@ def stored(name):
     return i
 
 
-def make(lib_dir, out, pack):
+def make(lib_dir, out, pack, prewarm=None):
     lib_dir = Path(lib_dir).resolve()
     lib = lib_dir / LIB
     if not lib_dir.name.startswith('v-') or not lib.is_file(): raise Error(f'{lib_dir} is not a library folder (v-<version> with {LIB})')
@@ -155,17 +168,21 @@ def make(lib_dir, out, pack):
     game_version = one(pk, 'version')
     print(f'shaders_zip: hashing {lib} ({h["size"]:,} bytes, {h["entries"]:,} shaders)', flush=True)
     sha, crc = digest(lib)
-    m = [('format', '1'), ('kind', 'swap2-shaders'), ('title_id', h['game']), ('name', game_name(h['game'], pk)), ('game_version', game_version)]
+    keys, nkeys = prewarm_list(prewarm) if prewarm else (None, 0)
+    keys_sha = hashlib.sha256(keys).hexdigest() if keys else ''
+    m = [('format', '2' if keys else '1'), ('kind', 'swap2-shaders'), ('title_id', h['game']), ('name', game_name(h['game'], pk)), ('game_version', game_version)]
     m += [('build', b) for b in pk.get('build', [])]
     m += [('library_version', v), ('abi', h['abi']), ('chain', h['chain']), ('inputs', h['inputs']), ('shaders', str(h['entries'])), ('lib_size', str(h['size'])),
-          ('lib_sha256', sha), ('inputs_sha256', hashlib.sha256(inputs).hexdigest()), ('app', made_by()), ('packer', one(pk, 'packer')), ('xlate_source', xlate_source()),
+          ('lib_sha256', sha), ('inputs_sha256', hashlib.sha256(inputs).hexdigest())]
+    if keys: m += [('prewarm_keys', str(nkeys)), ('prewarm_size', str(len(keys))), ('prewarm_sha256', keys_sha)]
+    m += [('app', made_by()), ('packer', one(pk, 'packer')), ('xlate_source', xlate_source()),
           ('made', datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))]
     manifest = ('# a game\'s translated shaders (android/SHADERS.md "Shader zips"): Import shaders… in the game\'s Options takes it\n'
                 + ''.join(k + '\t' + re.sub(r'[\t\r\n]', ' ', x) + '\n' for k, x in m)).encode('utf-8')
     out = Path(out).resolve() if out else lib_dir.parent
     out.mkdir(parents=True, exist_ok=True)
     name = f'swap2-shaders-{clean(h["game"])}-{clean(game_version or "any")}-v-{clean(v)}.zip'
-    if same_zip(out / name, sha, h['size']):
+    if same_zip(out / name, sha, h['size'], keys_sha):
         print(f'shaders_zip: {out / name} is already there with the same library: kept')
         return out / name
     z = free_name(out, name)
@@ -179,12 +196,13 @@ def make(lib_dir, out, pack):
                 info.file_size = h['size']
                 with lib.open('rb') as src, zf.open(info, 'w', force_zip64=h['size'] >= 0xFFFFFFFF) as dst:
                     while b := src.read(CHUNK): dst.write(b)
+                if keys: zf.writestr(stored(PREWARM), keys)
             fo.flush()
             os.fsync(fo.fileno())
         # read back: the launcher's names, order and method, the library's size, CRC and SHA-256
         with zipfile.ZipFile(tmp) as zf:
             infos = zf.infolist()
-            if [i.filename for i in infos] != [MANIFEST, INPUTS, LIB] or any(i.compress_type != zipfile.ZIP_STORED for i in infos):
+            if [i.filename for i in infos] != [MANIFEST, INPUTS, LIB] + ([PREWARM] if keys else []) or any(i.compress_type != zipfile.ZIP_STORED for i in infos):
                 raise Error(f'{tmp}: not the layout the launcher reads ({[i.filename for i in infos]})')
             li = zf.getinfo(LIB)
             if li.file_size != h['size'] or li.CRC != crc: raise Error(f'{tmp}: the library entry does not match {lib}')
@@ -192,10 +210,12 @@ def make(lib_dir, out, pack):
             with zf.open(LIB) as f:
                 while b := f.read(CHUNK): back.update(b)
             if back.hexdigest() != sha: raise Error(f'{tmp}: the library read back is not {lib}')
+            if keys and zf.read(PREWARM) != keys: raise Error(f'{tmp}: the prewarm list read back is not {prewarm}')
         os.replace(tmp, z)
     finally:
         if tmp.exists(): tmp.unlink()
-    print(f'shaders_zip: wrote {z} ({z.stat().st_size:,} bytes; {h["entries"]:,} shaders, version {v}), read back. On the phone: put it in Switch2/Shaders (or Download), '
+    print(f'shaders_zip: wrote {z} ({z.stat().st_size:,} bytes; {h["entries"]:,} shaders, version {v}' + (f', {nkeys:,} prewarm keys' if keys else '') + '), read back.'
+          f' On the phone: put it in Switch2/Shaders (or Download), '
           f'then the game\'s Options > Import shaders... (an app with shader version {v})')
     return z
 
@@ -205,9 +225,10 @@ def main():
     ap.add_argument('lib_dir', help='the library folder, v-<version> with dmsh_vk.lib')
     ap.add_argument('--out', help='where the zip goes (default: beside the library folder)')
     ap.add_argument('--pack', help='the pack folder made from the same dump (its pack.tsv: the game version and builds)')
+    ap.add_argument('--prewarm', help="a phone's prewarm list of the game (files/temp/<title ID>/vk_pipelines.keys), added as prewarm.keys")
     a = ap.parse_args()
     try:
-        make(a.lib_dir, a.out, a.pack)
+        make(a.lib_dir, a.out, a.pack, a.prewarm)
     except (Error, OSError, zipfile.BadZipFile) as e:
         print(f'[RED] shaders_zip: {e}', file=sys.stderr)
         return 1

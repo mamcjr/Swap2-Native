@@ -9,9 +9,13 @@
 #define DM_GAME_RT_MAXMOD 16
 #define DM_GAME_RT_MAXVER 32
 #define DM_GAME_RT_MAXWFN 16
+#define DM_GAME_RT_MAXRLV 16
+#define DM_GAME_RT_MAXRLV_LISTS 12
 
 struct dm_game_ver { const char *build, *ver; };
 struct dm_game_wfn { const char *build; uint64_t wfn, hfn; unsigned w, h; };
+// res_levels (loader.c levels_apply): the dynamic resolution's size table (<n> levels) and its byte lists of levels (offset, length), per main build
+struct dm_game_rlv { const char *build; uint64_t table; unsigned n, nl; struct { uint64_t off; unsigned len; } l[DM_GAME_RT_MAXRLV_LISTS]; };
 
 struct dm_game_rt {
     const char *id, *name, *romfs_marker, *args, *env, *fastboot_env, *ue_fps_cvar;
@@ -25,6 +29,7 @@ struct dm_game_rt {
     const char *modules[DM_GAME_RT_MAXMOD]; int nmod;
     struct dm_game_ver vers[DM_GAME_RT_MAXVER]; int nvers;
     struct dm_game_wfn wfn[DM_GAME_RT_MAXWFN]; int nwfn;
+    struct dm_game_rlv rlv[DM_GAME_RT_MAXRLV]; int nrlv;
 };
 extern struct dm_game_rt dm_game;
 
@@ -71,3 +76,4 @@ int dm_game_load(const char *path);
 #define DM_GAME_GPU_TS_SEGMENT (dm_game.gpu_ts_segment)
 #define DM_GAME_VCONV_RANGE (dm_game.vconv_range)
 #define DM_GAME_NWINDOW_FN (dm_game.nwfn)
+#define DM_GAME_NRES_LEVELS (dm_game.nrlv)

@@ -90,7 +90,7 @@ final class PackUi {
         Game g = pending;
         pending = null;
         if (g == null) return true;
-        String p = PathUtil.documentToPath(doc);
+        String p = PathUtil.documentToPath(a, doc);
         if (p == null) { a.error("That file is not on this phone's storage by a path the app can read (" + doc + "). Pick it from the phone's storage (☰ › the phone's name), not from Recent or Downloads."); return true; }
         importRun(a, g, new File(p));
         return true;

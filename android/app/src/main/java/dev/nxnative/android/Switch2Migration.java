@@ -26,12 +26,23 @@ final class Switch2Migration {
 
     private Switch2Migration() {}
 
-    /** Starts the move once per process when it may run; refresh runs on the main thread when something moved or was repointed */
-    static void start(MainActivity a, Runnable refresh) {
-        if (!Environment.isExternalStorageManager()) return;
+    /** The move's thread is at work (its end runs its caller's after) */
+    private static volatile boolean running;
+
+    /**
+     * Starts the move once per process when it may run; refresh runs on the main thread when something moved or was repointed. after (the library's search:
+     * MainActivity.libraryScan) runs on the main thread once no move is under way: now when none starts, else when it ends, and not at all on a start whose
+     * move is still to do but has to wait (a later start runs both), so the search never sees a game half-way through its move nor adds a card whose path the
+     * move then misses
+     */
+    static void start(MainActivity a, Runnable refresh, Runnable after) {
+        if (!Environment.isExternalStorageManager()) { after.run(); return; }
         boolean moved = Prefs.of(a).getBoolean(DONE, false);   // the move ran: only the saved paths are checked again (a rename the storage service reported as failed and finished later)
-        if (busy(a)) return;   // a game or a Prepare worker reads its dump and work folder by path: a later start moves them
-        if (!started.compareAndSet(false, true)) return;
+        // A game or a Prepare worker reads its dump and work folder by path, and the library's search may be checking games of the older layout (its cards
+        // are made with the paths it found): a later start moves them. The search runs meanwhile only when the move itself is done (only paths are rechecked)
+        if (busy(a) || MainActivity.libraryScanBusy()) { if (moved) after.run(); return; }
+        if (!started.compareAndSet(false, true)) { if (!running) after.run(); return; }   // done in this process already, or under way (its end runs its own after)
+        running = true;
         Context c = a.getApplicationContext();
         new Thread(() -> {
             boolean changed = false, done = false;
@@ -51,8 +62,10 @@ final class Switch2Migration {
                 Log.w(TAG, "Switch2 layout: " + e);
             } finally {
                 if (done) Prefs.of(c).edit().putBoolean(DONE, true).commit();
-                else started.set(false);   // something waits (a running job): the next start tries again; a failed rename is not retried (Switch2Layout.Report.pending)
-                if (changed) a.runOnUiThread(() -> { if (!a.isDestroyed()) refresh.run(); });
+                running = false;   // before started is cleared: a start in between then begins no second move that this flag would hide from the next
+                if (!done) started.set(false);   // something waits (a running job): the next start tries again; a failed rename is not retried (Switch2Layout.Report.pending)
+                boolean ch = changed;
+                a.runOnUiThread(() -> { if (!a.isDestroyed()) { if (ch) refresh.run(); after.run(); } });
             }
         }, "nx-switch2-layout").start();
     }

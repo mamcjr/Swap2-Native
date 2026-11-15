@@ -62,6 +62,14 @@ add_library(vpx STATIC ${VPX_C})
 target_include_directories(vpx PRIVATE ${TP}/libvpx ${TP}/libvpx/config)
 target_compile_options(vpx PRIVATE -O2 -w)
 
+# dav1d (AV1 movies, dm/third_party/dav1d): C sources and per-bit-depth wrappers
+file(GLOB DAV1D_C CONFIGURE_DEPENDS ${TP}/dav1d/src/*.c ${TP}/dav1d/config/tmpl/*.c)
+list(FILTER DAV1D_C EXCLUDE REGEX "_tmpl\\.c$")
+list(APPEND DAV1D_C ${TP}/dav1d/src/arm/cpu.c)
+add_library(dav1d STATIC ${DAV1D_C})
+target_include_directories(dav1d PRIVATE ${TP}/dav1d ${TP}/dav1d/include ${TP}/dav1d/config)
+target_compile_options(dav1d PRIVATE -O2 -w -fvisibility=hidden)
+
 # zstd's decompressor (one file, dm/third_party/zstd): the Vulkan replay's shader library stores its SPIR-V modules as zstd frames (vka_shlib.c)
 add_library(zstddec STATIC ${TP}/zstd/zstddeclib.c)
 target_compile_options(zstddec PRIVATE -O2 -w -fvisibility=hidden)
@@ -71,17 +79,25 @@ target_compile_options(zstddec PRIVATE -O2 -w -fvisibility=hidden)
 function(nxhost_add tgt game)
   if(game STREQUAL "runtime")
     set(GAME_H ${HOST}/rt/game_rt.c)
+    set(SEED_H ${HOST}/rt/vk_prewarm_seed.h)
     set(GAME_INC ${HOST}/rt)
   else()
     set(GAME_H ${GEN}/${game}/game_profile.h)
+    set(SEED_H ${GEN}/${game}/vk_prewarm_seed.h)
     set(GAME_INC ${GEN}/${game})
     add_custom_command(OUTPUT ${GAME_H}
       COMMAND ${Python3_EXECUTABLE} ${ROOT}/dm/games/game.py header ${game} ${GAME_H}
       DEPENDS ${ROOT}/dm/games/${game}/game.tsv ${ROOT}/dm/games/game.py
       COMMENT "game profile ${game}")
+    # The profile's prewarm seed list (vk_prewarm.bin, when it has one) as bytes for the Vulkan replay (vka_pso.c pw_load; dm/gfx/vk_android/vka_pwlist.h). A target that runs at
+    # every build (a seed file added after CMake configured would not be seen by a DEPENDS list); game.py writes the header only when it changes
+    add_custom_target(${tgt}_seed COMMAND ${Python3_EXECUTABLE} ${ROOT}/dm/games/game.py seed ${game} ${SEED_H} BYPRODUCTS ${SEED_H} COMMENT "prewarm seed ${game}")
   endif()
-  add_library(${tgt} SHARED ${HOST_C} ${GFX_C} ${ASM_OUT} ${GAME_H})
-  target_include_directories(${tgt} PRIVATE ${GAME_INC} ${GFX}/nvn/include ${TP}/vulkan-headers/include ${TP}/libvpx ${TP}/libvpx/config ${TP}/stb_vorbis ${HOST})
+  add_library(${tgt} SHARED ${HOST_C} ${GFX_C} ${ASM_OUT} ${GAME_H} ${SEED_H})
+  if(NOT game STREQUAL "runtime")
+    add_dependencies(${tgt} ${tgt}_seed)
+  endif()
+  target_include_directories(${tgt} PRIVATE ${GAME_INC} ${GFX}/nvn/include ${TP}/vulkan-headers/include ${TP}/libvpx ${TP}/libvpx/config ${TP}/stb_vorbis ${TP}/dav1d/include ${HOST})
   # DM_NUP_ZSTD: compressed files of a NUP container are decompressed with zstddec (dm/host/nup_image.h)
   target_compile_definitions(${tgt} PRIVATE _GNU_SOURCE DM_NUP_ZSTD $<$<BOOL:${NX_LSFG}>:NX_LSFG>)
   # As the Mac host (-O1 -g -Wall -Wno-unused-function). Hidden visibility: the assembly reaches C symbols with adrp, which a shared library allows only for symbols it binds itself
@@ -92,7 +108,7 @@ function(nxhost_add tgt game)
   set_source_files_properties(${VKA_C} PROPERTIES COMPILE_OPTIONS -O2)
   target_link_options(${tgt} PRIVATE -Wl,-Bsymbolic -Wl,--no-undefined -Wl,--error-limit=0 -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libnxhost.map)
   set_target_properties(${tgt} PROPERTIES LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/libnxhost.map)
-  target_link_libraries(${tgt} PRIVATE vpx zstddec aaudio mediandk android log m dl z)   # libvulkan.so is opened at run time (vka_dev.c)
+  target_link_libraries(${tgt} PRIVATE vpx dav1d zstddec aaudio mediandk nativewindow android log m dl z)   # libvulkan.so is opened at run time (vka_dev.c)
 endfunction()
 
 if(NX_RUNTIME_PROFILE)

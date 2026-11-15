@@ -524,6 +524,25 @@ static void read_mapped_race(void) {
     for (size_t i = 0; i < 8 * P; ++i) assert(buf[i] == 0);
 }
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--pool-probe")) {
+        // Portable Android check of the real dispatcher without ownership()'s 16 KiB read-only test page.
+        mem_init(); alias = info(I_AliasAddr); stack = info(I_StackAddr); heap = info(I_HeapAddr);
+        size_t allocated = 4 * 1024 * 1024, capacity = DM_GAME_APP_POOL - DM_GAME_MEM_USED - allocated;
+        assert(DM_GAME_MEM_MAP_LIMIT && !resize(allocated));
+        assert(!pages(1, alias, capacity));
+        uint64_t before = g_alias_mapped;
+        assert(!pages(1, alias, capacity) && g_alias_mapped == before);
+        assert(pages(1, alias + capacity, P) == LIMIT && g_alias_mapped == before);
+        assert(resize(allocated + 2 * 1024 * 1024) == LIMIT && g_heap_cur == allocated);
+        assert(info(I_UsedMem) == DM_GAME_APP_POOL);
+        assert(!pages(0, alias, P));
+        assert(!pages(1, alias + capacity, P) && g_alias_mapped == before);
+        assert(!pages(0, alias, capacity + P) && !resize(0));
+        concurrency();
+        assert(!g_alias_mapped && !g_heap_cur && !g_nmap);
+        puts("memory application-pool budget, duplicate maps, rejection rollback, release/retry and concurrency passed");
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--heap-probe")) {
         mem_init();
         assert(resize(g_heap_cap + 0x200000) == OOM);

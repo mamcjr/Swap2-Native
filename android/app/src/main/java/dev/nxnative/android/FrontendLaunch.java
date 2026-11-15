@@ -42,7 +42,6 @@ public final class FrontendLaunch extends Activity {
             return;
         }
         File game = Switch2Layout.moved(Switch2Layout.root(), new File(Frontend.normal(path)));   // a frontend set up before the move to Switch2/Games sends the old path
-        if (Nup.wrongCase(game)) { fail(game.getName() + ": rename it so that its name ends in \".nup\" (lower case); the game and the tools read only that name."); return; }
         if (!game.exists()) { fail(game + " is not there (the frontend sent " + path + ")."); return; }
         if (!game.canRead()) { fail(game + " cannot be read. Check that All files access is on."); return; }
         new Thread(() -> {
@@ -65,7 +64,7 @@ public final class FrontendLaunch extends Activity {
         if (u != null) {
             if ("file".equalsIgnoreCase(u.getScheme())) return Frontend.fileUri(u.toString());
             if ("content".equalsIgnoreCase(u.getScheme())) {
-                String p = PathUtil.documentToPath(u);   // ES-DE's %ROMSAF%: a document of a picked tree
+                String p = PathUtil.documentToPath(this, u);   // ES-DE's %ROMSAF%: a document of a picked tree
                 if (p != null) return p;
                 p = Frontend.embeddedPath(u.getPath());
                 return p != null && Switch2Layout.moved(Switch2Layout.root(), new File(Frontend.normal(p))).exists() ? p : null;

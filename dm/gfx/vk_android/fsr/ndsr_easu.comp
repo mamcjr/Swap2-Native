@@ -7,7 +7,7 @@
 // stride over gl_NumWorkGroups, so any group count covers the image. Sizes come from the bound images (textureSize / imageSize), so any scene size works.
 // Specialization constants: ENC 0 = the input holds the colour, 1 = it holds sqrt(colour) (agl's light upscaler: a335c1db6270c355 packs sqrt as RGB9E5),
 // and the output is the colour (max(c, 0) squared); MAP 0 = the whole input onto the whole output, 1 = agl's push bank (experimental, see main);
-// KERNEL 0 = EASU, 1 = bilinear (from four texel fetches, so the game's sampler filter does not matter).
+// KERNEL 0 = EASU, 1 = bilinear, 2 = nearest (explicit fetches, independent of the game sampler).
 // PACKED (a compile-time variant, ndsr_spv.py): the output is an R32_UINT view of the network's image and each texel is stored as its format's 32-bit word, for an
 // output format without storage support (B10G11R11_UFLOAT on Adreno: a float store into it has no view to go through). PACK (constant_id 3) names that format:
 // 1 = B10G11R11_UFLOAT (R in bits 0-10, G 11-21, B 22-31: 5-bit exponents, 6 / 6 / 5-bit mantissas, no sign), 2 = R8G8B8A8_UNORM.
@@ -81,6 +81,7 @@ void main() {
         AF3 c;
         if (same) c = fetch(q, isz);
         else if (KERNEL == 1) c = bilinear(vec2(q) * k0.xy + k0.zw, isz);
+        else if (KERNEL == 2) c = fetch(ivec2(floor(vec2(q) * k0.xy + k0.zw + 0.5)), isz);
         else FsrEasuF(c, AU2(q), c0, c1, c2, c3);
         c = max(c, AF3(0.0));
         if (ENC == 1) c *= c;

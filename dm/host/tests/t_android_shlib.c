@@ -64,6 +64,16 @@ static void test_made(void) {
     CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, NULL, err, sizeof err), "another version taken without an ABI asked");
     CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, "0123456789ab", err, sizeof err) && strstr(err, "Vulkan chain"), "another ABI taken: %s", err);
     CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", "040074A01BF12000", DMSH_VK_ABI, err, sizeof err) && strstr(err, "game"), "same ABI, other game taken: %s", err);
+    memcpy(H->abi, "674db0a4ff79", 12);
+    CHECK(vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, "623c0a2f1e8a", err, sizeof err) && L.by_abi, "audited pre-mesh ABI refused: %s", err);
+    dmsh_vk_entry *legacy_e=(dmsh_vk_entry *)(I.p+H->entry_off);
+    legacy_e[0].flags |= DMSH_VK_F_MESH_FALLBACK;
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, "623c0a2f1e8a", err, sizeof err), "legacy ABI accepted mesh metadata");
+    legacy_e[0].flags &= ~DMSH_VK_F_MESH_FALLBACK;
+    dmsh_vk_module *legacy_m=(dmsh_vk_module *)(I.p+H->mod_off);
+    legacy_m[0].variant=DMSH_VK_MOD_MESH_COMPUTE;
+    CHECK(!vka_shlib_check(&L, I.p, I.n, DMSH_CHAIN, "000000000000", NULL, "623c0a2f1e8a", err, sizeof err), "legacy ABI accepted a new variant");
+    legacy_m[0].variant=DMSH_VK_MOD_BASE;
     memset(H->abi, 0, sizeof H->abi);
     vka_shlib_check(&L, I.p, I.n, NULL, NULL, NULL, NULL, err, sizeof err);
     uint8_t md[8] = {0xa0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};

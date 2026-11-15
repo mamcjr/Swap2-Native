@@ -188,13 +188,14 @@ public final class ShaderZipJvmTest {
     }
 
     public static void main(String[] a) throws Exception {
-        if (a.length == 3 && a[0].equals("import")) {
+        if ((a.length == 3 || a.length == 4) && a[0].equals("import")) {
             File to = new File(a[2]);
             ShaderZip.Target t = new ShaderZip.Target(to, ID);
+            if (a.length == 4) t.temp = new File(a[3]);   // the game's temp folder: the zip's prewarm list goes there
             ShaderZip.Result r = importFile(new File(a[1]), t);
             ShaderZip.Result r2 = importStream(new File(a[1]), new ShaderZip.Target(new File(a[2] + "-stream"), ID));
             check(r2.shaders == r.shaders, "stream import");
-            System.out.println("imported " + r.version + " " + r.shaders + " " + ShaderZip.ready(to, ID));
+            System.out.println("imported " + r.version + " " + r.shaders + " " + ShaderZip.ready(to, ID) + (a.length == 4 ? " " + r.prewarmKeys : ""));
             return;
         }
         File t = new File(a[0]);
@@ -205,6 +206,8 @@ public final class ShaderZipJvmTest {
         replace(new File(t, "replace"));
         restamp(new File(t, "restamp"));
         lists(new File(t, "lists"));
+        prewarm(new File(t, "prewarm"));
+        folder(new File(t, "folder"));
         System.out.println("ok " + n);
     }
 
@@ -262,6 +265,47 @@ public final class ShaderZipJvmTest {
         ShaderZip.Exported e4 = ShaderZip.export(c, ID, new File(t, "out4"), "test/1", "x", ShaderZip.QUIET);
         check(e4.zip.getName().equals("swap2-shaders-" + ID + "-458752-v-" + CUR + ".zip"), "re-export of an import: " + e4.zip.getName());
         check(ShaderZip.exportName(ID, "", "v1").equals("swap2-shaders-" + ID + "-any-v-v1.zip") && ShaderZip.exportName(ID, "1/2", "v").contains("-1_2-"), "names");
+    }
+
+    /**
+     * A library shared as a folder (ShaderLibs.loose, ShaderZip.readFolder): dmsh_vk.lib and inputs.tsv beside a Banana Native style pack.tsv (format 1), or a
+     * pack's shaders/v-&lt;V&gt;/; imported byte for byte with the zip's checks; never a whole pack (its code beside it); another game, a cut library refused
+     */
+    static void folder(File t) throws Exception {
+        byte[] lib = lib(ID, CUR, INPUTS, ABI, 4, 70000, 7);
+        File loose = new File(t, "ocarina lib");
+        write(new File(loose, "dmsh_vk.lib"), lib);
+        write(new File(loose, "inputs.tsv"), stamp(ID, INPUTS));
+        write(new File(loose, "pack.tsv"), "format\t1\ntitle_id\t" + ID + "\n");
+        check(new File(loose, "dmsh_vk.lib").equals(ShaderLibs.loose(loose)), "dmsh_vk.lib at the top: a loose library");
+        File p = pack(new File(t, "p"));
+        check(ShaderLibs.loose(p) == null, "a pack with its code is no loose library");
+        File sh = new File(t, "sh");
+        addLib(sh, CUR, lib, stamp(ID, INPUTS));
+        check(new File(sh, "shaders/v-" + CUR + "/dmsh_vk.lib").equals(ShaderLibs.loose(sh)), "a shaders/v-<V>/ folder");
+        check(ShaderLibs.loose(new File(t, "nothing")) == null, "a folder that is not there");
+
+        ShaderZip.Target tg = new ShaderZip.Target(p, ID);
+        ShaderZip.Result r = ShaderZip.install(ShaderZip.readFolder(loose, tg, ShaderZip.QUIET), tg);
+        check(r.hadPack && r.shaders == 4 && r.version.equals(CUR) && Arrays.equals(bytes(new File(p, "shaders/v-" + CUR + "/dmsh_vk.lib")), lib), "imported byte for byte");
+        String src = new String(bytes(new File(p, "shaders/v-" + CUR + "/source.tsv")), StandardCharsets.UTF_8);
+        check(src.contains("lib_sha256\t" + sha(lib)) && src.contains("imported_from\tocarina lib"), "source.tsv: " + src);
+        check(ShaderZip.ready(p, ID) && noStaging(p) && new File(loose, "dmsh_vk.lib").isFile(), "the pack has it, the folder is left as it was");
+
+        File other = new File(t, "other");
+        write(new File(other, "dmsh_vk.lib"), lib(MKW, CUR, INPUTS, ABI, 2, 4096, 8));
+        write(new File(other, "inputs.tsv"), stamp(MKW, INPUTS));
+        ShaderZip.Failure f = failure(() -> ShaderZip.readFolder(other, new ShaderZip.Target(pack(new File(t, "p2")), ID), ShaderZip.QUIET));
+        check(f != null && f.why == ShaderZip.Why.OTHER_GAME && noStaging(new File(t, "p2")), "another game's library: " + (f == null ? "none" : f.why));
+        File cut = new File(t, "cut");
+        write(new File(cut, "dmsh_vk.lib"), Arrays.copyOf(lib, 100));
+        write(new File(cut, "inputs.tsv"), stamp(ID, INPUTS));
+        f = failure(() -> ShaderZip.readFolder(cut, new ShaderZip.Target(pack(new File(t, "p3")), ID), ShaderZip.QUIET));
+        check(f != null && f.why == ShaderZip.Why.DAMAGED, "a cut library: " + (f == null ? "none" : f.why));
+        File noIn = new File(t, "noinputs");
+        write(new File(noIn, "dmsh_vk.lib"), lib);
+        f = failure(() -> ShaderZip.readFolder(noIn, new ShaderZip.Target(pack(new File(t, "p4")), ID), ShaderZip.QUIET));
+        check(f != null && f.why == ShaderZip.Why.NOT_SHADER_ZIP, "no inputs.tsv: " + (f == null ? "none" : f.why));
     }
 
     static void choice(File t) throws Exception {
@@ -501,6 +545,110 @@ public final class ShaderZipJvmTest {
         List<File> f = ShaderZip.found(ID, dir, dl, new File(t, "missing"));
         check(f.equals(Arrays.asList(newer, older)), "found: " + f);
         check(ShaderZip.found(ID).isEmpty(), "no folders");
+    }
+
+    /** A prewarm list as vka_pso.c pw_save writes one: the NXVKPW2 header (magic, gkey_size, n, layout, pad) and n records' worth of bytes (random from seed) */
+    static byte[] keys(int n, long seed) {
+        byte[] b = new byte[24 + n * 96];
+        System.arraycopy("NXVKPW2\0".getBytes(StandardCharsets.US_ASCII), 0, b, 0, 8);
+        u32(b, 8, 512);
+        u32(b, 12, n);
+        u32(b, 16, 0x12345678);
+        byte[] r = new byte[n * 96];
+        new Random(seed).nextBytes(r);
+        System.arraycopy(r, 0, b, 24, r.length);
+        return b;
+    }
+
+    static ShaderZip.Target withTemp(File pack, File temp) {
+        ShaderZip.Target t = new ShaderZip.Target(pack, ID);
+        t.temp = temp;
+        return t;
+    }
+
+    /** The zip's prewarm list (format 2, prewarm.keys): exported from the game's list, put beside the importing device's own list, every refusal */
+    static void prewarm(File t) throws Exception {
+        byte[] lib = lib(ID, CUR, INPUTS, ABI, 4, 70000, 20), in = stamp(ID, INPUTS).getBytes(StandardCharsets.UTF_8), k = keys(3, 21);
+        File a = addLibPack(new File(t, "a"), lib), out = new File(t, "out"), list = new File(t, "a-temp/vk_pipelines.keys");
+        write(list, k);
+        ShaderZip.Exported e = ShaderZip.export(a, ID, out, "t", "x", list, ShaderZip.QUIET);
+        check(names(e.zip).equals(Arrays.asList("manifest.tsv", "inputs.tsv", "dmsh_vk.lib", "prewarm.keys")) && e.prewarmKeys == 3, "the list as the fourth entry: " + names(e.zip));
+        String man;
+        try (ZipFile zf = new ZipFile(e.zip)) { man = new String(zf.getInputStream(zf.getEntry("manifest.tsv")).readAllBytes(), StandardCharsets.UTF_8); }
+        check(man.startsWith("#") && man.contains("format\t2\n") && man.contains("prewarm_sha256\t" + sha(k) + "\n") && man.contains("prewarm_size\t" + k.length + "\n")
+                && man.contains("prewarm_keys\t3\n"), "manifest: " + man);
+        check(ShaderZip.export(a, ID, out, "t", "x", list, ShaderZip.QUIET).reused, "the same library and list: kept");
+        File first = new File(t, "first.zip");
+        Files.copy(e.zip.toPath(), first.toPath());
+        byte[] k2 = keys(5, 22);
+        write(list, k2);
+        ShaderZip.Exported e2 = ShaderZip.export(a, ID, out, "t", "x", list, ShaderZip.QUIET);
+        check(!e2.reused && e2.zip.equals(e.zip) && out.list().length == 1 && e2.prewarmKeys == 5, "a list that grew: the zip of the same library replaced, no second copy");
+        File plain = new File(t, "plain");
+        ShaderZip.Exported e3 = ShaderZip.export(a, ID, plain, "t", "x", new File(t, "missing.keys"), ShaderZip.QUIET);
+        check(names(e3.zip).size() == 3 && e3.prewarmKeys == 0, "no list: a format 1 zip");
+        write(new File(t, "bad.keys"), "not a prewarm list at all, only text");
+        check(names(ShaderZip.export(a, ID, new File(t, "plain2"), "t", "x", new File(t, "bad.keys"), ShaderZip.QUIET).zip).size() == 3, "a file that is not a list: left out");
+
+        // into a pack: beside the device's own list, which stays as it was; from a file and from a stream
+        for (boolean stream : new boolean[] {false, true}) {
+            File b = pack(new File(t, "b" + stream)), temp = new File(t, "b" + stream + "-temp");
+            byte[] own = keys(2, 23);
+            write(new File(temp, "vk_pipelines.keys"), own);
+            ShaderZip.Target tb = withTemp(b, temp);
+            ShaderZip.Result r = stream ? importStream(e2.zip, tb) : importFile(e2.zip, tb);
+            check(r.prewarmKeys == 5 && r.prewarmProblem == null && Arrays.equals(bytes(new File(temp, "vk_pipelines.import.keys")), k2)
+                    && Arrays.equals(bytes(new File(temp, "vk_pipelines.keys")), own) && ShaderZip.ready(b, ID), "the list beside the device's own (stream " + stream + ")");
+            String[] left = temp.list();
+            check(left != null && left.length == 2, "no .tmp left: " + Arrays.toString(left));
+        }
+        // a second import replaces a list the game has not taken yet; a temp folder not made yet is made
+        File c = pack(new File(t, "c")), ct = new File(t, "c-temp/deeper");
+        importFile(first, withTemp(c, ct));
+        check(Arrays.equals(bytes(new File(ct, "vk_pipelines.import.keys")), k), "the temp folder made");
+        importFile(e2.zip, withTemp(c, ct));
+        check(Arrays.equals(bytes(new File(ct, "vk_pipelines.import.keys")), k2), "the newer zip's list");
+        // no temp folder given: the library only; a temp folder that cannot be one: the library in place, the problem said
+        File d = new File(t, "d");
+        ShaderZip.Result rd = importFile(e2.zip, new ShaderZip.Target(d, ID));
+        check(rd.prewarmKeys == 0 && rd.prewarmProblem == null && ShaderZip.ready(d, ID), "no temp: the library only");
+        File f = new File(t, "f"), notDir = new File(t, "f-temp");
+        write(notDir, "a file");
+        ShaderZip.Result rf = importFile(e2.zip, withTemp(f, notDir));
+        check(rf.prewarmKeys == 0 && rf.prewarmProblem != null && ShaderZip.ready(f, ID), "a list that cannot be written: the library in place, " + rf.prewarmProblem);
+
+        // refusals, the target pack and its temp folder unchanged
+        File g = pack(new File(t, "g")), gt = new File(t, "g-temp");
+        ShaderZip.Target tg = withTemp(g, gt);
+        String ps = sha(k), pl = String.valueOf(k.length);
+        File one = new File(t, "one.zip");
+        zip(one, Arrays.asList(new Object[] {"manifest.tsv", manifest(lib, in)}, new Object[] {"inputs.tsv", in}, new Object[] {"dmsh_vk.lib", lib}, new Object[] {"prewarm.keys", k}));
+        refused("prewarm.keys in a format 1 zip", ShaderZip.Why.UNSAFE_NAME, one, tg, false);
+        File noKeys = craft(new File(t, "nokeys.zip"), lib, in, "format", "2", "prewarm_sha256", ps, "prewarm_size", pl);
+        refused("format 2 without prewarm.keys", ShaderZip.Why.NOT_SHADER_ZIP, noKeys, tg, true);
+        File wrong = new File(t, "wrong.zip");
+        zip(wrong, Arrays.asList(new Object[] {"manifest.tsv", manifest(lib, in, "format", "2", "prewarm_sha256", sha(k2), "prewarm_size", pl)}, new Object[] {"inputs.tsv", in},
+                new Object[] {"dmsh_vk.lib", lib}, new Object[] {"prewarm.keys", k}));
+        refused("prewarm.keys not the manifest's", ShaderZip.Why.DAMAGED, wrong, tg, false);
+        refused("prewarm.keys not the manifest's, stream", ShaderZip.Why.DAMAGED, wrong, tg, true);
+        byte[] text = "not a list, but long enough to have a header".getBytes(StandardCharsets.US_ASCII);
+        File notList = new File(t, "notlist.zip");
+        zip(notList, Arrays.asList(new Object[] {"manifest.tsv", manifest(lib, in, "format", "2", "prewarm_sha256", sha(text), "prewarm_size", String.valueOf(text.length))},
+                new Object[] {"inputs.tsv", in}, new Object[] {"dmsh_vk.lib", lib}, new Object[] {"prewarm.keys", text}));
+        refused("prewarm.keys that is not a list", ShaderZip.Why.DAMAGED, notList, tg, false);
+        byte[] huge = new byte[ShaderZip.MAX_PREWARM + 1];
+        System.arraycopy(k, 0, huge, 0, k.length);
+        File big = new File(t, "big.zip");
+        zip(big, Arrays.asList(new Object[] {"manifest.tsv", manifest(lib, in, "format", "2", "prewarm_sha256", sha(huge), "prewarm_size", String.valueOf(huge.length))},
+                new Object[] {"inputs.tsv", in}, new Object[] {"dmsh_vk.lib", lib}, new Object[] {"prewarm.keys", huge}));
+        refused("prewarm.keys over the limit, stream", ShaderZip.Why.NOT_SHADER_ZIP, big, tg, true);
+        File five = new File(t, "five.zip");
+        zip(five, Arrays.asList(new Object[] {"manifest.tsv", manifest(lib, in, "format", "2", "prewarm_sha256", ps, "prewarm_size", pl)}, new Object[] {"inputs.tsv", in},
+                new Object[] {"dmsh_vk.lib", lib}, new Object[] {"prewarm.keys", k}, new Object[] {"x.txt", in}));
+        refused("a fifth entry", ShaderZip.Why.UNSAFE_NAME, five, tg, false);
+        check(!gt.exists(), "no refusal wrote a list");
+        File three = craft(new File(t, "three.zip"), lib, in, "format", "3");
+        refused("format 3", ShaderZip.Why.NOT_SHADER_ZIP, three, tg, true);
     }
 
     static InputStream stream(byte[] b) { return new ByteArrayInputStream(b); }

@@ -28,6 +28,9 @@ final class AppStorage {
     /** A game's save in app storage (the default save folder) */
     static File save(Context c, String titleId) { return new File(root(c), "saves/" + titleId); }
 
+    /** A game's temp folder, the host's DM_TEMP (GameActivity.start): its pipeline cache, prewarm list (vk_pipelines.keys) and learned view formats */
+    static File temp(Context c, String titleId) { return new File(root(c), "temp/" + titleId); }
+
     /** The folder that holds the packs (packs/&lt;title ID&gt;) */
     static File packs(Context c) { return new File(root(c), "packs"); }
 

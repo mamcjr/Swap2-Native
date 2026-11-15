@@ -105,6 +105,14 @@
 #define DMSH_VK_MOD_DUAL 3               // output 1 as Location 0 Index 1: for a pipeline blending target 0 with a SRC1 factor (dualSrcBlend); profile table dual_want.tsv
 #define DMSH_VK_MOD_SHUFFLE_LDS 4        // compute: its 32-bit subgroup shuffles through workgroup memory (vk_android_spv.py shuffle_lds), for a driver without an arbitrary-index
                                          // shuffle instruction (Turnip makes each one a loop); its workgroup memory, with the rows this adds, is at most DMSH_VK_SHARED_MAX bytes
+#define DMSH_VK_MOD_MESH_COMPUTE 5       // task/mesh emulation without VK_EXT_mesh_shader
+#define DMSH_VK_MOD_MESH_VERTEX 6        // mesh output pulled by a conventional vertex stage
+#define DMSH_VK_MOD_MAX 6
+#define DMSH_VK_MESH_OUT 384             // auxiliary storage-buffer bindings, outside all guest stage ranges
+#define DMSH_VK_MESH_PAYLOAD 385
+#define DMSH_VK_MESH_OFFSETS 386
+#define DMSH_VK_MESH_INFO 387
+#define DMSH_VK_MESH_SOURCE 388
 // How a module is stored: the SPIR-V words as they are, or one zstd frame of them (about a fifth of the size; the replay links zstd's decompressor)
 #define DMSH_VK_CODEC_RAW 0
 #define DMSH_VK_CODEC_ZSTD 1
@@ -132,6 +140,7 @@
 #define DMSH_VK_F_VIEWPORT_CULL 4096     // emulated geometry passthrough that drops a primitive whose NVN viewport mask is 0; the mask's other bits are not routed to viewports
 #define DMSH_VK_F_MESH_PRIM 8192         // pixel shader with PerPrimitiveEXT inputs (the per-primitive outputs of the mesh programs it is drawn with): valid only in a mesh pipeline
                                          // (needs the device's meshShader feature); a mesh entry with the flag writes per-primitive outputs
+#define DMSH_VK_F_MESH_FALLBACK 16384    // task/mesh compute variant; vin_mask is output block bytes, reserved is payload words | max primitives << 16 | points << 25
 
 // Vertex input / fragment output component types, 2 bits per location
 #define DMSH_VK_TYPE_FLOAT 0

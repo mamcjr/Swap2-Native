@@ -10,6 +10,9 @@
 
 #define VCAP_IFACE 101   // header key iface: what vcap_iface hashes (the Mac's cap_iface is 2)
 
+// Queue a one-shot capture of the next complete frame; applied under the NVN submit lock at present.
+int vka_capture_arm(const char *path);
+
 // One-off GPU work outside the submissions (texture contents in and out): a command buffer of its own, submitted on the queue and waited for
 VkCommandBuffer vcap_cb_begin(void);
 int vcap_cb_run(VkCommandBuffer cb);   // 1 = done
@@ -40,6 +43,7 @@ int vka_cap_sreg(int id, samp_par *p, int *n);
 int vka_cap_cpuw(uint64_t serial);
 vka_img *vka_cap_shared(const tex_t *t);
 int vka_pools(uint64_t *lo, uint64_t *size, int max);
+int vka_placed_ranges(uint64_t *lo, uint64_t *size, int max);
 uint64_t vka_frame(void);
 void nvn_prog_keys_set(const prog_t *p, const uint8_t key[6][8], uint8_t ok);
 void nvn_dpool_base_set(const void *pool, int tex_base, int samp_base);

@@ -1,5 +1,13 @@
 # Packing
 
+### An imported preparation remains interrupted at 100 percent
+
+- **Symptom:** the library card says interrupted at 100%, while its preparation screen says ready. Returning through Play can also use a different remembered job instead of the one displayed.
+- **Cause:** the card preferred the remembered service snapshot regardless of its timestamp, including an idle service's old running state after newer completion on disk. Rendering then overwrote the card's own fresh snapshot with the stale one. Preparation screens and their result callbacks also followed a mutable global remembered-job pointer rather than retaining the displayed job's identity.
+- **Fix:** `PrepareState.updated` carries the job timestamp; `GameState` chooses the newer disk snapshot over an idle stale service snapshot and retains that choice. An active worker still owns live progress. `Job.latestSnapshot` reconciles idle IPC messages against their own file. Each `PrepareActivity` pins its job file, ignores messages for another job, and returns that identity with Play/import; `Ondevice` opens and completes the exact selected job. No shader library, progress or save is deleted, and 100% alone is never treated as proof that a pack is playable.
+- **Checks:** `GameFlowJvmTest` covers newer imported completion versus idle snapshots and the active-worker case; the five `test_android_game_flow` tests pass. The pre-fix card/screen divergence was observed on the POCO. After Continue refreshed the job, Play started Pokopia and reached character selection (observed 60 FPS); that launch alone does not validate the new UI code. Repeat the card/Play flow after the corrective APK installation, including switching between different games' preparation screens.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md), import of the 131,410-entry library (10,262,324,307 bytes) for profile map 131,426. A library may omit manifest-declared unavailable entries; the percentage shown is not a literal count of successful library entries.
+
 ## Build tools
 
 ### Homebrew .NET is on PATH but apphosts cannot find the runtime
@@ -216,6 +224,13 @@
 - **Check:** Pokopia's split on the PC as the phone runs it (J=1, `DM_SPLIT_RESUME`): `shader_map.tsv`, `shader_facts.tsv` and `shader_pairs.tsv` identical to the profile's, peak anonymous memory 488 MB (8.5 GB before), 127 s.
 - **Found on:** [Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md).
 
+### The split refused on shared storage (HyperOS)
+
+- **Symptom:** the phone's split step finishes its scan, then fails with `java.nio.file.FileSystemException: …/ondevice/split.tmp -> …/ondevice/split: Operation not permitted` (EPERM), and every Retry fails the same way.
+- **Cause:** the job's folder is on shared storage (`Switch2/Work/<title ID>/ondevice`, `Switch2Layout.workDir`), and the split wrote into `split.tmp/` and renamed it to `split/`. On Android 11 and later a folder renamed under `/storage/emulated` goes through MediaProvider's FUSE handler (`renameForFuse`, `renameDirectoryUncheckedForFuse`), which moves the database row of every indexed file in it in one transaction and answers EPERM when one of them does not move exactly one row; a file's rename falls back for an app with all files access. Which row did not move is not known (open upstream).
+- **Fix:** no folder is renamed (ported from Banana Native v0.1.2's `Outputs.java`). The split writes into `split/` in place: `Outputs.begin` deletes the old folder (its `complete` marker first) and writes a `begun` file, the tool runs, and `Outputs.finish` syncs every output and then writes the `complete` marker (a file's rename, as `job.json`'s). The shaders step and `Job.resetChainSteps` take `split/` only when `Job.splitComplete` holds: the marker, or an older build's `split/` (renamed from `split.tmp/` only once whole and synced) that has neither marker file and every output (`pkg/` and the four tables), so prepared work is not split again after an update. A delete writes `begun` before anything else, so a folder half written or half deleted is never taken for an older build's. A leftover `split.tmp/` is deleted at the split's start. `android/app/src/jvmtest`'s `OutputsJvmTest` (`dm/tools/tests/test_android_outputs.py`) checks the order.
+- **Found on:** Banana Native issue #1 (a user's HyperOS device, upstream). Not seen yet on Swap2-Native's POCO F7 Ultra (HyperOS); applies to every game prepared on the phone.
+
 ### Shaders the game binds that no file of its holds
 
 - **Symptom:** `[RED] vk: shader <key> (program stage N) is not in the shader library` for keys the profile's `shader_map.tsv` does not have, and what draws with them is missing.
@@ -229,3 +244,41 @@
 - **Cause:** the profile's `build` rows are keyed by the version number of the dump they came from ([Mario Kart World](../../dm/games/0400C3F00006E000/README.md)'s 1.8.0 is version 0: a dump whose base was 1.8.0), and the launcher's checks looked the build up by number, so the same 1.8.0 modules as update 917504 over the 1.0 base did not match.
 - **Fix:** `DumpCheck` takes the newest version whose modules are one of the profile's builds, whatever its number, and `PackCheck` accepts a pack whose modules match any row.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) (1.0 base + update 917504).
+
+### The phone rewrote main after a profile change that is not the rewriter's
+
+- **Symptom:** after an APK update that only changed host keys of a profile (Zelda: Ocarina of Time's `ndsr_input`, `ndsr_default`, `scene_scale_palette`), Home showed the pack as "Pack from other tools" and Prepare rewrote the game's `main` again (minutes on the phone), though the rewritten code came out the same.
+- **Cause:** the code key, `<module>.android.key` (`pack_android.py` `rewrite_key`, the launcher's `PackCheck.code`), hashed the whole `game.tsv`. `patch_nso.py` reads only its `build` rows (the builds the game was brought up on, for a module whose build has no CUTS); every other key is the host's. The key also missed an input the rewriter does read: `patch_nso.py` loads every `dm/games/*/patches.py`, and a module build that several games ship (a shared sdk or movie module) may have its CUTS, OBS or FRAME_STEP in another game's file.
+- **Fix:** the key hashes the REWRITER files (and `exefs_patches.py` with mods), the module, the profile's `patches.py`, every other `dm/games/*/patches.py` that names the module's build ID, and `game.tsv`'s build rows (`build_rows`, hashed as `game.tsv build rows`: lines of printable ASCII whose first cell is `build`, cells stripped; a line with `build` and any other byte is kept whole, since `str.splitlines` and `str.strip` break at more characters). A key of the earlier formula (the whole `game.tsv`) still counts when no other `patches.py` names the build and the `game.tsv` it hashed is the APK's, or the pack's copy (`<pack>/game.tsv`) with the same build rows; `rewrite` keeps such a module and `--keep-code` (`upgrade_keys`) writes its key in the new formula before the copy is replaced, so packs made before the change are not rewritten once more. Python (`rewrite_keys`) and the launcher (`RewriteKey.java`) compute the same keys: `dm/tools/tests/test_android_rewritekey.py` runs both. Ported from Banana Native v0.1.4 (moceure/BananaNative `1a339a8`), without its `rewriter_equiv` folder, with the other profiles' `patches.py` added.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), whose profile changes often. Applies to every game.
+
+### DLC links in shared storage (Android)
+
+- **Symptom:** no game sees its DLC on Android: every run log says `[dm] aoc: reporting 0 add-on contents {} (/storage/emulated/0/Android/data/<app>/files/aoc/<title ID>)`, although the pack's `pack.tsv` has an `aoc` row and the dump has the DLC's `dlc/<DLC title ID>/<n>/romfs` folder (the same dump shows the DLC in another app).
+- **Cause:** `GameActivity` made `DM_AOC_DIR/<index>` (or `<index>.nup`) as symbolic links in `<external files>/aoc/<title ID>`. The external files folder is shared storage, served through FUSE, which refuses `symlink` (the errno is not yet confirmed on a phone: the `[RED] [nxlaunch] DLC: cannot link` line below names it; open). The launcher dropped the `ErrnoException`, so the folder stayed empty and `hle_misc.c` `aoc_load` listed nothing.
+- **Fix:** the links are made in internal app storage, `<files>/aoc/<title ID>` (`getFilesDir()`, `/data/user/0/<app>/files`), where symbolic links work; their targets stay where they are (the dump on shared storage, which the game's process already reads for its RomFS; `fd:<n>/<name>` for a `.nup` used where it is, which `aoc_dir` reads with `readlink`). The old external folder is removed. `Pack.makeAocLinks` makes them and returns a line for each link it cannot make; the run log has `[nxlaunch] DLC: <n> links in DM_AOC_DIR <dir> [<names>]` and a `[RED] [nxlaunch] DLC: cannot link …: <errno>` line for each failure. Test: `NupJvmTest` `aocLinkDir` (`test_nup.py`).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): every one of 377 phone logs reported 0 add-on contents, and a player's report (Lenovo Legion Y700 Gen 5, Android 16, v0.2.0). Applies to every game.
+
+## Launcher metadata
+
+### Prepare stays paused as "too hot" on a phone that is cool
+
+- **Symptom:** Prepare shows `Paused: the phone is too hot. it goes on when it has cooled. Checking the dump.` at 1 % and never goes on, although the device reads about 45 °C; no step log is written, since the job waits before its first step.
+- **Cause:** `PackService` pauses the job while the thermal status (`PowerManager.getCurrentThermalStatus`) is `SEVERE` or worse and goes on at `MODERATE` or better, as documented (ONDEVICE.md). The rule held; what is open is the handheld's thermal HAL, which by all signs reported `SEVERE` (or a status stuck there) while the device was cool (its `dumpsys thermalservice` was asked for). The pause gave neither the status nor the headroom it decided on, and offered no way past it.
+- **Fix:** the decision is `PackPolicy` (pure Java, `PackPolicyJvmTest`). Every pause and every going on is a line in the step's log and logcat (`[pack] <time> pausing: thermal: thermal status severe (…); thermal status 3 (severe), headroom 0.62, battery 80 %`), and the card and the notification show the readings. A heat pause below `CRITICAL` offers **Go on anyway** (the card's button, the notification's action, `PackService.ACTION_GO_ON`, adb `--ez ondevice_go_on true`), which lifts the heat pause until the job stops in that service; `CRITICAL` or worse still pauses. The battery pause has no override. Tests: `dm/tools/tests/test_android_packpolicy.py`.
+- **Found on:** [Pokémon Pokopia](../../dm/games/0400A3A01EE4C000/README.md#found-on-this-game) on an Ayaneo Pocket DS (Snapdragon G3x Gen 2, Android 13; GitHub issue #38). The cause on that device is open (the HAL's readings); the pause rule applies to every game.
+
+### Shared preparation retains another app variant's private pack path
+
+- **Symptom:** all shaders finish, but packing raises PermissionError creating Android/data/com.swap2native.test from the public app.
+- **Cause:** shared job.json retained its adopted output from another application variant; Android does not transfer private-directory write permission.
+- **Fix:** at resume, re-home only another Swap2 variant's exact private pack destination for the same title ID. Preserve completed shared shader results; clear foreign adoption and make code rewriting/final packing pending, since module outputs belonged to the old package too. On resume, also repair a completed rewrite marker when registered-build module outputs/keys are missing from the current destination. Keep current/shared/unrelated paths unchanged. A foreign shader-cache path requires a completed shared library before redirecting; otherwise report an actionable error. Never delete the other variant's files.
+- **Check:** PackDestinationJvmTest covers foreign/current/shared/unrelated paths, wrong title and traversal. Verify actual resume/output on Android.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), 22,850/22,850 shaders ready on 2026-11-09, then final pack failed at the old test destination.
+### Exported Android launcher accepts diagnostic control intents
+
+- **Symptom:** the public launcher's exported MainActivity accepts extras that install/select a GPU driver, prepare/pause a game or import/export a pack, without a diagnostic-control opt-in.
+- **Cause:** `MainActivity.fromIntent` dispatches test extras through Ondevice/GpuDriver/PackUi before restricting their use. An exported activity can be invoked by another installed app, not only adb. The matching AnkaNative entry point was corrected in 0.2.2.
+- **Fix:** 0.1.4-beta gates diagnostic extras behind a deliberate default-off setting in public builds, covering launch and onNewIntent, while preserving frontend requests. Never trust caller-supplied referrer/package extras as authorization.
+- **Check:** JVM tests cover all diagnostic extras, opt-in, frontend separation and mixed requests. [Release/device validation](../BUILD-0.1.4-beta-NATIVE-2026-11-09.md) records the on-device checks separately.
+- **Found on:** Swap2-Native's shared launcher, during the [AnkaNative/Lichii comparison](../ANALISE-LICHII130-ANKANATIVE022-2026-11-09.md).

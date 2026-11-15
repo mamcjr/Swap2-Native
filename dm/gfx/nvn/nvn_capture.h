@@ -23,6 +23,7 @@ enum {
     CAP_STAT = CAP_TAG('S', 'T', 'A', 'T'),   // text: replay-layer state set outside records (texture pool size, origin, depth mode)
     CAP_REGN = CAP_TAG('R', 'E', 'G', 'N'),   // one memory region: cap_regn + its bytes
     CAP_PADD = CAP_TAG('P', 'A', 'D', 'D'),   // the replay layer's pool list (mtl_pool_add calls): cap_padd[]
+    CAP_PLAC = CAP_TAG('P', 'L', 'A', 'C'),   // Android GPU-addressable ranges at this submit: cap_padd[] (not all CPU-visible pools)
     CAP_PDIF = CAP_TAG('P', 'D', 'I', 'F'),   // region bytes that changed before submit k: {u32 region, u32 0, u64 off, u64 len, bytes}...
     CAP_POBJ = CAP_TAG('P', 'O', 'B', 'J'),   // pool_t objects: cap_pobj[]
     CAP_TOBJ = CAP_TAG('T', 'O', 'B', 'J'),   // tex_t objects referenced by records: {u32 index, u32 0, tex_t (relocated)}...

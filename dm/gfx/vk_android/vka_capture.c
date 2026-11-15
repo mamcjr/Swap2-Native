@@ -83,7 +83,7 @@ static int plane_block(const vka_img *im, int pl, uint32_t *bw, uint32_t *bh, Vk
     case 3: *asp = VK_IMAGE_ASPECT_DEPTH_BIT; return pl ? 0 : im->f.vk == VK_FORMAT_D16_UNORM ? 2 : 4;
     case 4: *asp = VK_IMAGE_ASPECT_STENCIL_BIT; return pl ? 0 : 1;
     case 5: *asp = pl ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT; return pl ? 1 : 4;   // the depth aspect of D24S8 and D32S8 copies as 4 bytes a texel
-    default: *asp = VK_IMAGE_ASPECT_COLOR_BIT; if (pl) return 0; *bw = im->f.bw ? im->f.bw : 1; *bh = im->f.bh ? im->f.bh : 1; return im->f.bpb;
+    default: *asp = VK_IMAGE_ASPECT_COLOR_BIT; if (pl) return 0; if (im->f.dec) { *bw = *bh = 1; return im->f.tb; }   /* BC decoded on the CPU: the image holds texels */ *bw = im->f.bw ? im->f.bw : 1; *bh = im->f.bh ? im->f.bh : 1; return im->f.bpb;
     }
 }
 uint32_t vcap_subs(const vka_img *im, cap_tsub **subs, uint64_t *total) {
@@ -285,6 +285,30 @@ static cap_buf g_cap_tobj, g_cap_pobj, g_cap_progb, g_cap_dpolb, g_cap_kind;
 typedef struct { uint8_t ok, has_v, img; tex_t t; view_t v; } treg_seen;
 static treg_seen *g_cap_treg0; static int g_cap_ntreg0; static samp_par *g_cap_sreg0; static uint8_t *g_cap_sreg0_ok; static int g_cap_nsreg0;
 static char g_cap_where[96]; static const uint8_t *g_cap_where_base, *g_cap_orig;
+static pthread_mutex_t g_cap_req_mu = PTHREAD_MUTEX_INITIALIZER;
+static char g_cap_req_path[1024];
+int vka_capture_arm(const char *path) {
+    if (!path || path[0] != '/' || strlen(path) >= sizeof g_cap_req_path) return 0;
+    pthread_mutex_lock(&g_cap_req_mu);
+    int ok = !g_cap_req_path[0];
+    if (ok) snprintf(g_cap_req_path, sizeof g_cap_req_path, "%s", path);
+    pthread_mutex_unlock(&g_cap_req_mu);
+    return ok;
+}
+static void cap_live_apply(void) {
+    char path[1024];
+    pthread_mutex_lock(&g_cap_req_mu);
+    snprintf(path, sizeof path, "%s", g_cap_req_path); g_cap_req_path[0] = 0;
+    pthread_mutex_unlock(&g_cap_req_mu);
+    if (!path[0]) return;
+    // Capture tables own their snapshots until process exit; do not rearm a used or scheduled writer.
+    if (g_cap_active || g_cap_done || g_cap_frame > 0 || g_cap_at_s > 0 || g_cap_rt_min > 0) {
+        CRED("live capture refused: a capture is scheduled or already used; restart before another capture"); return;
+    }
+    snprintf(g_cap_path, sizeof g_cap_path, "%s", path);
+    g_cap_frame = 2; g_cap_presents = 0;
+    CLOG("live capture armed for the next complete frame into %s", g_cap_path);
+}
 #define CAP_WHERE(base, ...) (snprintf(g_cap_where, sizeof g_cap_where, __VA_ARGS__), g_cap_where_base = (const uint8_t *)(base))
 
 static int nvn_cap_enabled(void) {
@@ -586,6 +610,25 @@ static void cap_pools(uint32_t submit) {
     cap_buf bb = {0};
     for (int i = 0; i < n; i++) { cap_padd a = {ps[i].lo, ps[i].hi - ps[i].lo}; cap_enc_addr(NULL, &a.mem, 0, 0); cap_buf_put(&bb, &a, sizeof a); }
     cap_put(&g_cap_w, CAP_PADD, submit, bb.p, bb.n, 0); cap_buf_free(&bb); free(ps);
+    // Preserve the live address map without eagerly committing unrelated texture
+    // pools. Intersect alignment-rounded segments with captured pool storage, so
+    // no padding outside captured memory is read or serialized.
+    int capacity = vka_placed_ranges(NULL, NULL, 0) + 64;
+    lo = malloc((size_t)capacity * sizeof *lo); sz = malloc((size_t)capacity * sizeof *sz);
+    if (!lo || !sz) { free(lo); free(sz); cap_fail("no memory for GPU placement snapshot"); return; }
+    n = vka_placed_ranges(lo, sz, capacity);
+    if (n > capacity) { free(lo); free(sz); cap_fail("GPU placement grew during its snapshot"); return; }
+    cap_buf placed = {0};
+    for (int i = 0; i < n; i++) for (uint32_t r = 0; r < g_cap_nreg; r++) {
+        const cap_region *region = &g_cap_reg[r]; if (region->kind) continue;
+        uint64_t a = MAX(lo[i], region->lo), b = MIN(lo[i] + sz[i], region->lo + region->size);
+        if (a < b) {
+            cap_padd range = {cap_addr(g_cap_rid[r], a - region->lo), b - a};
+            cap_buf_put(&placed, &range, sizeof range);
+        }
+    }
+    cap_put(&g_cap_w, CAP_PLAC, submit, placed.p, placed.n, 0);
+    cap_buf_free(&placed); free(lo); free(sz);
 }
 // A region's bytes go straight from guest memory to the file, after their hashes are taken: a write after the hash shows as a change at the next submit (no copy of up to
 // a whole pool in memory, which a phone running the game cannot spare)
@@ -678,6 +721,7 @@ void nvn_cap_submit(int n, const uint64_t *h) {
 
 // Hook: nvnQueuePresentTexture, before the present is queued
 void nvn_cap_present(const tex_t *t, const int crop[4]) {
+    cap_live_apply();
     if (!nvn_cap_enabled()) return;
     g_cap_presents++;
     if (!g_cap_frame) {   // @seconds: the next frame is the one (passes>=n: chosen by a submission, nvn_cap_submit)

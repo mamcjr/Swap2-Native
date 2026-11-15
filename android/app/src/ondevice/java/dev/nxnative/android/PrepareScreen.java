@@ -212,8 +212,11 @@ final class PrepareScreen {
         boolean wide = w >= 600 || w > h, compact = h < 480, tiny = h < 320;
         FrameLayout.LayoutParams pp = (FrameLayout.LayoutParams)page.getLayoutParams();
         pp.width = Math.min(width, Ui.dp(a, 1100)); pp.height = height;
-        pp.leftMargin = safeInsets.left; pp.topMargin = safeInsets.top;
-        pp.rightMargin = safeInsets.right; pp.bottomMargin = safeInsets.bottom;
+        // FrameLayout.CENTER adds leftMargin-rightMargin after centering. With a landscape cutout on one side,
+        // that moves the already inset-sized page outside the opposite edge. Position once inside the safe rectangle.
+        pp.gravity = Gravity.TOP | Gravity.LEFT;
+        pp.leftMargin = safeInsets.left + (width - pp.width) / 2; pp.topMargin = safeInsets.top;
+        pp.rightMargin = 0; pp.bottomMargin = 0;
         page.setLayoutParams(pp);
         int gutter = Ui.dp(a, compact ? 12 : 20), vertical = Ui.dp(a, compact ? 8 : 16);
         page.setPadding(gutter, vertical, gutter, vertical);

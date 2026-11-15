@@ -45,7 +45,7 @@ class ShaderZipJvm(unittest.TestCase):
         d = cls.d = Path(cls.tmp.name)
         (d / 'stub').mkdir()
         (d / 'stub/BuildConfig.java').write_text(STUB)
-        srcs = [SRC / f'{n}.java' for n in ('ShaderZip', 'PackZip', 'Pack', 'Nup', 'Zstd', 'Profile', 'ShaderLibs', 'SaveStore', 'SaveZip')]
+        srcs = [SRC / f'{n}.java' for n in ('ShaderZip', 'PackZip', 'Pack', 'Nup', 'Zstd', 'Profile', 'ShaderLibs', 'SaveStore', 'SaveZip', 'DumpLayout')]
         r = subprocess.run(['javac', '-encoding', 'UTF-8', '-Xlint:all,-try', '-Werror', '-d', str(d / 'classes'), *map(str, srcs), str(TEST), str(d / 'stub/BuildConfig.java')],
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr
@@ -86,6 +86,25 @@ class ShaderZipJvm(unittest.TestCase):
         r = subprocess.run([sys.executable, str(SCRIPT), str(lib_dir), '--out', str(out), '--pack', str(pack)], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(len(list(out.glob('*.zip'))), 1)
+        # with a phone's prewarm list (--prewarm): format 2, prewarm.keys last; the JVM import puts it in the game's temp folder beside its own list
+        keys = b'NXVKPW2\0' + struct.pack('<IIII', 512, 4, 0x12345678, 0) + bytes(range(256)) * 2
+        (self.d / 'mac/vk_pipelines.keys').write_bytes(keys)
+        out2 = self.d / 'mac/out2'
+        r = subprocess.run([sys.executable, str(SCRIPT), str(lib_dir), '--out', str(out2), '--pack', str(pack), '--prewarm', str(self.d / 'mac/vk_pipelines.keys')],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        z2 = next(out2.glob('*.zip'))
+        import zipfile
+        with zipfile.ZipFile(z2) as zf:
+            self.assertEqual([i.filename for i in zf.infolist()], ['manifest.tsv', 'inputs.tsv', 'dmsh_vk.lib', 'prewarm.keys'])
+            self.assertIn(b'format\t2\n', zf.read('manifest.tsv'))
+        r = self.java('import', str(z2), str(self.d / 'phone2'), str(self.d / 'phone2-temp'))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.split(), ['imported', CUR, '3', 'true', '4'])
+        self.assertEqual((self.d / 'phone2-temp/vk_pipelines.import.keys').read_bytes(), keys)
+        (self.d / 'mac/text.keys').write_bytes(b'not a prewarm list, only some text')
+        r = subprocess.run([sys.executable, str(SCRIPT), str(lib_dir), '--out', str(out2), '--prewarm', str(self.d / 'mac/text.keys')], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
         # a library that is not one fails
         bad = self.d / 'mac/bad/v-x'
         bad.mkdir(parents=True)

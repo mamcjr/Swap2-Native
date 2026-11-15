@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 
 /** The launcher's own settings (the on-screen controls keep theirs in TouchControls): the overlay over the game, frame generation. */
 final class Prefs {
+    static boolean adbControl(Context c) { return !BuildConfig.NX_PLAY || of(c).getBoolean("adb_control", false); }
+    static void adbControl(Context c, boolean on) { of(c).edit().putBoolean("adb_control", on).commit(); }
     private Prefs() {}
 
     /**
@@ -25,11 +27,11 @@ final class Prefs {
     static boolean overlayItem(Context c, String key) { return of(c).getBoolean("overlay_" + key, !"tag".equals(key)); }   // the build name is off unless asked for (2026-11-08)
     static void overlayItem(Context c, String key, boolean on) { of(c).edit().putBoolean("overlay_" + key, on).commit(); }
 
-    /** The game's window size (Game resolution): DM_WINDOW_SIZE for the host (loader.c window_apply), "1920x1080" (Phone 1080p, the default), "original" (the game's own, 2880x1620 in Donkey Kong Bananza) or "1280x720" (Phone 720p: less GPU time a frame). DM_WINDOW_SIZE in env.txt overrides it for a run.
+    /** The game's window size (Game resolution): DM_WINDOW_SIZE for the host (loader.c window_apply), 1080p (default), original, 720p or 540p. DM_WINDOW_SIZE in env.txt overrides it for a run.
      *  A game whose profile has graphics_scale rows gets the graphics scale and operation mode that give the size instead (Profile.resolutionEnv).
      *  The stored value is the size itself; new sizes go at the end so the list's first entries keep their places. */
-    static final String[] WINDOWS = {"1920x1080", "original", "1280x720"}, WINDOW_NAMES = {"Phone 1080p (1920x1080)", "Original (the game's own size)", "Phone 720p (1280x720)"},
-            WINDOW_SHORT = {"1080p", "Original", "720p"};
+    static final String[] WINDOWS = {"1920x1080", "original", "1280x720", "960x540"}, WINDOW_NAMES = {"Phone 1080p (1920x1080)", "Original (the game's own size)", "Phone 720p (1280x720)", "Phone 540p (960x540)"},
+            WINDOW_SHORT = {"1080p", "Original", "720p", "540p"};
     /** A window size's name in the lists, its short name for a settings row (short); the value itself when it is none of WINDOWS (an env.txt-style size) */
     static String windowName(String v, boolean shortName) {
         int i = java.util.Arrays.asList(WINDOWS).indexOf(v);
@@ -43,7 +45,12 @@ final class Prefs {
     static String gameKey(String key, String titleId) { return key + "@" + titleId; }
 
     /** The game's window size: its own choice, else the default (window(c)) */
-    static String gameWindow(Context c, String titleId) { return of(c).getString(gameKey("window", titleId), window(c)); }
+    static String gameWindow(Context c, String titleId) { return supportedWindow(titleId, of(c).getString(gameKey("window", titleId), window(c))); }
+    static String defaultWindow(Context c, String titleId) { return supportedWindow(titleId, window(c)); }
+    private static String supportedWindow(String titleId, String requested) {
+        Profile p = Profile.of(titleId);
+        return p == null ? requested : p.windowChoice(requested);
+    }
     /** null: back to the default */
     static void gameWindow(Context c, String titleId, String v) { put(c, gameKey("window", titleId), v); }
     static boolean ownWindow(Context c, String titleId) { return of(c).contains(gameKey("window", titleId)); }
@@ -107,6 +114,28 @@ final class Prefs {
     static void scene720(Context c, String titleId, boolean on) {
         if (on) of(c).edit().putBoolean(gameKey("scene_720p", titleId), true).commit();
         else of(c).edit().remove(gameKey("scene_720p", titleId)).commit();
+    }
+
+    /**
+     * The scale of the game's Scene resolution choice (one of its profile's presets, Profile.scenePresets), null for the game's own palette. A choice made before
+     * the presets (scene_720p on) is the profile's first preset; a scale the profile no longer offers falls back to the game's own
+     */
+    static String sceneScale(Context c, String titleId, Profile p) {
+        if (p == null || !p.hasScene()) return null;
+        java.util.Map<String, String> pre = p.scenePresets();
+        String v = of(c).getString(gameKey("scene_scale", titleId), null);
+        if (v != null) return pre.containsValue(v) ? v : null;
+        return scene720(c, titleId) && !pre.isEmpty() ? pre.values().iterator().next() : null;
+    }
+    static void sceneScale(Context c, String titleId, String scale) {
+        SharedPreferences.Editor e = of(c).edit().remove(gameKey("scene_720p", titleId));
+        if (scale == null) e.remove(gameKey("scene_scale", titleId)); else e.putString(gameKey("scene_scale", titleId), scale);
+        e.commit();
+    }
+    /** The label of a preset's scale (Profile.scenePresets), the scale itself when the profile has no label for it */
+    static String sceneLabel(Profile p, String scale) {
+        for (java.util.Map.Entry<String, String> e : p.scenePresets().entrySet()) if (e.getValue().equals(scale)) return e.getKey();
+        return scale;
     }
 
     /** Pause on return (per game, on by default): the game's screen coming back from the background shows it paused, suspended until a tap (GameActivity.onStart) */

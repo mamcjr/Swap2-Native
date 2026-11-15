@@ -1,0 +1,31 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+layout(local_size_x=32) in;
+layout(triangles,max_vertices=256,max_primitives=256) out;
+out gl_MeshPerVertexEXT { vec4 gl_Position; } gl_MeshVerticesEXT[];
+struct Payload { uint words[64]; };
+taskPayloadSharedEXT Payload payload;
+layout(location=0) perprimitiveEXT out vec4 tint[];
+// Real translated programs call helper functions that read invocation globals.
+uint taskTag() { return payload.words[4]%3u; }
+uint meshIndex() { return gl_WorkGroupID.x; }
+void main() {
+    // Match the translator's native wrapper: fixed maximum output, unused triangles degenerate.
+    SetMeshOutputsEXT(256,256);
+    for(uint i=gl_LocalInvocationIndex;i<256u;i+=32u) {
+        gl_PrimitiveTriangleIndicesEXT[i]=uvec3(0);
+        tint[i]=vec4(0);
+    }
+    barrier();
+    if(gl_LocalInvocationIndex==0u) {
+        uint t=taskTag();
+        float x=(float(t)-1.0)*0.6;
+        gl_MeshVerticesEXT[0].gl_Position=vec4(x-0.2,-0.2,0,1);
+        gl_MeshVerticesEXT[1].gl_Position=vec4(x+0.2,-0.2,0,1);
+        gl_MeshVerticesEXT[2].gl_Position=vec4(x,0.2,0,1);
+        gl_MeshVerticesEXT[3].gl_Position=vec4(float(payload.words[4]),float(gl_WorkGroupID.x),float(gl_NumWorkGroups.x),1234);
+        gl_PrimitiveTriangleIndicesEXT[0]=uvec3(0,1,2);
+        uint m=meshIndex();
+        tint[0]=m>1u || (t==1u && m!=0u) ? vec4(1,0,0,1) : t==1u ? vec4(0,1,0,1) : vec4(0,0,1,1);
+    }
+}

@@ -29,8 +29,13 @@ int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *cha
     if (h->version != DMSH_VK_LIB_VERSION) return fail(err, errn, "library format %u, this host reads %u", h->version, DMSH_VK_LIB_VERSION);
     // Another version is taken only by the ABI the header records (12 characters, no NUL; zero in a library made before the field): what this host reads of it is the same
     int by_abi = 0;
+    // This audited extension only adds module variants 5/6, auxiliary bindings and
+    // a new opt-in flag. Existing structs, offsets, variants 0..4 and flag meanings
+    // are identical. Read old libraries during their delta update; never relabel
+    // the new shader chain as the old one or accept arbitrary ABI mismatches.
+    int mesh_base_abi = abi && !strcmp(abi, "623c0a2f1e8a") && !memcmp(h->abi, "674db0a4ff79", 12);
     if ((chain && !str_is(h->chain, chain)) || (vk_chain && !str_is(h->vk_chain, vk_chain))) {
-        by_abi = abi && strlen(abi) == sizeof h->abi && !memcmp(h->abi, abi, sizeof h->abi);
+        by_abi = mesh_base_abi || (abi && strlen(abi) == sizeof h->abi && !memcmp(h->abi, abi, sizeof h->abi));
         char a[13]; memcpy(a, h->abi, 12); a[12] = 0; for (int i = 0; i < 12; i++) if (a[i] < 32 || a[i] > 126) { a[0] = 0; break; }
         if (!by_abi && chain && !str_is(h->chain, chain)) { vka_shlib_str(h->chain, s); return fail(err, errn, "translator chain %s, this host has %s (library ABI %s, this host's %s)", s, chain, *a ? a : "none", abi ? abi : "not asked"); }
         if (!by_abi) { vka_shlib_str(h->vk_chain, s); return fail(err, errn, "Vulkan chain %s, this host has %s (library ABI %s, this host's %s)", s, vk_chain, *a ? a : "none", abi ? abi : "not asked"); }
@@ -46,6 +51,7 @@ int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *cha
     L->ent = (const dmsh_vk_entry *)(b + h->entry_off); L->bind = (const dmsh_vk_bind *)(b + h->bind_off); L->mod = (const dmsh_vk_module *)(b + h->mod_off); L->blob = b + h->blob_off;
     for (uint32_t i = 0; i < h->entry_count; i++) {
         const dmsh_vk_entry *e = &L->ent[i];
+        if (mesh_base_abi && (e->flags & DMSH_VK_F_MESH_FALLBACK)) return fail(err, errn, "legacy ABI claims mesh fallback metadata");
         if (i && e->key <= L->ent[i - 1].key) return fail(err, errn, "entry %u (key %016llx) out of order", i, (unsigned long long)e->key);
         if ((uint64_t)e->bind + e->bind_count > h->bind_count) return fail(err, errn, "entry %016llx: bindings past the table", (unsigned long long)e->key);
         if ((uint64_t)e->mod + e->mod_count > h->mod_count || !e->mod_count) return fail(err, errn, "entry %016llx: modules past the table", (unsigned long long)e->key);
@@ -54,6 +60,7 @@ int vka_shlib_check(vka_shlib *L, const void *base, size_t size, const char *cha
     }
     for (uint32_t i = 0; i < h->mod_count; i++) {
         const dmsh_vk_module *m = &L->mod[i];
+        if (mesh_base_abi && m->variant > DMSH_VK_MOD_SHUFFLE_LDS) return fail(err, errn, "legacy ABI claims a new module variant");
         if (vka_shlib_mod_off(m) + m->stored > h->blob_size) return fail(err, errn, "module %u past the blob", i);
         if (m->codec != DMSH_VK_CODEC_RAW && m->codec != DMSH_VK_CODEC_ZSTD) return fail(err, errn, "module %u: codec %u", i, m->codec);
         if (m->size & 3 || m->size < 20 || (m->codec == DMSH_VK_CODEC_RAW && m->stored != m->size)) return fail(err, errn, "module %u: %u bytes of SPIR-V, %u stored", i, m->size, m->stored);

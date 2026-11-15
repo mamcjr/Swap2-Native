@@ -912,3 +912,11 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** `SetGraphicsTargetFrameRate` maps up to 59 fps to mode 1, up to 119 to mode 2 and above to mode 3 (`SetGraphicsTargetFrameRateAuto` to mode 0) and calls `SetGraphicsFrameLengthMode`, which locks the gs graphics server's context and sends it the mode. The host has no graphics server, so the context is null.
 - **Fix:** `SetGraphicsFrameLengthMode` is hooked and logs the mode once per change; both `oe` paths reach it. The host paces by the window's present interval (`hle_oe.c`).
 - **Found on:** Hyrule Warriors: Age of Imprisonment (upstream nxnative, d70ee900; its profile is not on this branch): 60 / its present interval at boot.
+
+### No stand-in shared font on Android
+
+- **Symptom:** (Android) `[RED] cannot open the standard shared font` at boot, then a crash in the game's font code (Splatoon Raiders: `CRASH sig=11 addr=0x66637300000100 pc=main+0x8109d8`).
+- **Cause:** the standard shared font falls back to the system's own font when neither `DM_SHARED_FONT` nor `DM_FONT_DIR/standard.ttf` is set, and that fallback was macOS's Arial Unicode only. On the phone nothing opened, so SDK 21's `GetBuiltInFontData` filled no record, and the game, which on the console always has its fonts, used the record anyway.
+- **Fix:** `hle_sdk16.c` `SYSTEM_FONT`: Android's `/system/fonts/Roboto-Regular.ttf`, which every Android has (Latin, Greek, Cyrillic). The CJK fonts there are `.ttc` collections, not one TTF, so Chinese and Korean system text has no glyphs yet (open). The Nintendo extension font (`nintendo_ext.ttf`, button icons) is still missing on the phone, so those icons draw as `?` (open).
+- **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md) on the phone (Turnip): boots past the font with it, as with `DM_SHARED_FONT=/system/fonts/Roboto-Regular.ttf`.
+- **Check:** `make -C dm/host/tests GAME=<id> build/t_shared_font && dm/host/tests/build/t_shared_font`.

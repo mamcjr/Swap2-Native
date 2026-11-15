@@ -130,6 +130,17 @@ class Read(Fixture):
             with self.assertRaisesRegex(nup.Error, 'not a package selector'): n.select(bad)
         self.assertEqual(nup.split(f'/a/b.nup:c/x.nup:update/{VER}/romfs'), ('/a/b.nup:c/x.nup', f'update/{VER}/romfs'))   # at the last '.nup:'
         self.assertIsNone(nup.split('/a/b/romfs'))
+        # the extension in any case (a file copied as a PC named it), as the host's nup_image.h and the launcher's Nup.java split it
+        self.assertEqual(nup.split(f'/a/B.NUP:update/{VER}/romfs'), ('/a/B.NUP', f'update/{VER}/romfs'))
+        self.assertEqual(nup.split('/a/b.NUP:c/x.Nup:base'), ('/a/b.NUP:c/x.Nup', 'base'))
+        self.assertIsNone(nup.split('/a/b.nuptial:base'))
+        self.assertTrue(nup.has_ext('G.NUP') and nup.has_ext('g.nup') and not nup.has_ext('.nup') and not nup.has_ext('g.nup.part'))
+        upper = self.nup.with_name(self.nup.stem + '.NUP')
+        shutil.copyfile(self.nup, upper)
+        try:
+            self.assertEqual(nup.default_romfs(upper), f'{upper}:update/{VER}/romfs')
+            self.assertTrue(romfs.Path(f'{upper}:update/{VER}/exefs/main').is_file())
+        finally: upper.unlink()
         self.assertEqual(nup.default_romfs(self.nup), f'{self.nup}:update/{VER}/romfs')
         self.assertEqual(nup.default_romfs(f'{self.nup}:base'), f'{self.nup}:base/romfs')
         self.assertEqual(nup.default_romfs(f'{self.nup}:base/romfs'), f'{self.nup}:base/romfs')
@@ -270,6 +281,69 @@ class Tools(Fixture):
             self.assertEqual((packs['nup'] / f'{m}.android.key').read_text(), (packs['folder'] / f'{m}.android.key').read_text())   # the same input bytes
 
 
+class Descriptor(Fixture):
+    """A .nup read through a descriptor (DM_NUP_FD=<fd>:<path>, the phone's packer for a .nup picked with the file picker): the tools name it by a stand-in path where
+    nothing is, and read the same bytes as from the file's own path"""
+    def setUp(self):
+        self.stand = self.root / 'picked' / '0123456789abcdef' / 'Game.nup'
+        self.stand.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(self.nup, os.O_RDONLY)
+        self.addCleanup(os.close, self.fd)
+        env = mock.patch.dict(os.environ, {'DM_NUP_FD': f'{self.fd}:{self.stand}'})
+        env.start(); self.addCleanup(env.stop)
+
+    def test_reads_through_the_descriptor(self):
+        self.assertFalse(self.stand.exists())
+        self.assertTrue(nup.is_nup(self.stand))
+        n = nup.open_nup(self.stand)
+        self.assertEqual(n.path, str(self.stand))
+        self.assertEqual([p.selector for p in n.packages], [p.selector for p in nup.open_nup(self.nup).packages])
+        for sel in ('base/romfs', f'update/{VER}/romfs', f'update/{VER}/exefs', f'addon/{DLC:016x}/romfs'):
+            self.assertEqual(self.tree(romfs.Path(f'{self.stand}:{sel}')), self.tree(romfs.Path(f'{self.nup}:{sel}')), sel)
+        with romfs.open(f'{self.stand}:base/romfs/random.bin', 'rb') as f, romfs.mmap.mmap(f.fileno(), 0, access=romfs.mmap.ACCESS_READ) as m:
+            self.assertEqual(m[:], (self.dump / 'base/romfs/random.bin').read_bytes())
+        self.assertEqual(nup.default_romfs(str(self.stand)), f'{self.stand}:update/{VER}/romfs')
+        self.assertEqual(os.lseek(self.fd, 0, os.SEEK_CUR), 0)   # every read is a pread of a duplicate: the descriptor's own position never moves
+        self.assertEqual(os.fstat(self.fd).st_size, os.stat(self.nup).st_size)   # and it stays open
+
+    def test_tools(self):
+        app, vers, dlc = pack_dump.scan(self.stand)
+        self.assertEqual((app, {v: str(p) for v, p in vers.items()}, {t: str(p) for t, p in dlc.items()}),
+                         (TID, {VER: f'{self.stand}:update/{VER}'}, {DLC: f'{self.stand}:addon/{DLC:016x}/romfs'}))
+        self.assertEqual(romfs.Path(f'{self.stand}:update/{VER}/exefs/main').read_bytes(), (self.dump / f'updates/{VER}/exefs/main').read_bytes())
+
+    def test_only_the_named_path(self):
+        other = self.root / 'picked' / 'fedcba9876543210' / 'Game.nup'
+        with self.assertRaises(FileNotFoundError): nup.open_nup(other)
+        self.assertFalse(nup.is_nup(other))
+        self.assertIsNone(nup.resolve(f'{other}:base/romfs'))
+        with mock.patch.dict(os.environ, {'DM_NUP_FD': ''}):
+            self.assertFalse(nup.is_nup(self.stand))
+            self.assertIsNone(nup.fd_of(self.stand))
+        with mock.patch.dict(os.environ, {'DM_NUP_FD': f'x:{self.stand}'}): self.assertIsNone(nup.fd_of(self.stand))
+        self.assertEqual(nup.fd_of(self.root / 'picked' / '0123456789abcdef' / '.' / 'Game.nup'), self.fd)   # the same path, spelled otherwise
+
+    def test_pack_android_same_pack(self):   # the phone's rewrite and pack steps from the stand-in path: the pack of the file itself
+        try: import capstone, lz4.block   # noqa: F401
+        except ImportError: self.skipTest('no capstone / lz4 (android/environment.yml)')
+        import pack_android
+        def fake_rewrite(py, srcs, out, jobs, g, in_process=False, mods=None):
+            for m, src in srcs.items():
+                (out / f'{m}.patched.bin').write_bytes(bytes(nso.read(str(pack_android.rewriter_src(src, out, m))).image)); (out / f'{m}.android.key').write_text(pack_android.rewrite_key(src, g) + '\n')
+        packs = {}
+        for tag, src in (('file', self.nup), ('fd', self.stand)):
+            out = self.root / f'pack-{tag}'; self.addCleanup(shutil.rmtree, out, True)
+            argv = ['pack_android.py', str(src), '--out', str(out), '--no-shaders', '--in-process']
+            with mock.patch.object(sys, 'argv', argv), mock.patch.object(pack_android, 'rewrite', fake_rewrite), mock.patch('sys.stdout', io.StringIO()):
+                pack_android.main()
+            packs[tag] = out
+        rows = {t: [r for r in (p / 'pack.tsv').read_text().splitlines() if not r.startswith('packer\t')] for t, p in packs.items()}
+        self.assertEqual(rows['fd'], rows['file'])
+        for m in ('main', 'sdk'):
+            self.assertEqual((packs['fd'] / f'{m}.patched.bin').read_bytes(), (packs['file'] / f'{m}.patched.bin').read_bytes())
+            self.assertEqual((packs['fd'] / f'{m}.android.key').read_text(), (packs['file'] / f'{m}.android.key').read_text())
+
+
 @unittest.skipUnless(shutil.which('javac') and shutil.which('java'), 'no JDK')
 class Launcher(unittest.TestCase):
     """The launcher's side on the JVM: android/app/src/jvmtest NupJvmTest (its header) with Nup, Zstd, Pack, Profile and ShaderLibs and a stub BuildConfig: the reader,
@@ -279,6 +353,7 @@ public final class BuildConfig {
     public static final String NX_PROFILES = "040074A01BF12000\\tDonkey Kong Bananza\\t22852\\tabcdef012345\\t458752 main=aa";
     public static final String NX_DMSH_VK_CHAIN = "6607c8d19abc";
     public static final String NX_DMSH_VK_ABI = "01b52a48538b";
+    public static final String NX_DMSH_VK_ABI_COMPAT = "";
 }
 '''
 
@@ -287,7 +362,7 @@ public final class BuildConfig {
         t = Path(tempfile.mkdtemp(prefix='nupjvm_'))
         try:
             (t / 'BuildConfig.java').write_text(self.STUB)
-            subprocess.run(['javac', '-d', str(t / 'classes')] + [str(src / f'{c}.java') for c in ('Nup', 'Zstd', 'Pack', 'Profile', 'ShaderLibs')]
+            subprocess.run(['javac', '-d', str(t / 'classes')] + [str(src / f'{c}.java') for c in ('Nup', 'Zstd', 'Pack', 'Profile', 'ShaderLibs', 'PickedPath', 'CopyPlan', 'DumpLayout')]
                            + [str(REPO / 'android/app/src/jvmtest/java/dev/nxnative/android/NupJvmTest.java'), str(t / 'BuildConfig.java')], check=True, capture_output=True, text=True)
             (t / 'run').mkdir()
             r = subprocess.run(['java', '-cp', str(t / 'classes'), 'dev.nxnative.android.NupJvmTest', str(REPO), str(t / 'run')] + ([sys.executable] if have_zstd() else []),

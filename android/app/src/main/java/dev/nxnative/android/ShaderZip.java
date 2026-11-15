@@ -10,9 +10,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
@@ -35,7 +37,10 @@ import java.util.zip.ZipOutputStream;
  * <p>
  * <b>The zip</b> (android/SHADERS.md "Shader zips"): STORED, at its root or in its one top folder, exactly these entries in this order: manifest.tsv (key TAB
  * value: kind swap2-shaders, format 1, the title, the library's version, ABI, chain and inputs digest, its shader count, size and SHA-256, inputs.tsv's SHA-256,
- * who made it), inputs.tsv (the library's stamp: game and profile inputs) and dmsh_vk.lib. Named swap2-shaders-&lt;title ID&gt;-&lt;game version&gt;-v-&lt;V&gt;.zip.
+ * who made it), inputs.tsv (the library's stamp: game and profile inputs) and dmsh_vk.lib. Format 2 adds a fourth entry, prewarm.keys: the exporting device's
+ * pipeline prewarm list (the host's &lt;DM_TEMP&gt;/vk_pipelines.keys, dm/gfx/vk_android/vka_pso.c "The prewarm list"; never the driver's pipeline cache, which is
+ * that driver's), with its size and SHA-256 in the manifest. A zip without a list stays format 1, which launchers before format 2 take; they refuse a format 2
+ * zip whole, writing nothing. Named swap2-shaders-&lt;title ID&gt;-&lt;game version&gt;-v-&lt;V&gt;.zip.
  * <ul>
  * <li><b>Export</b> takes the library Play loads (this APK's version, else the older one the host plays: {@link #chooseExport}), hashes it, writes
  *     &lt;zip&gt;.partial, reads it back with the importer's own reader ({@link #read} with verifyOnly) and only then gives it its name. The pack is only read.</li>
@@ -44,17 +49,22 @@ import java.util.zip.ZipOutputStream;
  *     library is copied into &lt;pack&gt;/shaders/.import-&lt;V&gt;/ (hashed and synced: its size, SHA-256 and CRC must be the manifest's), then {@link #install}
  *     renames it to v-&lt;V&gt; (the one there before kept as .replaced-&lt;V&gt; until then; {@link #recover} puts a stopped swap back). A library of an older version
  *     is taken only when the profile's manifest has a "stamp" row for its exact bytes: it becomes this version's by its header (ShaderLibs.restamp). Nothing on
- *     the phone is translated.</li>
+ *     the phone is translated. A prewarm list goes to the game's temp folder as vk_pipelines.import.keys ({@link #PREWARM_IMPORT}); the host merges it into the
+ *     game's own list at its next start and removes it once the merged list is written, so this device's keys are kept and no record format is parsed here.</li>
  * </ul>
  * Prepare then skips its shader steps for a pack that holds the library ({@link #ready}: PackService, Job.shadersInPack).
  */
 final class ShaderZip {
-    static final String KIND = "swap2-shaders", FORMAT = "1";
-    static final String MANIFEST = "manifest.tsv", INPUTS = "inputs.tsv", LIB = "dmsh_vk.lib", SOURCE = "source.tsv";
+    static final String KIND = "swap2-shaders", FORMAT = "1", FORMAT_PREWARM = "2";
+    static final String MANIFEST = "manifest.tsv", INPUTS = "inputs.tsv", LIB = "dmsh_vk.lib", SOURCE = "source.tsv", PREWARM = "prewarm.keys";
+    /** The host's prewarm list in a game's temp folder (DM_TEMP), and the file an imported one waits in until the host merges it (vka_pso.c pw_load) */
+    static final String PREWARM_LIST = "vk_pipelines.keys", PREWARM_IMPORT = "vk_pipelines.import.keys";
     static final String IMPORT = ".import-", REPLACED = ".replaced-", PARTIAL = ".partial", PREFIX = "swap2-shaders-";
     /** The largest library taken (Pokemon Pokopia's blob is 9.8 GB), the largest manifest.tsv or inputs.tsv, the room kept free beside an import */
     static final long MAX_LIB = 32L << 30, SPARE = 256L << 20;
     static final int MAX_SMALL = 64 << 10;
+    /** The largest prewarm list taken: DM_VK_PREWARM_KEEP's 16384 records of about 0.6 KB, with room */
+    static final int MAX_PREWARM = 32 << 20;
     private static final int CHUNK = 1 << 20;
     /** Progress phases */
     static final int HASH = 0, WRITE = 1, CHECK = 2, COPY = 3, INSTALL = 4;
@@ -226,9 +236,10 @@ final class ShaderZip {
     /** What an export wrote (or found already there) */
     static final class Exported {
         File zip;
-        boolean reused;   // that zip was already there with the same library
+        boolean reused;   // that zip was already there with the same library and prewarm list
         String version;
         long shaders, size;
+        long prewarmKeys; // the pipeline keys of the prewarm list in it (0: none)
     }
 
     /**
@@ -236,6 +247,33 @@ final class ShaderZip {
      * or "mac:&lt;commit&gt;"), xlate: the translator's source digest; both informational
      */
     static Exported export(File packDir, String titleId, File outDir, String app, String xlate, Progress p) throws IOException {
+        return export(packDir, titleId, outDir, app, xlate, null, p);
+    }
+
+    /**
+     * A prewarm list of the host's (&lt;DM_TEMP&gt;/vk_pipelines.keys), checked: its magic (NXVKPW1 or NXVKPW2), at least one record, at most {@link #MAX_PREWARM}
+     * bytes. Null when there is none or it is not one (the zip then goes without it). Whether its key layout is this build's is the host's to say (pw_load)
+     */
+    static byte[] prewarmList(File f) {
+        if (f == null || !f.isFile() || f.length() < 24 || f.length() > MAX_PREWARM) return null;
+        try {
+            byte[] d = Files.readAllBytes(f.toPath());
+            return prewarmKeys(d) > 0 ? d : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** The record count of a prewarm list's header (vka_pso.c pwhdr / pwhdr2: an 8-byte magic, gkey_size, n), or -1 when it is not one */
+    static long prewarmKeys(byte[] d) {
+        if (d == null || d.length < 24) return -1;
+        String magic = new String(d, 0, 8, StandardCharsets.US_ASCII);
+        if (!magic.equals("NXVKPW1\0") && !magic.equals("NXVKPW2\0")) return -1;
+        return (d[12] & 0xffL) | (d[13] & 0xffL) << 8 | (d[14] & 0xffL) << 16 | (d[15] & 0xffL) << 24;
+    }
+
+    /** The same with this device's prewarm list of the game (prewarm: its vk_pipelines.keys, or null): with one the zip is format 2 with prewarm.keys */
+    static Exported export(File packDir, String titleId, File outDir, String app, String xlate, File prewarm, Progress p) throws IOException {
         recover(packDir);
         if (inside(outDir, packDir)) throw io("the zip cannot go inside the pack folder " + packDir, IO_INSIDE, packDir);
         File lib = chooseExport(packDir, titleId), dir = lib.getParentFile();
@@ -277,9 +315,11 @@ final class ShaderZip {
         }
         if (done != size) throw io(lib + " changed while it was read", IO_CHANGED_READ, lib);
         String libSha = hex(md.digest()), inSha = hex(sha().digest(inputs));
+        byte[] keys = prewarmList(prewarm);
+        String keysSha = keys == null ? "" : hex(sha().digest(keys));
         Profile prof = Profile.of(titleId);
         StringBuilder m = new StringBuilder("# a game's translated shaders (android/SHADERS.md \"Shader zips\"): Import shaders… in the game's Options takes it\n");
-        row(m, "format", FORMAT);
+        row(m, "format", keys == null ? FORMAT : FORMAT_PREWARM);
         row(m, "kind", KIND);
         row(m, "title_id", titleId);
         row(m, "name", prof != null ? prof.name : titleId);
@@ -293,6 +333,11 @@ final class ShaderZip {
         row(m, "lib_size", String.valueOf(size));
         row(m, "lib_sha256", libSha);
         row(m, "inputs_sha256", inSha);
+        if (keys != null) {
+            row(m, "prewarm_keys", String.valueOf(prewarmKeys(keys)));
+            row(m, "prewarm_size", String.valueOf(keys.length));
+            row(m, "prewarm_sha256", keysSha);
+        }
         row(m, "app", app);
         row(m, "packer", packer);
         row(m, "xlate_source", xlate);
@@ -302,20 +347,26 @@ final class ShaderZip {
         Exported out = new Exported();
         out.version = v;
         out.shaders = h.entries;
+        out.prewarmKeys = keys == null ? 0 : prewarmKeys(keys);
         String name = exportName(titleId, gameVersion, v);
         File same = new File(outDir, name);
-        if (same.isFile() && sameLibrary(same, libSha, size)) {   // exported before: kept, no second copy of a library of a GB or more
-            out.zip = same;
-            out.reused = true;
-            out.size = same.length();
-            return out;
+        // exported before: kept, no second copy of a library of a GB or more; the same library with another prewarm list (one that grew since): that zip is replaced
+        boolean replace = false;
+        if (same.isFile() && sameLibrary(same, libSha, size)) {
+            if (keysSha.equals(prewarmSha(same))) {
+                out.zip = same;
+                out.reused = true;
+                out.size = same.length();
+                return out;
+            }
+            replace = true;
         }
         if (!outDir.isDirectory() && !outDir.mkdirs()) throw io("cannot create " + outDir, IO_CREATE, outDir);
-        long need = size + manifest.length + inputs.length + (64L << 20);
+        long need = size + manifest.length + inputs.length + (keys == null ? 0 : keys.length) + (64L << 20);
         if (outDir.getUsableSpace() < need)
             throw new Failure(Why.NO_SPACE, "the zip needs " + SaveStore.size(need) + ", " + outDir + " has " + SaveStore.size(outDir.getUsableSpace()) + " free",
                     SaveStore.size(need), outDir.getPath(), SaveStore.size(outDir.getUsableSpace()));
-        File zip = PackZip.freeFile(outDir, name), tmp = new File(zip.getPath() + PARTIAL);
+        File zip = replace ? same : PackZip.freeFile(outDir, name), tmp = new File(zip.getPath() + PARTIAL);
         try {
             try (FileOutputStream fo = new FileOutputStream(tmp); ZipOutputStream z = new ZipOutputStream(fo)) {
                 z.setMethod(ZipOutputStream.STORED);
@@ -335,6 +386,7 @@ final class ShaderZip {
                 }
                 if (n != size) throw io(lib + " changed while it was written", IO_CHANGED_WRITTEN, lib);
                 z.closeEntry();
+                if (keys != null) put(z, PREWARM, keys);   // last: a launcher reading the stream has checked the library before it
                 z.finish();
                 fo.getFD().sync();
             } catch (ZipException e) {
@@ -348,9 +400,16 @@ final class ShaderZip {
                     @Override public void at(int phase, long d, long total) { p.at(CHECK, d, total); }
                     @Override public boolean cancelled() { return p.cancelled(); }
                 });
-                if (!libSha.equals(s.sha256) || s.libSize != size) throw io("the zip read back does not match " + lib, IO_READ_BACK, lib);
+                if (!libSha.equals(s.sha256) || s.libSize != size || (keys == null) != (s.prewarm == null) || keys != null && !Arrays.equals(keys, s.prewarm))
+                    throw io("the zip read back does not match " + lib, IO_READ_BACK, lib);
             }
-            if (!tmp.renameTo(zip)) throw io("cannot name the zip " + zip, IO_NAME_ZIP, zip);
+            try {
+                if (replace) Files.move(tmp.toPath(), zip.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                else if (!tmp.renameTo(zip)) throw io("cannot name the zip " + zip, IO_NAME_ZIP, zip);
+            } catch (IOException e) {
+                if (e instanceof Failure) throw e;
+                throw io("cannot name the zip " + zip + " (" + e.getMessage() + ")", IO_NAME_ZIP, zip);
+            }
         } finally {
             if (tmp.exists()) tmp.delete();
         }
@@ -376,6 +435,21 @@ final class ShaderZip {
         z.putNextEntry(stored(name, data.length, c.getValue()));
         z.write(data);
         z.closeEntry();
+    }
+
+    /** The prewarm list's SHA-256 in a zip's manifest ("" when it has none, or the manifest is not read) */
+    private static String prewarmSha(File zip) {
+        try (ZipFile zf = new ZipFile(zip)) {
+            ZipEntry e = zf.getEntry(MANIFEST);
+            if (e == null) for (Enumeration<? extends ZipEntry> en = zf.entries(); en.hasMoreElements(); ) {
+                String n = en.nextElement().getName();
+                if (n.endsWith("/" + MANIFEST) && n.indexOf('/') == n.length() - MANIFEST.length() - 1) { e = zf.getEntry(n); break; }
+            }
+            if (e == null || e.getSize() > MAX_SMALL) return "";
+            try (InputStream in = zf.getInputStream(e)) { return one(rows(in.readAllBytes()), "prewarm_sha256"); }
+        } catch (IOException e) {
+            return "";
+        }
     }
 
     /** Whether a zip already there is a shaders zip of this library (its manifest's size and SHA-256) */
@@ -407,6 +481,8 @@ final class ShaderZip {
         /** The export's read-back: every check of the zip itself, none against this app (its version, the profile's inputs, the free space), nothing written */
         boolean verifyOnly;
         Space space = ShaderZip::freeSpace;
+        /** The game's temp folder (the host's DM_TEMP: AppStorage.temp), where a zip's prewarm list goes; null = the list is not installed */
+        File temp;
 
         Target(File pack, String titleId) {
             this.pack = pack;
@@ -433,6 +509,7 @@ final class ShaderZip {
         String version, sha256, abi, inputs;
         long shaders, libSize;
         Map<String, List<String>> manifest;
+        byte[] prewarm;   // the zip's prewarm.keys, checked against the manifest (null: none)
     }
 
     /** What an import put in place */
@@ -442,12 +519,17 @@ final class ShaderZip {
         long shaders, libSize;
         File packDir;
         boolean hadPack;  // the folder has a pack.tsv of this game (Play uses it now); else Prepare only rewrites the code
+        long prewarmKeys; // the pipeline keys of the zip's prewarm list put beside the game's own (the host merges them at the next start); 0 none
+        String prewarmProblem;   // why the zip's list was not put there (the library is in place all the same), else null
     }
 
     /** One zip entry as a reader gives it */
     private interface Opener { InputStream open() throws IOException; }
 
-    /** The checks and the copy, the same for a stream and a ZipFile; entries come in the zip's order (a stream) or as manifest, inputs, library (a ZipFile) */
+    /**
+     * The checks and the copy, the same for a stream and a ZipFile; entries come in the zip's order (a stream) or as manifest, inputs, library, prewarm list
+     * (a ZipFile)
+     */
     private static final class Reader {
         final Target t;
         final String zipName;
@@ -455,7 +537,7 @@ final class ShaderZip {
         String prefix;   // null until the first entry decides it
         final Set<String> seen = new HashSet<>();
         Map<String, List<String>> m;
-        byte[] inputs;
+        byte[] inputs, prewarm;
         Staged s = new Staged();
         boolean libDone;
 
@@ -466,7 +548,7 @@ final class ShaderZip {
             s.target = t;
         }
 
-        /** The entry's name in the zip's layout (manifest.tsv, inputs.tsv, dmsh_vk.lib), null for the top folder; Failure for anything else */
+        /** The entry's name in the zip's layout (manifest.tsv, inputs.tsv, dmsh_vk.lib, prewarm.keys), null for the top folder; Failure for anything else */
         String name(String n, boolean directory) throws Failure {
             Failure bad = new Failure(Why.UNSAFE_NAME, "the zip has an entry that is not a shaders file (" + n + ")", n);
             if (n.isEmpty() || n.indexOf('\\') >= 0 || n.startsWith("/") || n.indexOf('\0') >= 0 || n.matches("^[A-Za-z]:.*")) throw bad;
@@ -485,7 +567,7 @@ final class ShaderZip {
             if (prefix == null) prefix = top;
             else if (!prefix.equals(top)) throw bad;
             String rel = seg[seg.length - 1];
-            if (!rel.equals(MANIFEST) && !rel.equals(INPUTS) && !rel.equals(LIB)) throw bad;
+            if (!rel.equals(MANIFEST) && !rel.equals(INPUTS) && !rel.equals(LIB) && !rel.equals(PREWARM)) throw bad;
             if (!seen.add(rel)) throw new Failure(Why.UNSAFE_NAME, "the zip has " + rel + " twice", n);
             return rel;
         }
@@ -497,18 +579,23 @@ final class ShaderZip {
             } else if (rel.equals(INPUTS)) {
                 inputs = small(o.open(), INPUTS, crcWant);
                 if (m != null) inputsCheck();
+            } else if (rel.equals(PREWARM)) {
+                prewarm = small(o.open(), PREWARM, crcWant, MAX_PREWARM);   // checked against the manifest in finish (a stream may give it first)
             } else {
                 if (m == null) throw new Failure(Why.ORDER, "the zip's " + MANIFEST + " comes after its library", zipName);
                 library(o.open(), crcWant);
             }
         }
 
-        byte[] small(InputStream in, String what, long crcWant) throws IOException {
+        byte[] small(InputStream in, String what, long crcWant) throws IOException { return small(in, what, crcWant, MAX_SMALL); }
+
+        byte[] small(InputStream in, String what, long crcWant, int max) throws IOException {
             ByteArrayOutputStream b = new ByteArrayOutputStream();
             byte[] buf = new byte[8192];
+            String limit = max == MAX_SMALL ? "64 KiB" : (max >> 20) + " MiB";
             for (int n; (n = in.read(buf)) > 0; ) {
                 b.write(buf, 0, n);
-                if (b.size() > MAX_SMALL) throw new Failure(Why.NOT_SHADER_ZIP, what + " is larger than 64 KiB", zipName, what + " is larger than 64 KiB");
+                if (b.size() > max) throw new Failure(Why.NOT_SHADER_ZIP, what + " is larger than " + limit, zipName, what + " is larger than " + limit);
             }
             byte[] d = b.toByteArray();
             CRC32 c = new CRC32();
@@ -519,7 +606,7 @@ final class ShaderZip {
 
         void manifest() throws Failure {
             String kind = one(m, "kind"), format = one(m, "format");
-            if (!KIND.equals(kind) || !FORMAT.equals(format))
+            if (!KIND.equals(kind) || !FORMAT.equals(format) && !FORMAT_PREWARM.equals(format))
                 throw new Failure(Why.NOT_SHADER_ZIP, zipName + " is not a shaders zip (kind " + kind + ", format " + format + ")", zipName, "kind " + kind + ", format " + format);
             String id = one(m, "title_id").toUpperCase(Locale.ROOT);
             if (!id.equals(t.titleId)) {
@@ -568,6 +655,20 @@ final class ShaderZip {
             if (!hex(sha().digest(inputs)).equals(one(m, "inputs_sha256"))) throw new Failure(Why.DAMAGED, INPUTS + "'s SHA-256 is not the manifest's", INPUTS);
             if (!t.titleId.equals(one(st, "game").toUpperCase(Locale.ROOT)) || !s.inputs.equals(one(st, "inputs")))
                 throw new Failure(Why.DAMAGED, INPUTS + " names " + one(st, "game") + " " + one(st, "inputs") + ", the manifest " + t.titleId + " " + s.inputs, INPUTS);
+        }
+
+        /** prewarm.keys: only in a format 2 zip, which has it, its size and SHA-256 the manifest's, a list's header */
+        void prewarmCheck() throws Failure {
+            boolean two = FORMAT_PREWARM.equals(one(m, "format"));
+            if (prewarm == null) {
+                if (two) throw new Failure(Why.NOT_SHADER_ZIP, zipName + " has no " + PREWARM, zipName, "no " + PREWARM);
+                return;
+            }
+            if (!two) throw new Failure(Why.UNSAFE_NAME, "the zip has " + PREWARM + " but is format " + one(m, "format"), PREWARM);
+            if (!String.valueOf(prewarm.length).equals(one(m, "prewarm_size")) || !hex(sha().digest(prewarm)).equals(one(m, "prewarm_sha256")))
+                throw new Failure(Why.DAMAGED, PREWARM + "'s size or SHA-256 is not the manifest's", PREWARM);
+            if (prewarmKeys(prewarm) <= 0) throw new Failure(Why.DAMAGED, PREWARM + " is not a prewarm list", PREWARM);
+            s.prewarm = prewarm;
         }
 
         void header(byte[] hb) throws Failure {
@@ -624,6 +725,7 @@ final class ShaderZip {
                 if (!seen.contains(n)) throw new Failure(Why.NOT_SHADER_ZIP, zipName + " has no " + n, zipName, "no " + n);
             if (!libDone) throw new Failure(Why.DAMAGED, "the library was not read", "library");
             inputsCheck();
+            prewarmCheck();
             if (!t.verifyOnly) {
                 write(new File(s.dir, INPUTS), inputs);
                 StringBuilder b = new StringBuilder("# where this library came from (Import shaders…: the zip's manifest)\n");
@@ -656,7 +758,7 @@ final class ShaderZip {
                 for (ZipEntry e; (e = z.getNextEntry()) != null; ) {
                     String rel = r.name(e.getName(), e.isDirectory());
                     if (rel == null) continue;
-                    if (++files > 3) throw new Failure(Why.UNSAFE_NAME, "the zip has more than 3 files", e.getName());
+                    if (++files > 4) throw new Failure(Why.UNSAFE_NAME, "the zip has more than 4 files", e.getName());
                     r.entry(rel, -1, () -> z);   // ZipInputStream checks the entry's CRC at its end itself (a ZipException)
                 }
             }
@@ -664,6 +766,65 @@ final class ShaderZip {
         } catch (ZipException | EOFException e) {
             unstage(r.s);
             throw new Failure(Why.DAMAGED, zipName + " is not a whole zip file (" + e.getMessage() + ")", String.valueOf(e.getMessage()));
+        } catch (IOException | RuntimeException e) {
+            unstage(r.s);
+            throw io(e);
+        } finally {
+            unlock(t);
+        }
+    }
+
+    /**
+     * The same from a loose library folder (ShaderLibs.loose: dmsh_vk.lib with its inputs.tsv, as a pack's shaders/v-&lt;V&gt;/ or a library shared as a folder):
+     * its manifest is made from the library's header (what scripts/shaders_zip.py writes into a zip's), after one pass that hashes the library, then the zip's
+     * checks and copy run on it unchanged. A library of another app or version is refused as from a zip (OTHER_VERSION, OTHER_GAME, OTHER_INPUTS, DAMAGED)
+     */
+    static Staged readFolder(File dir, Target t, Progress p) throws IOException {
+        File lib = ShaderLibs.loose(dir);
+        if (lib == null) throw new Failure(Why.NOT_SHADER_ZIP, dir.getName() + " has no " + LIB, dir.getName(), "no " + LIB);
+        File inputsFile = new File(lib.getParentFile(), INPUTS);
+        if (!inputsFile.isFile()) throw new Failure(Why.NOT_SHADER_ZIP, dir.getName() + " has no " + INPUTS, dir.getName(), "no " + INPUTS);
+        ShaderLibs.Header h = ShaderLibs.header(lib);
+        if (h == null) throw new Failure(Why.DAMAGED, "the library has no shader library header", "header");
+        Reader r = new Reader(t, dir.getName(), p);
+        lock(t);
+        try {
+            long size = lib.length();
+            MessageDigest md = sha();
+            try (InputStream in = new FileInputStream(lib)) {
+                byte[] buf = new byte[CHUNK];
+                long done = 0;
+                for (int n; (n = in.read(buf)) > 0; ) {
+                    md.update(buf, 0, n);
+                    p.at(HASH, done += n, size);
+                    if (p.cancelled()) throw new Failure(Why.CANCELLED, "cancelled");
+                }
+            }
+            byte[] inputs = Files.readAllBytes(inputsFile.toPath());
+            StringBuilder m = new StringBuilder();
+            row(m, "kind", KIND);
+            row(m, "format", FORMAT);
+            row(m, "title_id", h.game);
+            Profile prof = Profile.of(h.game.toUpperCase(Locale.ROOT));
+            row(m, "name", prof == null ? "" : prof.name);
+            row(m, "library_version", h.vkChain);
+            row(m, "abi", h.abi);
+            row(m, "inputs", h.inputs);
+            row(m, "shaders", String.valueOf(h.entries));
+            row(m, "lib_size", String.valueOf(size));
+            row(m, "lib_sha256", hex(md.digest()));
+            row(m, "inputs_sha256", hex(sha().digest(inputs)));
+            row(m, "made_from_folder", dir.getPath());
+            byte[] mb = m.toString().getBytes(StandardCharsets.UTF_8);
+            r.seen.add(MANIFEST);
+            r.entry(MANIFEST, -1, () -> new java.io.ByteArrayInputStream(mb));
+            r.seen.add(INPUTS);
+            r.entry(INPUTS, -1, () -> new java.io.ByteArrayInputStream(inputs));
+            r.seen.add(LIB);
+            try (InputStream in = new FileInputStream(lib)) {
+                r.entry(LIB, -1, () -> in);
+            }
+            return held(r.finish());
         } catch (IOException | RuntimeException e) {
             unstage(r.s);
             throw io(e);
@@ -683,11 +844,12 @@ final class ShaderZip {
                 ZipEntry e = en.nextElement();
                 String rel = r.name(e.getName(), e.isDirectory());
                 if (rel == null) continue;
-                if (++files > 3) throw new Failure(Why.UNSAFE_NAME, "the zip has more than 3 files", e.getName());
+                if (++files > 4) throw new Failure(Why.UNSAFE_NAME, "the zip has more than 4 files", e.getName());
                 by.put(rel, e);
             }
-            for (String n : new String[] {MANIFEST, INPUTS, LIB}) {
+            for (String n : new String[] {MANIFEST, INPUTS, LIB, PREWARM}) {
                 ZipEntry e = by.get(n);
+                if (e == null && n.equals(PREWARM)) continue;   // (optional: finish says whether the manifest wants it)
                 if (e == null) throw new Failure(Why.NOT_SHADER_ZIP, zip.getName() + " has no " + n, zip.getName(), "no " + n);
                 try (InputStream in = zf.getInputStream(e)) {
                     r.entry(n, e.getCrc(), () -> in);   // ZipFile does not check a stored entry's CRC: the reader does
@@ -779,6 +941,14 @@ final class ShaderZip {
             r.libSize = s.libSize;
             r.packDir = t.pack;
             try { r.hadPack = Pack.read(t.pack).titleId.equals(t.titleId); } catch (IOException e) { r.hadPack = false; }
+            if (s.prewarm != null && t.temp != null) {
+                try {
+                    installPrewarm(t.temp, s.prewarm);
+                    r.prewarmKeys = prewarmKeys(s.prewarm);
+                } catch (IOException | RuntimeException e) {   // the library is in place (the outer catch would report the import failed): the game plays, only its first visits compile as without the list
+                    r.prewarmProblem = "the prewarm list was not written to " + t.temp + ": " + e.getMessage();
+                }
+            }
             return r;
         } catch (IOException | RuntimeException e) {
             unstage(s);
@@ -786,6 +956,21 @@ final class ShaderZip {
         } finally {
             unlock(t);
             release(s);
+        }
+    }
+
+    /**
+     * A zip's prewarm list into a game's temp folder as vk_pipelines.import.keys (synced, then renamed: the host never reads half a file). One there already (an
+     * import the game has not started since) is replaced: the newer zip's list. The game's own vk_pipelines.keys is not touched: the host merges the two
+     */
+    static void installPrewarm(File temp, byte[] keys) throws IOException {
+        if (!temp.isDirectory() && !temp.mkdirs()) throw new IOException("cannot create " + temp);
+        File dst = new File(temp, PREWARM_IMPORT), tmp = new File(temp, PREWARM_IMPORT + ".tmp");   // (vk_*.tmp: AppStorageReport removes one a stop left)
+        try {
+            write(tmp, keys);
+            Files.move(tmp.toPath(), dst.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            if (tmp.exists()) tmp.delete();
         }
     }
 

@@ -81,16 +81,21 @@ def deltaOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.t
 // and its "stamp" rows (an older library that becomes this version's by its header alone, ShaderLibs.restamp): "version:old SHA-256:new SHA-256", ';' between them
 def stampOf = { String game -> def f = new File(repo, "dm/games/$game/vk_delta.tsv"); if (!f.isFile()) return ''; def ls = f.readLines()
     ls.contains("version\t${defineOf('dm/gfx/nvn/dmsh_chain_vk.h', 'DMSH_VK_CHAIN')}".toString()) ? ls.findAll { it ==~ /stamp\t[0-9a-f]{12}\t[0-9a-f]{64}\t[0-9a-f]{64}/ }.collect { it.split('\t').drop(1).join(':') }.join(';') : '' }
-// and last what Game resolution sets for it (Profile.resolutionEnv): "window" with window_fn rows (DM_WINDOW_SIZE), "scale:<choice>=<scale>/<console|handheld>,…" with
-// graphics_scale rows (DM_GRAPHICS_SCALE and DM_OPMODE), empty when it has neither (the launcher then offers no Game resolution for it)
-def resolutionOf = { String game -> !tsvRows(game, 'window_fn').isEmpty() ? 'window' : tsvRows(game, 'graphics_scale').with { rs -> rs.isEmpty() ? '' : 'scale:' + rs.collect { c -> "${c[1].trim()}=${c[2].trim()}/${c[3].trim()}" }.join(',') } }
+// and last what Game resolution sets for it (Profile.resolutionEnv): "window" with window_fn or res_levels rows (DM_WINDOW_SIZE: the window, or a cap on a dynamic
+// resolution), "scale:<choice>=<scale>/<console|handheld>,…" with graphics_scale rows (DM_GRAPHICS_SCALE and DM_OPMODE), empty when it has none (the launcher then offers
+// no Game resolution for it)
+def resolutionOf = { String game -> !tsvRows(game, 'window_fn').isEmpty() || !tsvRows(game, 'res_levels').isEmpty() ? 'window' : tsvRows(game, 'graphics_scale').with { rs -> rs.isEmpty() ? '' : 'scale:' + rs.collect { c -> "${c[1].trim()}=${c[2].trim()}/${c[3].trim()}" }.join(',') } }
 // then agl's NDSR upscaler networks (the game settings' Upscaler, Profile.ndsrEnv): when the profile's shader_map.tsv has them (agl_ndsr*.pck), the encoding of their input
 // for the FSR 1 stand-in (DM_VK_NDSR_INPUT: the profile's ndsr_input, sqrt or linear; linear, the host's default, without the key), else empty (the option is not offered)
 def ndsrOf = { String game -> def f = new File(repo, "dm/games/$game/shader_map.tsv"); if (!f.isFile() || !f.text.contains('/agl_ndsr')) return ''
     def v = tsvRows(game, 'ndsr_input').collect { it[1].trim() }.find() ?: 'linear'
     if (!(v in ['sqrt', 'linear'])) throw new GradleException("dm/games/$game/game.tsv: ndsr_input must be sqrt or linear, not $v"); v }
-// and last the Scene resolution's 720p (Profile.sceneScale): the profile's scene_scale_palette row, "<scale>/<expected original scales>", empty without one
-def sceneOf = { String game -> tsvRows(game, 'scene_scale_palette').collect { c -> c[1].trim() + (c.size() > 2 ? '/' + c[2].trim() : '') }.find() ?: '' }
+// and last the Scene resolution (Profile.sceneScale, scenePresets): the profile's scene_scale_palette row, "<scale>/<expected original scales>", then its
+// scene_preset rows as "/<label>=<scale>|…"; empty without a palette row
+def sceneOf = { String game -> def base = tsvRows(game, 'scene_scale_palette').collect { c -> c[1].trim() + '/' + (c.size() > 2 ? c[2].trim() : '') }.find()
+    if (!base) return ''
+    def pre = tsvRows(game, 'scene_preset').collect { c -> if (c.size() < 3 || !(c[2].trim() ==~ /\d*\.\d+/)) throw new GradleException("dm/games/$game/game.tsv: scene_preset takes <label> <scale>: ${c.join(' ')}"); c[1].trim() + '=' + c[2].trim() }
+    base + (pre ? '/' + pre.join('|') : '') }
 // and the Upscaler's default (Profile.ndsrDefault): "fsr" for a game with the networks whose profile has ndsr_default fsr, else empty (the network, net)
 def ndsrDefaultOf = { String game -> if (!ndsrOf(game)) return ''
     def v = tsvRows(game, 'ndsr_default').collect { it[1].trim() }.find() ?: 'net'
@@ -184,7 +189,45 @@ def profileModsTask = tasks.register('nxProfileMods', Sync) {
     into nxProfileMods.map { it.dir('assets') }
 }
 android.sourceSets.main.assets.srcDir(nxProfileMods.map { it.dir('assets') })
+
+// Memory-only policies update existing packs at launch, independently of shaders and rewritten modules.
+def memoryPolicies = tasks.register('nxMemoryPolicies') {
+    inputs.files(nxGames.collect { new File(repo, "dm/games/$it/game.tsv") })
+    outputs.dir(layout.buildDirectory.dir('generated/nxmemory/assets'))
+    doLast {
+        File dest = layout.buildDirectory.dir('generated/nxmemory/assets/memory-policy').get().asFile
+        dest.mkdirs()
+        nxGames.each { id ->
+            def lines = new File(repo, "dm/games/$id/game.tsv").readLines('UTF-8')
+            def row = { String key -> lines.find { it.startsWith(key + '\t') }?.split('\t', 2)?.getAt(1) }
+            def out = ['FORMAT\t1']
+            lines.findAll { it.startsWith('build\t') }.each { line ->
+                def match = line =~ /(?:^|\s)main=([0-9a-f]{32})(?:\s|$)/
+                if (match.find()) out.add('BUILD\t' + match.group(1))
+            }
+            out.add('MEM_MAP_LIMIT\t' + ((row('mem_map_limit') ?: 'on') == 'on' ? '1' : '0'))
+            def oldLayout = row('android_memory_update')?.trim()?.split(/\s+/)
+            if (oldLayout) {
+                if (oldLayout.length != 2) throw new GradleException("$id: android_memory_update needs old reserve and alias")
+                def numbers = [oldLayout[0], oldLayout[1], row('mem_reserve'), row('mem_alias')].collect { Long.decode(it).toString() }
+                out.add('LAYOUT\t' + numbers.join('\t'))
+            }
+            new File(dest, "${id}.tsv").setText(out.join('\n') + '\n', 'UTF-8')
+        }
+    }
+}
+android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/nxmemory/assets'))
+tasks.named('preBuild') { dependsOn memoryPolicies }
 tasks.named('preBuild') { dependsOn profileModsTask }
+
+// The log digest's tables (ExitWatch's notice, LogDigest.java): dm/tools/log_rules.tsv and log_noise.tsv, the files dm/tools/log_digest.py reads, copied at every build
+// into the APK's assets/digest/ (never a copy kept in the app's sources; test_android_logdigest.py checks)
+def nxDigest = tasks.register('nxDigestAssets', Sync) {
+    from(new File(repo, 'dm/tools')) { include 'log_rules.tsv', 'log_noise.tsv' }
+    into layout.buildDirectory.dir('generated/nxdigest/assets/digest')
+}
+android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/nxdigest/assets'))
+tasks.named('preBuild') { dependsOn nxDigest }
 
 // ./gradlew apk → out/swap2-native-test.apk (-PnxPlay=true: swap2-native.apk; -PnxApp=<suffix>: swap2-native-<suffix>.apk; -PnxLive=true: swap2-native-<version>.apk)
 tasks.register('apk', Copy) {

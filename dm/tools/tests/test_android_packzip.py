@@ -26,7 +26,7 @@ class PackZipJvm(unittest.TestCase):
             d = Path(d)
             (d / 'stub').mkdir()
             (d / 'stub/BuildConfig.java').write_text(STUB)
-            srcs = [SRC / f'{n}.java' for n in ('PackZip', 'Pack', 'Nup', 'Zstd', 'Profile', 'ShaderLibs', 'SaveStore', 'SaveZip')]
+            srcs = [SRC / f'{n}.java' for n in ('PackZip', 'Pack', 'Nup', 'Zstd', 'Profile', 'ShaderLibs', 'SaveStore', 'SaveZip', 'DumpLayout')]
             r = subprocess.run(['javac', '-Xlint:all,-try', '-Werror', '-d', str(d / 'classes'), *map(str, srcs), str(TEST), str(d / 'stub/BuildConfig.java')],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

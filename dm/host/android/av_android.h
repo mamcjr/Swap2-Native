@@ -3,6 +3,7 @@
 // the SPS picture size for MediaCodec's format, and MediaCodec output buffer layouts copied into tight NV12 or RGBA.
 #pragma once
 #include <stdint.h>
+#include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -148,6 +149,34 @@ static inline int nx_yuv_to_nv12(const uint8_t *src, size_t n, const nx_yuv_layo
     }
     return 0;
 }
+// ---------- A hardware decoder that fails inside a stream ----------
+// AMediaCodec_dequeueOutputBuffer / dequeueInputBuffer: an index, or -1 (try again later), -2 (output format changed), -3 (output buffers changed); anything below is an error
+// (AMEDIA_ERROR_*, AMEDIACODEC_ERROR_*: a decoder in its error state, or one whose resources were reclaimed), after which it gives nothing more. Read as "no picture yet",
+// such an error left the movie player without a picture for every packet that followed
+static inline int nx_mc_failed(long r) { return r < -3; }
+// The packets of a stream since its last key frame (the last temporal unit with a sequence header), copied, so that when the hardware decoder fails the CPU decoder can start
+// again from that key frame: given counts the pictures the hardware decoder gave since it, which the CPU decoder's first pictures repeat (they are dropped). lost: more than the
+// cap came since the key frame (the CPU decoder then starts at the next one)
+#define NX_MCK_PACKETS 4096
+#define NX_MCK_BYTES (64u << 20)
+typedef struct { struct { uint8_t *d; size_t n; int64_t pts; } *p; int n, cap, lost; size_t bytes; uint64_t given; } nx_mck;
+static inline void nx_mck_drop(nx_mck *k) { for (int i = 0; i < k->n; i++) free(k->p[i].d); k->n = 0; k->bytes = 0; }
+static inline void nx_mck_clear(nx_mck *k) { nx_mck_drop(k); k->lost = 0; k->given = 0; }
+static inline void nx_mck_free(nx_mck *k) { nx_mck_clear(k); free(k->p); k->p = NULL; k->cap = 0; }
+static inline void nx_mck_packet(nx_mck *k, const uint8_t *d, size_t n, int64_t pts, int key) {
+    if (key) nx_mck_clear(k);
+    if (k->lost) return;
+    if (k->n >= NX_MCK_PACKETS || k->bytes + n > NX_MCK_BYTES) { k->lost = 1; nx_mck_drop(k); return; }
+    if (k->n == k->cap) {
+        int c = k->cap ? k->cap * 2 : 64; void *q = realloc(k->p, (size_t)c * sizeof *k->p);
+        if (!q) { k->lost = 1; nx_mck_drop(k); return; }
+        k->p = q; k->cap = c;
+    }
+    uint8_t *c = malloc(n ? n : 1); if (!c) { k->lost = 1; nx_mck_drop(k); return; }
+    if (n) memcpy(c, d, n);
+    k->p[k->n].d = c; k->p[k->n].n = n; k->p[k->n].pts = pts; k->n++; k->bytes += n;
+}
+static inline void nx_mck_picture(nx_mck *k) { k->given++; }
 // NV12 (stride w for both planes) into RGBA rows (memory order R G B A), BT.601 or BT.709, limited or full range
 static inline uint8_t nx_clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
 static inline void nx_nv12_to_rgba(const uint8_t *y, const uint8_t *uv, int w, int h, int stride, uint8_t *dst, int dstride, int bt709, int full) {

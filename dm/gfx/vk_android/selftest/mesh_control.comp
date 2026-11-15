@@ -1,0 +1,53 @@
+#version 450
+// Production task/mesh fallback controller. The host executes phases in order with
+// compute/indirect/vertex-read barriers. Output storage is reused only after its draw.
+// Phase 3 (a draw without a task shader, vka_mesh.inc DM_VK_MESH_FUSE): phases 0, 1 and 2 for
+// the first batch in one dispatch, so such a draw records one controller dispatch instead of three.
+layout(local_size_x=1) in;
+layout(set=0,binding=385,std430) readonly buffer Payload { uint payload[]; };
+layout(set=0,binding=386,std430) buffer Offsets { uint offsets[]; };
+layout(set=0,binding=387,std430) buffer Info { uint info[]; };
+layout(set=0,binding=388,std430) readonly buffer Source { uint source[]; };
+layout(push_constant) uniform Control { uint phase; uint batch_base; } control;
+void begin() {
+    uint count=source[0], first=source[1];
+    info[17]=(count > 65535u || (count!=0u && first > 0xffffffffu-(count-1u))) ? 1u : 0u;
+    info[10]=info[17]==0u ? count : 0u;
+    info[19]=first;
+    info[0]=info[10]; info[1]=1u; info[2]=1u;
+    info[4]=0u; info[5]=0u;
+    info[6]=0u; info[7]=1u; info[8]=0u; info[9]=0u;
+}
+void groups() {
+    uint total=0u;
+    if (info[16]!=0u) {
+        for(uint t=0u;t<info[10];++t) {
+            uint n=payload[t*info[11]+1u];
+            if(n>65535u || total>65535u-min(n,65535u)) info[17]|=2u;
+            uint room=total<65535u ? 65535u-total : 0u;
+            for(uint g=0u;g<min(n,room);++g) {
+                offsets[2u*(total+g)]=t;
+                offsets[2u*(total+g)+1u]=g;
+            }
+            total+=min(n,65535u);
+        }
+    } else {
+        offsets[0]=0u; offsets[1]=0u; total=info[10];
+    }
+    info[18]=total;
+    // Refuse an unsupported count instead of displaying a silently truncated object.
+    info[4]=info[17]==0u ? total : 0u;
+}
+void batch(uint base) {
+    uint total=info[4];
+    uint count=base<total ? min(info[15],total-base) : 0u;
+    info[0]=count; info[1]=1u; info[2]=1u; info[5]=base;
+    info[6]=count*info[13]*info[14];
+    info[7]=1u; info[8]=0u; info[9]=0u;
+}
+void main() {
+    if (control.phase == 0u) begin();
+    else if (control.phase == 1u) groups();
+    else if (control.phase == 3u) { begin(); groups(); batch(0u); }
+    else batch(control.batch_base);
+}

@@ -1,13 +1,15 @@
 // Draws and dispatches of the Vulkan replay: nvn_mtl.m's draw path on Vulkan. vka_exec.c walks the records; state records land in the queue's vka_dstate (vka_state_op),
 // and each draw resolves its program to shaders (vka_shader.c), opens the dynamic-rendering pass of the bound targets if none is open, takes a pipeline keyed on the state
 // Vulkan cannot set dynamically here (vka_pso.c), writes set 0 from the binding records (vka_bind.c's walker: push descriptors when they fit, else a set from the submission
-// slot's pool), sets the dynamic state and draws. The pass stays open across draws and closes at anything else (vka_rp_end), followed by a full barrier.
+// slot's pool), sets the dynamic state and draws. The pass stays open across draws and closes at anything else (vka_rp_end), followed by a barrier (a full one when a
+// draw of the pass wrote memory, else one scoped to the attachment writes: "Pass-end barriers").
 // What is not here yet, each logged once: SINT attachments and integer vertex formats (no variants), transform feedback, DrawTexture, line loops and quads through indirect draws,
 // tessellation's patch size, texel buffers, viewport swizzles other than a y flip
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "vka_selftest_spv.h"   // SPV_MESHCOUNT_COMP (mesh_ind_args)
 #include "vka_ndsr.h"           // vka_ndsr_pipeline (vka_dispatch)
+#include "vka_ubq.h"            // inline uniform updates' ranges (ub_hazard)
 #include "../nvn/nvn_mtl.h"
 #include "../../host/plat/plat.h"
 #include <math.h>
@@ -30,7 +32,7 @@ static int g_force_draws;
 void vka_draw_force(int on) { g_force_draws = on; }
 static int draws_on(void) {
     int env = VKA_ENV("DM_VK_DRAW", -1); if (env > 0) env = 1;
-    int on = g_force_draws || (env >= 0 ? env : V.placed);
+    int on = g_force_draws || (env >= 0 ? env : (V.placed || V.fd_alias));
     if (!on) VRED_ONCE("draws and dispatches are off (%s): their records are skipped; events, counters and fences still signal", env == 0 ? "DM_VK_DRAW=0" : "no placed guest memory, so the GPU would see no pool; DM_VK_DRAW=1 turns them on");
     return on;
 }
@@ -116,8 +118,9 @@ enum { NSLOT = 8, MAXPOOLS = 64 };
 static VkDescriptorPool g_dp[NSLOT][MAXPOOLS]; static int g_ndp[NSLOT], g_cur_dp[NSLOT];
 void vka_dyn_invalidate(void);
 static void drv_memo_reset(void);
+void vka_mdx_inval(void);
 void vka_draw_sub_begin(VkCommandBuffer cb, unsigned slot) {
-    g_cb = cb; g_slot = slot % NSLOT; vka_dyn_invalidate();
+    g_cb = cb; g_slot = slot % NSLOT; vka_dyn_invalidate(); vka_mdx_inval();
     { void vka_mem_rec_thread(void); vka_mem_rec_thread(); }   // the address lookups' cache outside TLS for the recording thread (vka_mem.c)
     drv_memo_reset();   // the last submission's scratch spans go with its fence
     g_prof = VKA_ENV("DM_VK_PROF", 0) != 0; g_dyn_filter = VKA_ENV("DM_VK_DYN_FILTER", 1); g_pass_keep = VKA_ENV("DM_VK_PASS_KEEP", 1); g_vb_filter = VKA_ENV("DM_VK_VB_FILTER", 1);   // live: from this submission
@@ -181,15 +184,101 @@ static int rt_same(const p_set_rt *a, int ha, const p_set_rt *b, int hb) {
 }
 // Game barriers (OP_BARRIER) that came with a pass open: taken inside it (DM_VK_BAR_KEEP), ended it at once, ended it later at a draw that needed it (bar_hazard)
 static uint64_t g_bar_in, g_bar_kept, g_bar_late;
-void vka_oq_pass_end(void), vka_oq_draw(void);   // vka_exec.c "Occlusion queries"
-void vka_rp_end(void) {
+// Why a kept barrier's pass ended later (bar_hazard's reasons): the draw wrote memory, read the pool directly, had bindings the walk could not read, sampled a target
+// or something that may share its memory. The phone log's split says which one ends kept passes most (whether narrowing the pool case, Erick's da81e0d, is worth it)
+enum { BH_NONE, BH_WRITES, BH_POOL, BH_WALK, BH_TEX, BH_N };
+static uint64_t g_bar_late_why[BH_N];
+void vka_oq_pass_end(void), vka_oq_draw(uint64_t k1, uint64_t k2); int vka_oq_key_wanted(void);   // vka_exec.c "Occlusion queries"
+// ---------- Pass-end barriers ----------
+// A pass ended with a full barrier (ALL_COMMANDS to ALL_COMMANDS, every write to every read), which on a tiler waits for the whole GPU and flushes the shader write path at
+// every pass end, also for the many passes whose draws only read memory and write their attachments. Such a pass now ends with a barrier scoped to what it can have
+// written (vka_tex.c vka_attachment_write_barrier_at: the attachment stages, which take in every earlier stage, to everything after), after Erick's Ocarina fork
+// (ac09632 / 986c7fa / 5aae4d6 / d7bdee0) for every game. The full barrier stays when a draw of the pass wrote memory (R.swrite: storage buffers or images, raw global
+// stores, a geometry shader's claim, draw_writes), with DM_VK_NANSCAN, and at a pass a game barrier ends (vka_rp_end_covers_barrier: that barrier is the game's).
+// A barrier the game's OP_BARRIER left inside the pass (R.bar_pending, DM_VK_BAR_KEEP) does not need it: it is taken only while no draw wrote memory, a later writing draw
+// sets R.swrite, and the draw bar_hazard ends the pass for needs the pass's reads done (the execution dependency) and its attachment writes visible (the memory scope).
+// Invariant (what a scoped end relies on): every transfer, clear or compute command recorded into g_cb is followed, before the next pass ends, by a barrier whose source
+// scope includes its stage and its writes (vka_barrier, a dispatch's pending one that the pass's first draw settles, vka_transfer_write_barrier after the inline uniform
+// copies, or mesh_barrier for the task/mesh fallback's own buffers); a new path that records one without that makes a later scoped pass end unsafe
+// (dm/tools/tests/test_vk_rp_scope.py checks the recording sites). Not ported: Erick's execution-only barrier for a pass that wrote nothing (25c9a68): every pass here
+// stores its attachments (storeOp STORE, an attachment write even where no pixel changed, which a tiler's resolve may land late), and that is fixed at vkCmdBeginRendering,
+// before the pass's draws are known. DM_VK_RP_SCOPE=0 (live, default 1): the full barrier at every pass end, as before, for an A/B
+static uint64_t g_rp_scoped, g_rp_full, g_rp_scoped_kept, g_bar_dedup, g_mesh_guest_bar;
+static int g_rp_force_full, g_rp_last_full = 1;
+// Pass ends by recording site (vka.h vka_rp_end): an open-addressed table of (file, line) keys, filled lock-free (a site is claimed by compare-and-swap of its key)
+#define RPS_N 64
+static struct { _Atomic uint64_t key; const char *file; _Atomic uint64_t n; uint64_t n0; } g_rps[RPS_N];
+static void rps_count(const char *file, int line) {
+    uint64_t k = (uint64_t)(uintptr_t)file * 31 + (uint64_t)line + 1;
+    for (unsigned i = 0, h = (unsigned)(k * 0x9E3779B97F4A7C15ull >> 58); i < RPS_N; i++, h = (h + 1) % RPS_N) {
+        uint64_t cur = atomic_load(&g_rps[h].key);
+        if (!cur) { uint64_t z = 0; if (atomic_compare_exchange_strong(&g_rps[h].key, &z, k)) { g_rps[h].file = file; cur = k; } else cur = z; }
+        if (cur == k) { atomic_fetch_add(&g_rps[h].n, 1); return; }
+    }
+}
+static size_t rps_stats(char *b, size_t n, double frames) {   // the busiest sites since the last line, per frame
+    int idx[RPS_N], m = 0; uint64_t d[RPS_N];
+    for (int i = 0; i < RPS_N; i++) { uint64_t now = atomic_load(&g_rps[i].n); d[i] = now - g_rps[i].n0; g_rps[i].n0 = now; if (d[i] && g_rps[i].file) idx[m++] = i; }
+    for (int i = 1; i < m; i++) for (int j = i; j > 0 && d[idx[j]] > d[idx[j - 1]]; j--) { int t = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = t; }
+    size_t o = 0;
+    for (int i = 0; i < m && i < 10 && o < n; i++) {
+        const char *f = g_rps[idx[i]].file, *s = strrchr(f, '/'); if (s) f = s + 1;
+        uint64_t line = (atomic_load(&g_rps[idx[i]].key) - 1) - (uint64_t)(uintptr_t)g_rps[idx[i]].file * 31;
+        o += (size_t)snprintf(b + o, n - o, "%s%s:%llu %.1f", i ? ", " : "", f, (unsigned long long)line, d[idx[i]] / frames);
+    }
+    return o > n ? n : o;
+}
+void vka_rp_end_at(const char *file, int line) {
     if (PC.n) pc_flush();
     if (!R.on) return;
+    rps_count(file, line);
     vka_oq_pass_end();   // an occlusion query active in the pass ends inside it
     vk.vkCmdEndRendering(g_cb);
-    vka_barrier(g_cb);   // the pass's writes before whatever reads them next (copies, the present, the next pass's samples)
+    // The pass's writes before whatever reads them next (copies, the present, the next pass's samples), and its reads before whatever writes over them ("Pass-end barriers")
+    int full = g_rp_force_full || R.swrite || vka_nan_on() || !VKA_ENV("DM_VK_RP_SCOPE", 1);
+    if (full) { g_rp_full++; vka_barrier(g_cb); }
+    else { g_rp_scoped++; if (R.bar_pending) g_rp_scoped_kept++; vka_attachment_write_barrier(g_cb); vka_gbar_pass_end(g_cb); }
+    g_rp_last_full = full;
+    // The inline updates kept in the pass (vka_exec.c "Inline uniform updates"): copied after that barrier, which orders the pass's in-place reads of their ranges first
+    // (Erick's 9f04ea6 copied before it: a write-after-read race; the scoped barrier's source stages take in every stage that reads them); the copies' own transfer barrier
+    // publishes them
+    if (vka_ub_active()) vka_ub_flush_pass(g_cb);
     R.on = 0; vka_tex_feedback(NULL, NULL, 0);
     if (vka_nan_on()) vka_nan_pass(g_cb, R.cim, R.clv, R.cl0, R.nci);
+}
+static int rp_end_was_full(void) { return g_rp_last_full; }   // the last pass ended with a full barrier (vka_mesh.inc mesh_control)
+// A game barrier (OP_BARRIER, not taken inside the pass) that ends the open pass: the pass ends with a full barrier, which is the barrier the game asked for, so the caller
+// records no second one (after Erick's 18ae7be / 83a225e / e30c00a, for every game). 1 = covered. Not with DM_VK_NANSCAN (its pass scan records commands after the
+// pass's barrier). With a pass open no clear waits (PC is empty), and vka_tex_feedback is the host's; the inline updates kept in the pass (DM_VK_UB_DEFER) are copied
+// after the full barrier, so the game's barrier now comes before those copies: they stay ordered for everything after by their own transfer barrier (to ALL_COMMANDS,
+// MEMORY_READ / MEMORY_WRITE), and their sources are fresh scratch no earlier work touched. (vka_gbar.c then sees other work after the full barrier, not nothing.)
+// DM_VK_BAR_DEDUP=0 (live, default 1): the pass's barrier and the game's full one after it, as before
+int vka_rp_end_covers_barrier(void) {
+    int covered = R.on && !vka_nan_on() && VKA_ENV("DM_VK_BAR_DEDUP", 1);
+    g_rp_force_full = 1; vka_rp_end(); g_rp_force_full = 0;
+    if (covered) g_bar_dedup++;
+    return covered;
+}
+// Whether an inline update at [addr, addr + size) can wait for the open pass's end (vka_exec.c "Inline uniform updates", DM_VK_UB_DEFER): 0 = it can, else why not. Not when
+// the pass has written memory (a draw's store could come before the update and must not be overwritten by it at the end; also why a later draw that stores into an
+// overlapping range ends the pass: ub_hazard), after a game barrier taken in it (DM_VK_BAR_KEEP: the draws after it are checked against what came before, and the
+// update would come after), with clears waiting (pc_flush records outside the pass), or over a target's storage, or a target whose storage is not known
+static int ub_over_tex(uint64_t addr, uint64_t size, const tex_t *t) {
+    if (!t) return 0;
+    if (!t->mem || !t->L.size) return 1;
+    uint64_t m = (uint64_t)(uintptr_t)t->mem;
+    return addr <= m ? m - addr < size : addr - m < t->L.size;
+}
+int vka_rp_ub_refuse(uint64_t addr, uint64_t size) {
+    if (!R.on || !size) return VKA_UBR_CLOSED;
+    if (R.swrite) return VKA_UBR_SWRITE;
+    if (R.bar_pending) return VKA_UBR_BAR;
+    if (PC.n) return VKA_UBR_CLEARS;
+    if (R.has_rt) {
+        for (int i = 0; i < R.rt.n && i < 8; i++) if (ub_over_tex(addr, size, R.rt.color[i])) return VKA_UBR_TARGET;
+        if (ub_over_tex(addr, size, R.rt.depth)) return VKA_UBR_TARGET;
+    }
+    return VKA_UBR_OK;
 }
 static void rt_range(const vka_img *im, const view_t *v, int has_v, uint32_t *lv, uint32_t *l0, uint32_t *nl) {
     *lv = has_v && v->set_levels ? v->base_level : 0;
@@ -296,22 +385,41 @@ int vka_pass_keep(void) { return g_pass_keep; }
 // load of every attachment on a tiler (the next draw reopens it with LOAD). Inside a pass Vulkan already keeps the attachment writes of draws in rasterization order, so
 // what a barrier between two draws of one pass can order is: memory the earlier draws wrote with shader stores (the pass then ends at once, as nvn_mtl.m's OP_BARRIER
 // does for a pass with shader writes), and an attachment of the pass that a later draw samples (a feedback read: the pass ends before that draw, bar_hazard). Everything
-// else the draws read was written before the pass began, behind the barrier that ended what wrote it. DM_VK_BAR_KEEP=1 takes such barriers inside the pass (live;
-// default 0 until phone-checked); the counts are in the replay statistics line either way
+// else the draws read was written before the pass began, behind the barrier that ended what wrote it. DM_VK_BAR_KEEP=1 takes such barriers inside the pass. Why that is
+// correct for every game: Vulkan keeps a pass's attachment writes in rasterization order; bar_hazard ends the pass at the first later draw that writes memory, reads the
+// pool directly, has bindings the walk could not read, or samples a target or what may share its memory (vka_tex_id_in_pass, alias-aware since b6a3bfb); a barrier is
+// kept only while no draw of the pass wrote memory (R.swrite); every op that records GPU work outside the pass ends it first (vka_exec.c: dispatches, copies, clears of
+// other targets, inline updates not kept in it), and the sync records the pass stays open across (events, counters, fences, waits) record no memory access of their own
+// that the barrier would order, so whatever comes after the pass is ordered after all of its draws by vka_rp_end's barrier: the kept barrier is put off to the pass end,
+// never dropped. Banana Native has
+// shipped it on since v0.2.0 (eden/v0.3.11 vka_draw.c). Live, default 1 since 2026-11-13 (was 0; the phone A/B is open: docs/reference/rendering.md); the counts and
+// why kept passes ended later are in the replay statistics line either way
 int vka_rp_game_barrier(uint32_t bits) {
     (void)bits;
     if (!R.on) return 0;
     g_bar_in++;
-    if (R.swrite || !VKA_ENV("DM_VK_BAR_KEEP", 0)) return 0;
+    if (R.swrite || !VKA_ENV("DM_VK_BAR_KEEP", 1)) return 0;
     R.bar_pending = 1; g_bar_kept++;
     return 1;
 }
 void vka_rp_bar_stats(char *b, size_t n, double frames) {
-    static uint64_t i0, k0, l0;
-    if (frames <= 0 || g_bar_in == i0) { if (n) b[0] = 0; i0 = g_bar_in; k0 = g_bar_kept; l0 = g_bar_late; return; }
-    snprintf(b, n, "game barriers inside a draw pass per frame: %.1f, %.1f taken inside it (DM_VK_BAR_KEEP), %.1f of those ended it later at a draw sampling its targets or writing memory",
-             (g_bar_in - i0) / frames, (g_bar_kept - k0) / frames, (g_bar_late - l0) / frames);
-    i0 = g_bar_in; k0 = g_bar_kept; l0 = g_bar_late;
+    static uint64_t i0, k0, l0, s0, f0, sk0, dd0, mg0, w0[BH_N];
+    size_t o = 0; if (n) b[0] = 0;
+    if (frames > 0 && g_bar_in != i0)
+        o += (size_t)snprintf(b, n, "game barriers inside a draw pass per frame: %.1f, %.1f taken inside it (DM_VK_BAR_KEEP), %.1f of those ended it later at a draw (%.1f writing memory, "
+                              "%.1f reading the pool directly, %.1f with bindings not walked, %.1f sampling a target or what may share its memory)",
+                              (g_bar_in - i0) / frames, (g_bar_kept - k0) / frames, (g_bar_late - l0) / frames, (g_bar_late_why[BH_WRITES] - w0[BH_WRITES]) / frames,
+                              (g_bar_late_why[BH_POOL] - w0[BH_POOL]) / frames, (g_bar_late_why[BH_WALK] - w0[BH_WALK]) / frames, (g_bar_late_why[BH_TEX] - w0[BH_TEX]) / frames);
+    if (o > n) o = n;   // (snprintf returns what it would have written)
+    memcpy(w0, g_bar_late_why, sizeof w0);
+    if (frames > 0 && (g_rp_scoped != s0 || g_rp_full != f0 || g_bar_dedup != dd0 || g_mesh_guest_bar != mg0) && o < n)   // "Pass-end barriers"
+        snprintf(b + o, n - o, "%spass ends per frame: %.1f attachment-scoped (%.1f with a kept game barrier), %.1f full (DM_VK_RP_SCOPE); full barriers saved after a pass-ending game barrier %.1f (DM_VK_BAR_DEDUP); task/mesh fallback batch barriers widened to full for guest writes %.1f",
+                 o ? "; " : "", (g_rp_scoped - s0) / frames, (g_rp_scoped_kept - sk0) / frames, (g_rp_full - f0) / frames, (g_bar_dedup - dd0) / frames, (g_mesh_guest_bar - mg0) / frames);
+    i0 = g_bar_in; k0 = g_bar_kept; l0 = g_bar_late; s0 = g_rp_scoped; f0 = g_rp_full; sk0 = g_rp_scoped_kept; dd0 = g_bar_dedup; mg0 = g_mesh_guest_bar;
+    if (frames > 0) {   // which recording sites ended the passes (vka.h vka_rp_end)
+        o = strlen(b);
+        if (o + 40 < n) { size_t h = (size_t)snprintf(b + o, n - o, "%spass ends by site per frame: ", o ? "; " : ""); size_t r = rps_stats(b + o + h, n - o - h, frames); if (!r) b[o] = 0; }
+    }
 }
 int vka_rp_is_open(void) { return R.on; }
 int vka_rp_open_for(const p_set_rt *rt, int has_rt) { return R.on && rt_same(rt, has_rt, &R.rt, R.has_rt); }
@@ -451,14 +559,41 @@ static VkPrimitiveTopology topo_class(VkPrimitiveTopology t) {   // the pipeline
 }
 
 // ---------- Guest memory as descriptors ----------
-static int cpu_read(uint64_t addr, void *out, size_t n) {   // guest bytes as the CPU sees them now
-    if (vka_addr(addr, n, NULL, NULL, NULL)) { memcpy(out, (const void *)(uintptr_t)addr, n); return 1; }
-    return !plat_mem_read(addr, out, n);
+static int cpu_read(uint64_t addr, void *out, size_t n) {   // guest bytes as the CPU sees them now, with the inline updates kept in the open pass over them (vka_ub_cpu_overlay)
+    if (vka_addr(addr, n, NULL, NULL, NULL)) memcpy(out, (const void *)(uintptr_t)addr, n);
+    else if (plat_mem_read(addr, out, n)) return 0;
+    vka_ub_cpu_overlay(addr, out, n);
+    return 1;
 }
 static int rd_cb(void *ctx, uint64_t addr, void *out, size_t n) { (void)ctx; return cpu_read(addr, out, n); }
 // A uniform buffer: bound in place when Vulkan's offset alignment allows, else a copy of what the CPU sees now (a GPU write earlier in this submission is missed: logged)
+static inline uint64_t ubo_size(uint64_t size) { return !size || size > V.ub_range ? (size ? V.ub_range : 65536 < V.ub_range ? 65536 : V.ub_range) : size; }   // what ubo_desc binds
+// An inline update kept in the open pass over a uniform range (vka_exec.c "Inline uniform updates"): a shadow, the bytes as the GPU will have them after the writes before it
+// (vka_tex_gw_shadow_read) with the kept updates over them, in scratch until the submission's fence. A memo of the last UB_MEMO: the same range with no deferral or flush
+// since (vka_ub_seq; it changes at each, so a span of an earlier submission never matches) binds the same span. ub_hazard makes the draw's shadows before the pass is
+// used (and ends the pass, landing the updates, when one cannot be made: a copy or an unknown write over the range, no scratch), so ubo_desc finds each in the memo.
+// *made: 1 when a new memo slot was taken (ub_hazard counts them against the memo's size)
+enum { UB_MEMO = 32 };
+static struct { uint64_t addr, size, seq; vka_span s; } g_ub_memo[UB_MEMO]; static unsigned g_ub_memo_slot;
+static int ub_shadow(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *bi, int *made) {
+    uint64_t seq = vka_ub_seq();
+    if (made) *made = 0;
+    for (int i = 0; i < UB_MEMO; i++) if (g_ub_memo[i].seq == seq && g_ub_memo[i].addr == addr && g_ub_memo[i].size == size) { *bi = (VkDescriptorBufferInfo){g_ub_memo[i].s.buf, g_ub_memo[i].s.off, size}; return 1; }
+    vka_span s;
+    if (!vka_scratch(size, V.ub_align, &s) || !vka_tex_gw_shadow_read(addr, s.ptr, size)) return 0;
+    vka_ub_overlay(addr, s.ptr, size);
+    g_ub_memo[g_ub_memo_slot++ % UB_MEMO] = (typeof(g_ub_memo[0])){addr, size, seq, s};
+    if (made) *made = 1;
+    *bi = (VkDescriptorBufferInfo){s.buf, s.off, size}; return 1;
+}
 static int ubo_desc(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *bi) {
-    if (!size || size > V.ub_range) size = size ? V.ub_range : 65536 < V.ub_range ? 65536 : V.ub_range;
+    size = ubo_size(size);
+    // (a shadow ub_hazard did not make: bound as below rather than the draw dropped, in place with the bytes before the kept update, or as the CPU's copy, which has the
+    // kept updates over it: cpu_read)
+    if (vka_ub_pending_overlap(addr, size)) {
+        if (ub_shadow(addr, size, bi, NULL)) return 1;
+        VRED_ONCE("deferred uniform shadow at %#llx (+%llu) not made before the pass: bound without the kept update", (unsigned long long)addr, (unsigned long long)size);
+    }
     VkBuffer b; VkDeviceSize o;
     uint64_t run = vka_addr_run(addr, size, &b, &o);
     if (run && !(o % V.ub_align) && !(addr % V.ub_align)) { *bi = (VkDescriptorBufferInfo){b, o, run}; return 1; }
@@ -702,6 +837,7 @@ static void texstat_rt(const vka_shader *fs, const p_set_rt *rt, int has_rt) {  
 static void texstat_at(void) {   // DM_VK_TEXSTAT_AT, right after the noted draw or dispatch (vka_draw, vka_dispatch): its textures, targets and buffers copied out
     if (g_tst_at != 1 || !g_ntst || !g_cb) return;
     g_tst_at = 2; vka_rp_end();
+    vka_disp_settle(g_cb);   // (its image copies read what the dispatch wrote: after the barrier it left pending, "Dispatch order")
     for (int k = 0; k < g_ntst; k++) { texstat_t *t = &g_tst[k]; cap_tsub *all; uint64_t total;
         if (!t->im || !t->im->inited || !vcap_subs(t->im, &all, &total)) continue;
         if (vcap_hbuf_make(&t->hb, all[0].bytes)) { vcap_img_copy(g_cb, t->im, &all[0], 1, t->hb.b, 0); t->hbn = (size_t)all[0].bytes; }
@@ -879,8 +1015,12 @@ static int push_same(VkPipelineBindPoint bp, VkPipelineLayout layout) {
     int c = bp == VK_PIPELINE_BIND_POINT_COMPUTE;
     if (VKA_ENV("DM_VK_PUSH_DEDUP", 1) && g_pd[c].n == k && !memcmp(g_pd[c].w, buf, k * sizeof *buf)) { g_pd_skip++; g_pd_skip_all++; return 1; }
     // DM_VK_PUSH_DELTA=1 (live, default 0 until phone-checked): the same layout and the same writes in the same order as the last push, some of them with other descriptors:
-    // only those are pushed. Vulkan lets push descriptors be updated incrementally; the others stay as the last push left them (until the set is disturbed: a new command
-    // buffer or part, a set bound in its place, which forget g_pd)
+    // only those are pushed. The Vulkan rule it relies on (the spec's "Push Descriptor Updates", paraphrased): a push updates only the descriptors it names; the others
+    // keep the values the last push gave them until the set is disturbed (a set bound in its place, or a layout bind incompatible for set 0), and a new command buffer
+    // starts with none. What keeps g_pd true, so a skipped or partial push never leaves stale descriptors: every set-0 disturber on g_cb forgets it -- vka_dyn_invalidate
+    // (a command buffer or part switch, vka_nanscan.c's own binds), bind_sets' non-push path, the mesh count computes (vka_mdx_batch, mesh_ind_args) and vka_mesh.inc's control pass; a
+    // new internal compute or bind on g_cb must reset g_pd too. Handles are never recycled inside a recording (destruction goes through vka_after), so the same words
+    // name the same objects. Banana Native eden/v0.3.11 keeps it at 0 as well
     g_dwn = 0;
     if (VKA_ENV("DM_VK_PUSH_DELTA", 0) && g_pd[c].n == k && g_pd[c].w[0] == buf[0] && g_pd[c].w[1] == buf[1]) {
         int ok = 1;
@@ -895,6 +1035,10 @@ static int push_same(VkPipelineBindPoint bp, VkPipelineLayout layout) {
     if (g_dwn) { g_pd_delta_w += g_dwn; g_pd_delta_all += g_w.n; return 2; }
     return 0;
 }
+static vka_span g_mesh_info;
+static vka_shader *g_mesh_pull, *g_mesh_fragment;
+static int g_mesh_aux;
+static int mesh_aux_writes(void);
 static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, VkPipelineBindPoint bp, c0_at *c0) {
     g_w.n = 0;
     int any_pool = 0;
@@ -917,6 +1061,7 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
         g_w.bi[k] = (VkDescriptorBufferInfo){cs.buf, cs.off, n};
         g_w.w[k] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = VKA_GS_CLAIM_BINDING, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &g_w.bi[k]};
     }
+    if (g_mesh_aux && !mesh_aux_writes()) return 0;
     uint64_t t2_ = g_prof ? cntvct() : 0;
     if (lay->push) { int ps = g_w.n ? push_same(bp, lay->layout) : 1;
                      if (ps == 0) vk.vkCmdPushDescriptorSetKHR(g_cb, bp, lay->layout, 0, g_w.n, g_w.w);
@@ -929,7 +1074,11 @@ static int bind_sets(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
         vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 0, 1, &set, 0, NULL);
     }
     if (g_prof) g_ps[2] += cntvct() - t2_;
-    if (any_pool) { VkDescriptorSet ps = vka_bindless_set(); if (ps) vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 1, 1, &ps, 0, NULL); else VRED_ONCE("a shader reads the texture pool and there is no pool set"); }
+    if (any_pool) {   // set 1 the pool, and in the same call set 2 the pool reads' bitmap when they are reported (vka_tex.c "Texture pool reads": this submission copies it out)
+        vka_tex_pfb_draw();
+        VkDescriptorSet ps[2] = {vka_bindless_set(), vka_pfb_set()};
+        if (ps[0]) vk.vkCmdBindDescriptorSets(g_cb, bp, lay->layout, 1, ps[1] ? 2 : 1, ps, 0, NULL); else VRED_ONCE("a shader reads the texture pool and there is no pool set");
+    }
     return 1;
 }
 // Images first used by a draw (from the walk, walk_all), or remade with storage use (vka_tex.c img_storage_upgrade): dry = only whether there is one
@@ -958,16 +1107,18 @@ static int draw_writes(vka_shader *const sh[VKA_NSTAGE], const vka_dstate *d) {
     return 0;
 }
 // After a game barrier taken inside the pass (vka_rp_game_barrier): this draw needs the pass ended first when it writes memory (earlier draws of the pass may read what it
-// overwrites), reads the texture pool directly (any texture, the pass's targets among them), or samples a texture whose image the pass draws into
+// overwrites), reads the texture pool directly (any texture, the pass's targets among them), has bindings the walk could not read, or samples a texture whose image the
+// pass draws into or may share memory with (vka_tex_id_in_pass). 0 = none, else the reason (BH_*), counted apart in the replay statistics (g_bar_late_why)
 static int bar_hazard(vka_shader *const sh[VKA_NSTAGE], const vka_dstate *d) {
-    if (draw_writes(sh, d)) return 1;
+    if (draw_writes(sh, d)) return BH_WRITES;
     for (int st = 0; st < VKA_NSTAGE; st++) {
         if (!sh[st] || (st == 1 && d->rast_discard)) continue;
-        if (g_wk.pool[st] || g_wk.n[st] < 0) return 1;
+        if (g_wk.n[st] < 0) return BH_WALK;
+        if (g_wk.pool[st]) return BH_POOL;
         const vka_res *r = g_wk.r[st];
-        for (int i = 0; i < g_wk.n[st]; i++) if ((r[i].what == VKA_R_TEX || r[i].what == VKA_R_TBUF) && r[i].tid && vka_tex_id_in_pass(r[i].tid)) return 1;
+        for (int i = 0; i < g_wk.n[st]; i++) if ((r[i].what == VKA_R_TEX || r[i].what == VKA_R_TBUF) && r[i].tid && vka_tex_id_in_pass(r[i].tid)) return BH_TEX;
     }
-    return 0;
+    return BH_NONE;
 }
 
 // ---------- Draws ----------
@@ -1115,10 +1266,18 @@ static int mesh_count_ready(void) {   // the record's pipeline, made at the firs
     if (r) { VRED("indirect mesh draws: the count's pipeline not made (%d): each count is copied as the GPU wrote it, not checked against the device's workgroup limit", r); return 0; }
     st = 1; return 1;
 }
-static int mesh_ind_args(uint64_t ind, uint32_t maxg, vka_span *out) {
+enum { MDX_MAX = 1024 };
+static struct { uint64_t ind; vka_span s; } g_mdx[MDX_MAX];
+static int g_mdx_n;
+static uint64_t g_mdx_batches, g_mdx_copies;
+void vka_mdx_inval(void) { g_mdx_n = 0; }
+int vka_mdx_has(uint64_t ind) {
+    for (int i = 0; i < g_mdx_n; i++) if (g_mdx[i].ind == ind) return 1;
+    return 0;
+}
+static int mesh_ind_one(uint64_t ind, uint32_t maxg, vka_span *out, int gpu) {
     VkBuffer b; VkDeviceSize o, al = V.sb_align > 16 ? V.sb_align : 16;   // (the span is bound as a storage buffer: its offset at the storage alignment)
     if (!vka_addr(ind, 8, &b, &o, NULL) || (o & 3) || !vka_scratch(12, al, out)) return 0;
-    int gpu = mesh_count_ready();
     static const uint32_t init[3] = {0, 1, 1}; memcpy(out->ptr, init, sizeof init);
     uint32_t cf[2];
     if (cpu_read(ind, cf, sizeof cf)) {
@@ -1128,21 +1287,50 @@ static int mesh_ind_args(uint64_t ind, uint32_t maxg, vka_span *out) {
         if (cf[0] > maxg && atomic_fetch_add(&nm, 1) < 4) VRED("indirect mesh draw of %u workgroups (the CPU's view of the record at %#llx): more than the device's %u in one dimension, %s", cf[0], (unsigned long long)ind, maxg,
                                                                gpu ? "not drawn (as a direct draw past the limit)" : "drawn as the GPU's record says (no count pipeline)");
     }
-    static uint64_t n, nsplit; n++;
-    if (R.on) { nsplit++; vka_rp_end(); }
-    if (!(n & (n - 1)) && __builtin_ctzll(n) % 4 == 0) VLOG("indirect mesh draws: %llu so far, %llu of them ended an open pass for their count", (unsigned long long)n, (unsigned long long)nsplit);
     if (gpu) {   // the record bound from the storage alignment below it, at is its word there
         VkDeviceSize base = o / V.sb_align * V.sb_align;
         VkDescriptorBufferInfo bi[2] = {{b, base, o - base + 4}, {out->buf, out->off, 12}};
         VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[0]},
                                      {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[1]}};
         uint32_t pc[2] = {(uint32_t)((o - base) / 4), maxg};
-        vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mc_pipe);
         vk.vkCmdPushDescriptorSetKHR(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mc_lay, 0, 2, w);
         vk.vkCmdPushConstants(g_cb, g_mc_lay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
         vk.vkCmdDispatch(g_cb, 1, 1, 1);
-        g_pd[1].n = 0;   // the dispatches' last push is no longer bound (push_same)
     } else { VkBufferCopy c = {o, out->off, 4}; vk.vkCmdCopyBuffer(g_cb, b, out->buf, 1, &c); }
+    return 1;
+}
+void vka_mdx_batch(const uint64_t *inds, int n) {
+    if (!g_cb || !draws_on() || !statics() || !n) return;
+    if (g_mdx_n + n > MDX_MAX) { VRED_ONCE("indirect mesh draws: more than %d records between two writes: the rest converted one by one", MDX_MAX); return; }
+    if (R.on) vka_rp_end();
+    int gpu = mesh_count_ready(), any = 0;
+    uint32_t maxg = V.task && V.task_groups && V.task_groups < V.mesh_groups ? V.task_groups : V.mesh_groups;
+    if (gpu) vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mc_pipe);
+    for (int k = 0; k < n; k++) {
+        vka_span s;
+        if (!mesh_ind_one(inds[k], maxg, &s, gpu)) continue;
+        g_mdx[g_mdx_n].ind = inds[k]; g_mdx[g_mdx_n++].s = s; g_mdx_copies++; any = 1;
+    }
+    if (gpu) g_pd[1].n = 0;   // (the count compute pushed its own set 0: the draws' last compute push is gone, push_same "PUSH_DELTA")
+    if (any) {
+        vka_barrier(g_cb);
+        g_mdx_batches++;
+        if (g_mdx_batches == 1 || g_mdx_batches % 20000 == 0)
+            VLOG("indirect mesh draws: {count, first} records converted in batches before the render pass: %llu records in %llu batches",
+                 (unsigned long long)g_mdx_copies, (unsigned long long)g_mdx_batches);
+    }
+}
+static int mesh_ind_args(uint64_t ind, uint32_t maxg, vka_span *out) {
+    for (int i = 0; i < g_mdx_n; i++) if (g_mdx[i].ind == ind) { *out = g_mdx[i].s; return 1; }
+    static uint64_t n, nsplit; n++;
+    if (R.on) { nsplit++; vka_rp_end(); }
+    int gpu = mesh_count_ready();
+    if (gpu) vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mc_pipe);
+    int ok = mesh_ind_one(ind, maxg, out, gpu);
+    if (gpu) g_pd[1].n = 0;   // (the count compute pushed its own set 0: the draws' last compute push is gone, push_same "PUSH_DELTA")
+    if (!ok) return 0;
+    if (g_mdx_n < MDX_MAX) { g_mdx[g_mdx_n].ind = ind; g_mdx[g_mdx_n++].s = *out; }
+    if (!(n & (n - 1)) && __builtin_ctzll(n) % 4 == 0) VLOG("indirect mesh draws: %llu single conversions so far, %llu of them ended an open pass for their count", (unsigned long long)n, (unsigned long long)nsplit);
     vka_barrier(g_cb);
     return 1;
 }
@@ -1153,6 +1341,9 @@ static void draw_log(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
     uint64_t vka_frame(void); static unsigned long long nd; static uint64_t fr = ~0ull; static int lg;
     if (vka_frame() != fr) { fr = vka_frame(); lg = (int)VKA_ENV("DM_VK_DRAW_LOG", 0); nd = 0; }
     unsigned long long k = nd++; if (lg <= 0 || k >= (unsigned long long)lg) return;
+    // (sh NULL: a zero-count draw vka_draw returns early for, DM_VK_ZERO_DRAW. It still takes its index, as it did when it was recorded, so an index means the same draw
+    // with the switch on or off)
+    if (!sh) { VLOG("draw %llu: %s 0: nothing recorded (DM_VK_ZERO_DRAW)", k, dw ? "count" : "indexed"); return; }
     char t[400]; size_t o = 0; t[0] = 0;
     for (int i = 0; i < R.nci && o < sizeof t; i++) o += (size_t)snprintf(t + o, sizeof t - o, "%s%llu %ux%u lv %u", i ? ", " : "", (unsigned long long)R.cim[i]->serial, R.cim[i]->w, R.cim[i]->h, R.clv[i]);
     const blend_st *b = &d->blend[0];
@@ -1186,7 +1377,55 @@ static void draw_log(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], cons
         VLOG("draw %llu:   stage %d binding %u%s texture ID %d sampler ID %d dim %#x: %s", k, st, r->binding, r->what == VKA_R_IMG ? " (image)" : "", r->tid, r->sid, r->dim, why);
     }
 }
+// Whether this draw could read an inline update kept in the open pass other than through a uniform shadow (vka_exec.c "Inline uniform updates"): then the pass ends before
+// it, so the kept copies land first. Decided after walk_all and before make_images and rp_begin: the descriptors are written once the pass is open (bind_sets), where
+// nothing can end it any more. A hazard: bindless pool reads (the GPU reads the handles and what they name), raw global memory (any address), a buffer texture (bound in
+// place), a sampled or storage texture over a kept range (or not known: vka_tex_id_overlaps_pending_ub), a storage buffer over one, a uniform buffer over one that the
+// shadow cannot read (a copy or an unknown write over it) or that a storage buffer this draw may store into overlaps (its write, noted while the descriptors are written,
+// would make the read refuse), and vertex, index and indirect ranges over one. DM_VK_UB_DEFER_IDX=0 (live): any index buffer or indirect record is one (Erick's rule)
+// The shadows this draw binds are made here, before the pass is used: one that cannot be made (or more new ones than the memo holds) is a hazard, so no draw binds a
+// uniform range without its kept update (ubo_desc's fallback)
+static int ub_hazard(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], const p_draw *dw, const p_draw_idx *di, int mesh) {
+    int made_n = 0;
+    for (int st = 0; st < VKA_NSTAGE; st++) {
+        if (!sh[st]) continue;
+        int n = g_wk.n[st];
+        if (n < 0 || g_wk.pool[st]) return 1;
+        for (int i = 0; i < n; i++) {
+            const vka_res *r = &g_wk.r[st][i];
+            switch (r->what) {
+            case VKA_R_GMEM_MAP: case VKA_R_GMEM_LOG: case VKA_R_TBUF: return 1;
+            case VKA_R_TEX: case VKA_R_IMG: if (r->tid && vka_tex_id_overlaps_pending_ub(r->tid)) return 1; break;
+            case VKA_R_BUF: {
+                if (r->desc == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) { if (vka_ub_pending_overlap(r->addr, r->size)) return 1; break; }
+                uint64_t us = ubo_size(r->size);
+                if (!vka_ub_pending_overlap(r->addr, us)) break;
+                if (!vka_tex_gw_shadow_safe(r->addr, us)) return 1;
+                for (int s2 = 0; s2 < VKA_NSTAGE; s2++) if (sh[s2]) for (int j = 0; j < g_wk.n[s2]; j++) {
+                    const vka_res *q = &g_wk.r[s2][j];
+                    if (q->what == VKA_R_BUF && q->desc == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && (q->flags & DMSH_VK_BF_RW) && ubq_rng(q->addr, q->size, r->addr, us)) return 1;
+                }
+                { VkDescriptorBufferInfo bi; int made; if (!ub_shadow(r->addr, us, &bi, &made)) return 1; if ((made_n += made) > UB_MEMO) return 1; }
+                break; }
+            default: break;
+            }
+        }
+    }
+    if (!mesh) for (int i = 0; i < 16; i++) if (d->vbuf[i].address && vka_ub_pending_overlap(d->vbuf[i].address, d->vbuf[i].size)) return 1;
+    uint64_t ind = dw ? dw->ind : di->ind, mdi = dw ? dw->mdi_cnt : di->mdi_cnt, rec = dw ? 16 : 20;
+    if (!VKA_ENV("DM_VK_UB_DEFER_IDX", 1)) return ind || mdi || (di && di->ibuf);
+    if (di && di->ibuf) {   // a direct draw reads count indices from ibuf (no first index in NVN's record); an indirect one's count is the GPU's: to the end
+        if (vka_ub_pending_overlap(di->ibuf, ubq_index_len(di->itype, di->count, ind || mdi))) return 1;
+    }
+    if (mdi) {   // the whole group is drawn at its first record (vkCmdDraw*IndirectCount): max records of stride, and the count word
+        uint32_t mx = dw ? dw->mdi_max : di->mdi_max, stride = dw ? dw->mdi_stride : di->mdi_stride;
+        if (vka_ub_pending_overlap(ind, ubq_mdi_len(mx, stride, rec)) || vka_ub_pending_overlap(mdi, 4)) return 1;
+    } else if (ind && vka_ub_pending_overlap(ind, rec)) return 1;
+    return 0;
+}
+#include "vka_mesh.inc"
 void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, const p_draw_idx *di) {
+    if (vka_hung()) SKIPQ();
     if (!g_cb || !draws_on() || !statics()) SKIPQ();
     if (!d->inited) vka_dstate_reset(d);
     uint64_t mdi = dw ? dw->mdi_cnt : di->mdi_cnt; int mdi_i = dw ? dw->mdi_i : di->mdi_i;
@@ -1203,11 +1442,30 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         static _Atomic int reported; if (!atomic_exchange(&reported, 1)) VLOG("indirect-count: native GPU count, max %u stride %u", mdi_max, mdi_stride);
     }
     d->b.base_instance = (uint32_t)(dw ? dw->base_instance : di->base_instance);
+    // A direct draw of zero vertices, indices or mesh workgroups records nothing: it runs no invocations, writes no attachment and adds no occlusion sample (no query
+    // begins for it, and an empty query segment reports 0 plus the lost count, the same; with the ring full it no longer counts as one lost sample). The stream is then
+    // the guest's without the draw: a clear still pending on its targets goes out through pc_flush at the next pass boundary or non-state op. It sits before the mesh
+    // split, so it covers plain, native mesh and emulated mesh draws, but not the emulated mesh path's own recursive draw (g_mesh_pull: its count is synthetic and it draws
+    // indirectly), indirect-count and indirect draws (the GPU's counts), nor the GPU profiler's frames (which see what the game issued). Negative counts keep their own
+    // paths (== 0 only). A plain return: g_skipped does not move. A plain or indexed draw still takes its DM_VK_DRAW_LOG index (mesh draws never logged at count 0).
+    // Observable differences from the old path: occlusion results (a zero-count draw that hit the full query ring or a SKIP used to add one lost sample, pushing a
+    // report towards visible; it now adds none), command-buffer chunk boundaries (no pass is opened for it), and, for an emulated mesh draw, DM_VK_MESH_DIAG_LIMIT's
+    // ordinals and DM_VK_MESH_BATCH_FIT=0's old count-0 behaviour, which only DM_VK_ZERO_DRAW=0 brings back. DM_VK_ZERO_DRAW=0 (live) records the old path, for an A/B
+    // (docs/reference/rendering.md, "Zero-grid dispatches and zero-count draws")
+    if (!mdi && !g_mesh_pull && !vka_gp_active && !(dw ? dw->ind : di->ind) && (dw ? dw->count : di->count) == 0 && VKA_ENV("DM_VK_ZERO_DRAW", 1)) {
+        if (!(dw && dw->prim == NVN_PRIM_MESH)) draw_log(d, NULL, dw, di);
+        return;
+    }
     vka_shader *sh[VKA_NSTAGE] = {0}; unsigned bad = 0;
     PT(0);
     // An NVN2 mesh draw (nvnCommandBufferDrawMeshTasks, hle_nvn.c): the task (optional) and mesh shaders of one program, the fragment stage's shader, in a mesh pipeline
     // (vka_pso.c pstate_fill) drawn with vkCmdDrawMeshTasksEXT: no vertex input, primitive type or index buffer
     const int mesh = dw && dw->prim == NVN_PRIM_MESH;
+    if (mesh && !V.mesh) {
+        if (R.on && vka_ub_active()) { vka_ub_hazard_end(); vka_rp_end(); }   // (its compute steps read guest memory: inline updates kept in the pass land first, "Inline uniform updates")
+        if (!mesh_emulate(d, rt, has_rt, sc, has_sc, dw)) SKIP("task/mesh compute fallback failed; see shader/descriptor diagnostics");
+        return;
+    }
     if (mesh) {
         // (no fallback without the extension: the translated mesh programs exist only as mesh-stage modules, so a device without them draws neither the direct nor the indirect form)
         if (!V.mesh && VKA_ENV("DM_VK_SKIP_LOG", 0)) {   // diagnostic: what the skipped mesh draw would draw
@@ -1239,10 +1497,11 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         if (!dw->ind && dw->count <= 0) return;   // (an indirect draw's count is the GPU's)
         if (d->tf_on) VRED_ONCE("transform feedback with a mesh draw: drawn without capture");
     } else {
-        for (int st = 0; st < 5; st++) if (!resolve(d->bst[st], st, &sh[st], &bad)) SKIP("draw skipped: no shader library");
+        if (g_mesh_pull) { sh[0] = g_mesh_pull; sh[1] = g_mesh_fragment; }
+        else for (int st = 0; st < 5; st++) if (!resolve(d->bst[st], st, &sh[st], &bad)) SKIP("draw skipped: no shader library");
         if (bad) SKIPQ();   // a refused or missing shader (logged when it was made)
         if (!sh[0]) SKIP("draw with no vertex shader bound: skipped");
-        if (sh[1] && (sh[1]->e->flags & DMSH_VK_F_MESH_PRIM)) SKIP("pixel shader %016llx reads per-primitive mesh outputs and is drawn with a vertex shader: skipped", (unsigned long long)sh[1]->key);
+        if (!g_mesh_pull && sh[1] && (sh[1]->e->flags & DMSH_VK_F_MESH_PRIM)) SKIP("pixel shader %016llx reads per-primitive mesh outputs and is drawn with a vertex shader: skipped", (unsigned long long)sh[1]->key);
         if (d->rast_discard && d->tf_on) SKIP("transform feedback is not on Vulkan yet (F_TF): the draw is skipped");
         if (d->tf_on) VRED_ONCE("transform feedback is not on Vulkan yet: the draw is drawn without capture");
     }
@@ -1274,8 +1533,10 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     // Images first used by this draw are made (cleared or uploaded) outside the render pass, then the pass opens over the bound targets
     PT(2);
     walk_all(d, sh);
+    if (R.on && vka_ub_active() && ub_hazard(d, sh, dw, di, mesh)) { vka_ub_hazard_end(); vka_rp_end(); }   // (vka_exec.c "Inline uniform updates")
     if (make_images(d, sh, 1)) { vka_rp_end(); make_images(d, sh, 0); }
-    if (R.on && R.bar_pending && bar_hazard(sh, d)) { g_bar_late++; vka_rp_end(); }   // the game barrier taken inside the pass is needed here: the pass ends (its full barrier) first
+    int bh = R.on && R.bar_pending ? bar_hazard(sh, d) : BH_NONE;
+    if (bh) { g_bar_late++; g_bar_late_why[bh]++; vka_rp_end(); }   // the game barrier taken inside the pass is needed here: the pass ends (its barrier: the draws before it read, its attachment writes visible) first
     if (vka_nan_on() >= 2 && sh[1] && !d->rast_discard && vka_nan_probe(sh[1]->key)) {   // DM_VK_NANSCAN_FS: this draw's sampled textures, scanned before it
         char why[8]; int n = vka_walk(&d->b, 1, sh[1]->e, sh[1]->b, sh[1]->lib->h->ssbo_align, 0, rd_cb, NULL, g_res, 512, NULL, why, sizeof why), m = 0;
         static vka_img *ims[64]; static int bs[64], ts[64];
@@ -1418,7 +1679,27 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     if (restart) { uint32_t all = di->itype == 0 ? 0xff : di->itype == 1 ? 0xffff : 0xffffffffu; if (d->restart.index != all) VRED_ONCE("primitive restart index %#x is not the all-ones index Vulkan restarts at", d->restart.index); }
     if (!mesh) DY_SET1(pr, (uint32_t)(restart), vk.vkCmdSetPrimitiveRestartEnable(g_cb, DY.pr));
     DY.valid = 1;
-    vka_oq_draw();   // counting samples passed: the pass's first draw (or the first after a report or reset) begins an occlusion query
+    // Counting samples passed: the pass's first draw (or the first after a report or reset) begins an occlusion query. With DM_VK_OQ_REUSE (or its trace) the first draw
+    // of each report's segment names the report by content: k1 its shaders, counts, index and first vertex buffer; k2 the bytes of its vertex stage's uniform buffers
+    // (the object's transform), since the game's report addresses move every frame (docs/RESULTADOS-ETAPA1-2026-11-15.md, seventh step)
+    { uint64_t k1 = 0, k2 = 0;
+      if (vka_oq_key_wanted()) {
+          #define OQMIX(h, v) ((h) = ((h) ^ (uint64_t)(v)) * 0x100000001b3ull, (h) ^= (h) >> 29)
+          k1 = 0xcbf29ce484222325ull; OQMIX(k1, sh[0] ? sh[0]->key : 0); OQMIX(k1, sh[1] ? sh[1]->key : 0); OQMIX(k1, mesh ? sh[7]->key : 0);
+          OQMIX(k1, dw ? (uint64_t)(uint32_t)dw->count : (uint64_t)(uint32_t)di->count); OQMIX(k1, dw ? (uint64_t)(uint32_t)dw->first : di->ibuf); OQMIX(k1, di ? (uint64_t)(uint32_t)di->base_vertex : 0);
+          OQMIX(k1, (uint64_t)(uint32_t)(dw ? dw->instances : di->instances)); OQMIX(k1, d->vbuf[0].address);
+          // A uniform buffer at the address the previous report's first draw had in that binding is the scene's (camera, time), not the object's: left out, so a
+          // camera move does not rename every object (its visibility then changes, which the reuse repeats up to n - 1 frames late, as for a still object)
+          static uint64_t prev[32]; k2 = 0xcbf29ce484222325ull;
+          for (int i = 0; i < g_wk.n[0]; i++) { const vka_res *r = &g_wk.r[0][i];
+              if (r->what != VKA_R_BUF || !r->addr || r->desc == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) continue;
+              uint32_t bi = r->binding & 31; int shared = prev[bi] == r->addr; prev[bi] = r->addr;
+              if (shared) { OQMIX(k2, bi); continue; }
+              uint64_t w[32]; size_t nb = r->size && r->size < sizeof w ? (size_t)r->size & ~(size_t)7 : sizeof w;
+              if (nb && cpu_read(r->addr, w, nb)) for (size_t q = 0; q < nb / 8; q++) OQMIX(k2, w[q]); else OQMIX(k2, r->addr); }
+          #undef OQMIX
+      }
+      vka_oq_draw(k1, k2); }
 
     PT(7);
     // The draw. binst (c0 + 0x644 for the stages, vka_bind.c) is the CPU record's base instance, 0 for an indirect draw; vertex shaders read the word from BaseInstance instead
@@ -1430,6 +1711,9 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         uint32_t maxg = sh[6] ? V.task_groups : V.mesh_groups;
         if ((uint32_t)dw->count > maxg) SKIP("mesh draw of %d workgroups: more than the device's %u in one dimension; skipped", dw->count, maxg);
         vk.vkCmdDrawMeshTasksEXT(g_cb, (uint32_t)dw->count, 1, 1);
+    } else if (g_mesh_pull) {
+        if (g_mesh_compact_on) vk.vkCmdDrawIndirectCount(g_cb, g_mesh_cmds, 16, g_mesh_cmds, 0, g_mesh_compact_max, 16);   // the batch's live groups (vka_mesh.inc mesh_compact)
+        else vk.vkCmdDrawIndirect(g_cb, g_mesh_info.buf, g_mesh_info.off + 24, 1, 16);
     } else if (expand) {   // quads or a line loop: the indices made here, 32-bit, in scratch memory
         uint32_t count = (uint32_t)(dw ? dw->count : di->count), *src = NULL;
         if (di && !(src = read_indices(di->ibuf, di->itype, count))) SKIP("indices at %#llx are not readable: the draw is skipped", (unsigned long long)di->ibuf);
@@ -1464,6 +1748,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         else vk.vkCmdDrawIndexed(g_cb, (uint32_t)di->count, inst, 0, di->base_vertex, binst);
     }
     draw_log(d, sh, dw, di);
+    if (vka_gp_active) vka_gp_draw(sh[0] ? sh[0]->key : 0, sh[1] ? sh[1]->key : 0, sh[7] ? sh[7]->key : 0, sh[6] ? sh[6]->key : 0, (uint32_t)(dw ? dw->count : di->count), inst, ind != 0);
     g_draws++;
     texstat_at();   // (diagnostic: DM_VK_TEXSTAT_AT)
     PT(8);
@@ -1474,10 +1759,59 @@ int dm_sdk_ounce(void);
 static int g_nvn2 = -1;
 void vka_set_nvn2(int on) { g_nvn2 = on != 0; }
 int vka_nvn2(void) { if (g_nvn2 < 0) g_nvn2 = dm_sdk_ounce(); return g_nvn2; }   // first called at a dispatch or a capture, after the modules are loaded
+// ---------- Dispatch order ----------
+// NVN orders a dispatch against the work after it only through the game's barriers (nvnCommandBufferBarrier: ORDER_PRIMITIVES, the invalidations), which the replay
+// records as full barriers (vka_exec.c OP_BARRIER), or narrower between dispatches (vka_gbar.c). The replay used to record a full barrier after every dispatch as well:
+// consecutive dispatches never overlapped, and each paid an ALL_COMMANDS barrier of its own on top of the game's, which on a tiler drains the GPU and flushes its caches
+// (upstream Banana Native measured about 8 us of Adreno 750 GPU time apiece; Pokemon Pokopia's GPU time a frame went from 5 ms to 22 ms as its dispatches grew to
+// about 1,000 a frame; docs/reference/rendering.md "A full barrier after every dispatch"). So the barrier after a dispatch is left pending and recorded only before other
+// GPU work in the same command buffer, which the host's own steps may have needed it for: draws, clears, copies, inline updates and counters (vka_exec.c exec), the
+// indirect group-count copy and DM_VK_TEXSTAT_AT's copies (below), a part's end (chunk) and the submission's end (sub_commit). A full barrier recorded meanwhile, the
+// game's included, settles it (vka_tex.c vka_barrier_at). Host steps inside a dispatch's setup that write into the command buffer (an image's first use or memory of its
+// own, a storage upgrade, uploads) begin with vka_img_barrier on their image or with a full barrier, so they stay ordered after the earlier dispatches.
+// Kept at once: a dispatch whose shared memory is in the spill buffer (the next one reuses its slices), DM_VK_NANSCAN, and DM_VK_DISPATCH_ORDER=1 (live: the barrier
+// after every dispatch, as before, for an A/B)
+_Atomic(VkCommandBuffer) vka_disp_pend;
+static uint64_t g_disp_settled, g_disp_saved, g_disp_n, g_disp_s0, g_disp_v0, g_disp_c0, g_disp_n0;   // settled later / never needed (the next dispatch came first); the stats line's marks
+uint64_t vka_disp_cleared;   // pending barriers a full barrier settled (vka_barrier_at), vka_disp_settle's own included
+void vka_disp_settle(VkCommandBuffer cb) {
+    if (!cb || atomic_load_explicit(&vka_disp_pend, memory_order_relaxed) != cb) return;
+    g_disp_settled++; vka_barrier(cb);   // (clears vka_disp_pend)
+}
+void vka_disp_stats(char *b, size_t n, double frames) {   // vka_exec.c's statistics, every 300 frames
+    uint64_t nd = g_disp_n - g_disp_n0, st = g_disp_settled - g_disp_s0, sv = g_disp_saved - g_disp_v0, cl = vka_disp_cleared - g_disp_c0;
+    g_disp_n0 = g_disp_n; g_disp_s0 = g_disp_settled; g_disp_v0 = g_disp_saved; g_disp_c0 = vka_disp_cleared;
+    if (frames <= 0 || !nd) { if (n) b[0] = 0; return; }
+    snprintf(b, n, "dispatches per frame: %.1f; barriers after them recorded %.1f, not needed %.1f (DM_VK_DISPATCH_ORDER)", nd / frames, st / frames,
+             (sv + (cl > st ? cl - st : 0)) / frames);
+}
 void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
+    if (vka_hung()) SKIPQ();
     if (!g_cb || !draws_on() || !statics()) SKIPQ();
     if (!d->inited) vka_dstate_reset(d);
     vka_rp_end();
+    // DM_VK_DISPATCH_LOG=1: one line per dispatch (its index in the submission's run of dispatches since the last log reset, key, groups, workgroup, shared memory, flags);
+    // DM_VK_DISPATCH_SKIP=<from>[,<to>]: dispatches from..to (default: to the end) are recorded without their vkCmdDispatch, to find the one that writes a wrong picture
+    // DM_VK_DISPATCH_SKIP_KEY=<hex key>[,<key>...] (diagnostic): the dispatches of these shaders are recorded without their vkCmdDispatch. Both are read once a frame.
+    // (The index is taken here, before the zero-grid return below, so it still counts every dispatch the game issued)
+    uint64_t vka_frame(void); static unsigned long long nd; static uint64_t fr = ~0ull; static int lg; static char sk[64], kk[256];
+    if (vka_frame() != fr) { fr = vka_frame(); lg = (int)VKA_ENV("DM_VK_DISPATCH_LOG", 0); nd = 0;
+                             if (!vka_env_str("DM_VK_DISPATCH_SKIP", sk, sizeof sk)) sk[0] = 0; if (!vka_env_str("DM_VK_DISPATCH_SKIP_KEY", kk, sizeof kk)) kk[0] = 0; }
+    unsigned long long di = nd++;
+    // A direct dispatch with no workgroups (a zero or negative group count, which the vkCmdDispatch guard below already never dispatches) records nothing: Vulkan and NVN
+    // run no invocations for it, so it reads and writes nothing, and NVN orders nothing by a dispatch, so the stream is the guest's without it, which the replay already
+    // handles. The full barrier the old path recorded after it only ordered work that ends with its own barrier (a dispatch, a pass at vka_rp_end, clears, copies and UB
+    // updates in vka_exec.c, the guest's OP_BARRIER); the pass still ends above, so pass boundaries do not move. What it saves is that barrier (a GPU drain), the
+    // descriptor walk and push and a pipeline bind (Ocarina issues about three a frame at 0x0x0: cee08c63..., 510c344f..., e855420a...; docs/reference/rendering.md,
+    // "Zero-grid dispatches and zero-count draws"). Indirect dispatches keep the full path (their counts are the GPU's), and so do the GPU profiler and the NaN watcher,
+    // which see every dispatch. It counts in g_dispatches even where the old path would have hit a SKIP (no library, layout or pipeline) and counted in g_skipped, and
+    // DM_VK_TEXSTAT_AT and DM_VK_DISPATCH_SKIP_KEY (diagnostics) never see it. DM_VK_ZERO_DISPATCH=0 (live) records the old path, for an A/B
+    if (!dp->ind && (dp->x <= 0 || dp->y <= 0 || dp->z <= 0) && !vka_gp_active && !vka_nan_on() && VKA_ENV("DM_VK_ZERO_DISPATCH", 1)) {
+        d->b.dispatch[0] = (uint32_t)dp->x; d->b.dispatch[1] = (uint32_t)dp->y; d->b.dispatch[2] = (uint32_t)dp->z; d->b.nvn2 = (uint32_t)vka_nvn2();
+        if (lg) VLOG("dispatch %llu: groups %d,%d,%d: no workgroups, nothing recorded (DM_VK_ZERO_DISPATCH)", di, dp->x, dp->y, dp->z);
+        g_dispatches++;
+        return;
+    }
     vka_shader *sh[VKA_NSTAGE] = {0}; unsigned bad = 0;
     if (!resolve(d->cprog, 5, &sh[5], &bad)) SKIP("dispatch skipped: no shader library");
     if (bad) SKIPQ();
@@ -1506,17 +1840,12 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
     g_rt5 = NULL;
     if (!bound_) SKIPQ();
     if (dp->ind && c0.buf) {   // the group counts the GPU wrote, into c0's dispatch words before the dispatch reads them (nvn_mtl.m g_c0_dim_buf); NVN2 reads them at c0 + 4 too
+        vka_disp_settle(g_cb);   // (a copy: after the dispatches before it, as before; "Dispatch order")
         VkBufferCopy c[2] = {{io, c0.off + DMSH_C0_DISPATCH, 12}, {io, c0.off + DMSH_C0_DISPATCH_NVN2, 12}};
         vk.vkCmdCopyBuffer(g_cb, ib, c0.buf, d->b.nvn2 ? 2 : 1, c);
         vka_barrier(g_cb);
     }
-    // DM_VK_DISPATCH_LOG=1: one line per dispatch (its index in the submission's run of dispatches since the last log reset, key, groups, workgroup, shared memory, flags);
-    // DM_VK_DISPATCH_SKIP=<from>[,<to>]: dispatches from..to (default: to the end) are recorded without their vkCmdDispatch, to find the one that writes a wrong picture
-    // DM_VK_DISPATCH_SKIP_KEY=<hex key>[,<key>...] (diagnostic): the dispatches of these shaders are recorded without their vkCmdDispatch. Both are read once a frame
-    uint64_t vka_frame(void); static unsigned long long nd; static uint64_t fr = ~0ull; static int lg; static char sk[64], kk[256];
-    if (vka_frame() != fr) { fr = vka_frame(); lg = (int)VKA_ENV("DM_VK_DISPATCH_LOG", 0); nd = 0;
-                             if (!vka_env_str("DM_VK_DISPATCH_SKIP", sk, sizeof sk)) sk[0] = 0; if (!vka_env_str("DM_VK_DISPATCH_SKIP_KEY", kk, sizeof kk)) kk[0] = 0; }
-    unsigned long long di = nd++; int skip = 0;
+    int skip = 0;
     if (sk[0]) { char *e; unsigned long long a = strtoull(sk, &e, 10), b = *e == ',' ? strtoull(e + 1, NULL, 10) : ~0ull; skip = di >= a && di <= b; }
     for (const char *q = kk; *q;) { char *e; unsigned long long kv = strtoull(q, &e, 16); if (e == q) break; if (kv == (unsigned long long)sh[5]->key) skip = 1; q = *e == ',' ? e + 1 : e; }
     if (lg) VLOG("dispatch %llu: %016llx groups %d,%d,%d%s local %u,%u,%u shared %u flags %#x%s", di, (unsigned long long)sh[5]->key, dp->x, dp->y, dp->z, dp->ind ? " (indirect)" : "",
@@ -1535,13 +1864,19 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp) {
         else if (r->what == VKA_R_GMEM_MAP || r->what == VKA_R_GMEM_LOG) VLOG("dispatch %llu:   binding %u raw global memory %s", di, r->binding, r->what == VKA_R_GMEM_MAP ? "table" : "write log");
     }
     if (skip) { vka_barrier(g_cb); g_dispatches++; texstat_at(); return; }
+    if (vka_gp_active) vka_gp_compute(sh[5]->key, (uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z, dp->ind != 0);
     vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     if (dp->ind) vk.vkCmdDispatchIndirect(g_cb, ib, io);
     else if (dp->x > 0 && dp->y > 0 && dp->z > 0) {
         if (sb && (uint64_t)dp->x * dp->y * dp->z > ns) spill_dispatch((uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z, ns);
         else vk.vkCmdDispatch(g_cb, (uint32_t)dp->x, (uint32_t)dp->y, (uint32_t)dp->z);
     }
-    vka_barrier(g_cb);   // (also frees the shared memory spill buffer for the next dispatch)
+    g_disp_n++;
+    if (sb || vka_nan_on() || VKA_ENV("DM_VK_DISPATCH_ORDER", 0)) vka_barrier(g_cb);   // (a spill: frees the shared memory spill buffer for the next dispatch)
+    else {   // "Dispatch order": recorded before the next GPU work that is not a dispatch, unless a full barrier comes first
+        VkCommandBuffer was = atomic_exchange(&vka_disp_pend, g_cb);
+        if (was == g_cb) g_disp_saved++;   // the one the dispatch before this one left: never recorded
+    }
     g_dispatches++;
     texstat_at();   // (diagnostic: DM_VK_TEXSTAT_AT, a compute key's textures and buffers)
 }

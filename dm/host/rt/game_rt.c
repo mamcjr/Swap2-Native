@@ -1,5 +1,5 @@
 // Swap2-Native: the game profile at start (rt/game_profile.h). Reads the pack's game_profile.tsv, the rows dm/games/game.py runtime writes from the profile:
-// <NAME> TAB <value> per constant (numbers in decimal), MODULE / DISPLAY_VERSION / WINDOW_FN per list item, FORMAT 1 first; '#' lines are comments.
+// <NAME> TAB <value> per constant (numbers in decimal), MODULE / DISPLAY_VERSION / WINDOW_FN / RES_LEVELS per list item, FORMAT 1 first; '#' lines are comments.
 // Every constant game.py writes must be there: a pack from a packer that knew fewer keys stops here with the missing one named, rather than running with a guess
 #include "../dm.h"
 #include "game_profile.h"
@@ -48,8 +48,8 @@ int dm_game_load(const char *path) {
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
         if (!n || line[0] == '#') continue;
-        char *c[8]; int nc = 0;
-        for (char *p = line; nc < 8;) { c[nc++] = p; char *t = strchr(p, '\t'); if (!t) break; *t = 0; p = t + 1; }
+        char *c[20]; int nc = 0;   // RES_LEVELS has the most columns: 4 + 12 lists
+        for (char *p = line; nc < 20;) { c[nc++] = p; char *t = strchr(p, '\t'); if (!t) break; *t = 0; p = t + 1; }
         if (!strcmp(c[0], "FORMAT")) { format = nc > 1 ? atoi(c[1]) : 0; continue; }
         if (!strcmp(c[0], "MODULE") && nc == 2 && dm_game.nmod < DM_GAME_RT_MAXMOD) { dm_game.modules[dm_game.nmod++] = strdup(c[1]); continue; }
         if (!strcmp(c[0], "DISPLAY_VERSION") && nc == 3 && dm_game.nvers < DM_GAME_RT_MAXVER) {
@@ -58,6 +58,20 @@ int dm_game_load(const char *path) {
         uint64_t a, b, w, h;
         if (!strcmp(c[0], "WINDOW_FN") && nc == 6 && dm_game.nwfn < DM_GAME_RT_MAXWFN && num(c[2], &a) && num(c[3], &b) && num(c[4], &w) && num(c[5], &h)) {
             dm_game.wfn[dm_game.nwfn++] = (struct dm_game_wfn){strdup(c[1]), a, b, (unsigned)w, (unsigned)h}; continue;
+        }
+        // RES_LEVELS <main build> <size table offset> <levels> <list offset>:<length>... (decimal): loader.c levels_apply checks the table and the lists against main
+        if (!strcmp(c[0], "RES_LEVELS") && nc >= 5 && nc <= 4 + DM_GAME_RT_MAXRLV_LISTS && dm_game.nrlv < DM_GAME_RT_MAXRLV && num(c[2], &a) && num(c[3], &b)) {
+            struct dm_game_rlv v = {strdup(c[1]), a, (unsigned)b, (unsigned)(nc - 4), {{0, 0}}};
+            int ok = 1;
+            for (int i = 4; i < nc && ok; i++) {
+                char *colon = strchr(c[i], ':');
+                if (!colon) { ok = 0; break; }
+                *colon = 0;
+                ok = num(c[i], &w) && num(colon + 1, &h) && h >= 1 && h <= 32;   // game.py's bounds: a list is 1..32 bytes (levels_apply reads its first byte)
+                v.l[i - 4].off = w; v.l[i - 4].len = (unsigned)h;
+            }
+            if (ok && b >= 2 && b <= 255) { dm_game.rlv[dm_game.nrlv++] = v; continue; }   // 2..255 levels: a level is one byte
+            LOG("[RED] game profile %s:%d: RES_LEVELS takes 2..255 levels and <offset>:<length> lists of 1..32 bytes", path, lineno); free((void *)v.build); bad = 1; continue;
         }
         if (!strcmp(c[0], "SHARED_FONT_TTF") && nc == 2 && num(c[1], &a)) { dm_game.shared_font_ttf = (int)a; continue; }
         if (!strcmp(c[0], "NVN_API_MAJOR") && nc == 2 && num(c[1], &a)) { dm_game.nvn_api_major = (int)a; continue; }

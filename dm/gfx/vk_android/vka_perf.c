@@ -254,12 +254,15 @@ void mtl_frame_extra(uint64_t f, char *out, size_t n) {
     static uint64_t proom, psub, penc, psave, ppw, ppl, pplb, ppln, pgv, pwr, pwo, pt, psc; static int init;
     uint64_t room = 0, sub = 0, enc = vka_enc_waits(), save = 0, pw = 0, pl = 0, plb = 0, pln = 0, gv = 0, wr = 0, wo = 0, t = ts_now(), sc = vka_worker_sub_cpu(); vka_worker_waits(&room, &sub); vka_pso_waits(&save, &pw);
     vka_mem_waits(&pl, &plb, &pln, &gv, &wr, &wo);
+    int64_t vka_pso_async_skips(void); static int64_t pask = -1; int64_t ask = vka_pso_async_skips();
     static int ts_on = -1; if (ts_on < 0) { ts_on = ts_period_ms() > 0; if (ts_on) { pthread_t th; if (pthread_create(&th, NULL, ts_main, NULL)) ts_on = 0; else pthread_detach(th); } }
     if (init && n) {
         snprintf(out, n, "game waited for the replay worker %.1f, replay recording %.1f (its CPU %.1f), replay waited for the encoder %.1f, cache save %.1f, waited for prewarm %.1f; "
                          "pool placement %.1f ms (%llu pools, %.1f MB), give-back %.1f ms, the pool table's lock waited for: replay %.1f, others %.1f",
                  (room - proom) / 1e6, (sub - psub) / 1e6, (sc - psc) / 1e6, (enc - penc) / 1e6, (save - psave) / 1e6, (pw - ppw) / 1e6,
                  (pl - ppl) / 1e6, (unsigned long long)(pln - ppln), (plb - pplb) / 1048576.0, (gv - pgv) / 1e6, (wr - pwr) / 1e6, (wo - pwo) / 1e6);
+        // DM_VK_PSO_ASYNC: the draws this frame skipped because their pipeline was still being made in the background (vka_pso.c as_main; a frame that drew less, not a wait)
+        if (ask >= 0) { size_t o = strlen(out); if (o < n) snprintf(out + o, n - o, ", draws skipped for background pipelines %lld", (long long)(ask - (pask >= 0 ? pask : 0))); }
         if (ts_on && t - pt >= 100000000ull) {   // a long frame: the sampler names its busiest threads (read back at print time, mtl_gpu_extra)
             pthread_mutex_lock(&g_tsmu);
             int q = (int)(f % TS_REQ); g_tsq[q].f = f; g_tsq[q].since = pt; g_tsq[q].state = 1; g_tsq[q].s[0] = 0;
@@ -267,7 +270,7 @@ void mtl_frame_extra(uint64_t f, char *out, size_t n) {
             pthread_mutex_unlock(&g_tsmu);
         }
     } else if (n) out[0] = 0;
-    proom = room; psub = sub; penc = enc; psave = save; ppw = pw; ppl = pl; pplb = plb; ppln = pln; pgv = gv; pwr = wr; pwo = wo; pt = t; psc = sc; init = 1;
+    proom = room; psub = sub; penc = enc; psave = save; ppw = pw; ppl = pl; pplb = plb; ppln = pln; pgv = gv; pwr = wr; pwo = wo; pt = t; psc = sc; pask = ask; init = 1;
 }
 void mtl_gpu_extra(uint64_t f, char *out, size_t n) {
     double s = vka_gpu_span_ms(f), b = mtl_gpu_ms(f);

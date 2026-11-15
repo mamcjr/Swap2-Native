@@ -28,7 +28,6 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -129,8 +128,9 @@ public final class PackService extends Service {
         Job j = null;
         boolean bad = false;
         try {
-            if (f != null) j = Job.read(f);
+            if (f != null) { j = Job.read(f); j.rehomeVariantPack(this); }
         } catch (IOException e) {
+            j = null;
             // never a silent stop: logcat at error level, the launcher told (bound now, or when it registers), and a notification that stays (below)
             Log.e(TAG, "job " + f + " cannot be read: " + e.getMessage());
             if (intent != null && f.isFile()) { unreadable(f, e); bad = true; }
@@ -281,6 +281,7 @@ public final class PackService extends Service {
         wake.acquire(7 * 3600_000L);
         try {
             dropOtherSplitScans(j);
+            j.repairMissingCode();
             if (j.apkChanged()) {
                 Log.i(TAG, "the job's shaders are from another app version: translating them again");
                 j.resetChainSteps();
@@ -357,7 +358,7 @@ public final class PackService extends Service {
             if (j.next() < 0) {
                 j.state("done", null, null);
                 // the split and the translation results are not needed once the library is in the pack
-                Job.deleteTree(new File(j.dir(), "split"));
+                Outputs.deleteQuietly(new File(j.dir(), "split"));   // a folder it cannot delete keeps Outputs.BEGUN: a later split begins by deleting it again
                 Job.deleteTree(j.splitScan(this));
                 Job.deleteTree(new File(j.dir(), "xlate"));
                 Job.deleteTree(new File(j.dir(), "lib"));
@@ -477,6 +478,23 @@ public final class PackService extends Service {
         return true;
     }
 
+    /** The open descriptors of the .nup files used where they are, by stand-in path: opened once per process, kept for its life (the tools duplicate them) */
+    private static final java.util.Map<String, android.os.ParcelFileDescriptor> nupFds = new java.util.HashMap<>();
+
+    /** A descriptor of a picked .nup for the tools, owned by this process while Python duplicates it. */
+    private int nupFd(File dump) throws IOException {
+        synchronized (nupFds) {
+            android.os.ParcelFileDescriptor p = nupFds.get(dump.getAbsolutePath());
+            if (p == null) {
+                int fd = PickedNup.detachedFd(this, dump);
+                if (fd < 0) throw new IOException("The file is not a picked .nup: " + dump);
+                p = android.os.ParcelFileDescriptor.adoptFd(fd);
+                nupFds.put(dump.getAbsolutePath(), p);
+            }
+            return p.getFd();
+        }
+    }
+
     /** Runs step i; null when it is done, else why it failed */
     private String step(Job j, int i) throws IOException {
         String s = Job.STEPS[i];
@@ -500,7 +518,8 @@ public final class PackService extends Service {
         // The tools' arguments: the in-process forms (pack_android.py --in-process: the rewriter in the same Python; shader_split.py with J=1 below: no process pool;
         // vk_android_build.py with the translator and the validator as libraries, XLATE / SPIRV_VAL below; the app's process must not fork, ONDEVICE.md "No subprocesses").
         // The split is resumable by RomFS file: its scan results are kept in the app's own storage (Job.splitScan, DM_SPLIT_RESUME, shader_split.py ScanCache) and a rerun scans only the files
-        // that have none; it writes its outputs into split.tmp/ at its end, which then becomes split/.
+        // that have none; it writes its outputs into split/ in place at its end, which counts only once Outputs.finish wrote its marker (no folder is renamed
+        // on shared storage: MediaProvider can refuse it, Outputs). An older build's split/ (split.tmp/ renamed) still counts: Job.splitComplete.
         // The shaders step is resumable by shader: each result is a file in xlate/ (DMSH_VK_RESULTS) and a rerun skips the shaders that have one; it writes the
         // library (lib/v-<DMSH_VK_CHAIN>/) from the results at its end. The pack step copies the library into the pack (--shader-cache)
         switch (s) {
@@ -509,15 +528,18 @@ public final class PackService extends Service {
                 argv = new String[] {dump.getPath(), "--version", v, "--out", pack.getPath(), "--code-only", "-j", "1", "--in-process"};
                 break;
             case "split":
-                Job.deleteTree(splitTmp);   // only outputs a stopped run may have half written: the split writes them all at its end; what it kept is in Job.splitScan
-                splitTmp.mkdirs();
+                // only outputs a stopped run may have half written: the split writes them all at its end; what it kept is in Job.splitScan. The marker goes first
+                Outputs.begin(split);
+                Job.deleteTree(splitTmp);   // left by an older build, which wrote into split.tmp/ and renamed it
                 tool = "dm/gfx/tools/shader_split.py";
-                argv = new String[] {upRomfs, upMain, new File(splitTmp, "pkg").getPath(),
-                        new File(splitTmp, "shader_map.tsv").getPath(), new File(splitTmp, "shader_facts.tsv").getPath(), new File(splitTmp, "shader_pairs.tsv").getPath(),
-                        new File(splitTmp, "pso_pairs.tsv").getPath()};
+                argv = new String[] {upRomfs, upMain, new File(split, "pkg").getPath(),
+                        new File(split, "shader_map.tsv").getPath(), new File(split, "shader_facts.tsv").getPath(), new File(split, "shader_pairs.tsv").getPath(),
+                        new File(split, "pso_pairs.tsv").getPath()};
                 break;
             case "shaders": {
-                if (!new File(split, "pkg").isDirectory()) {   // the split went (a finished job deletes it; an APK update then translates again): split first
+                // the split went (a finished job deletes it; an APK update then translates again), or it is not complete (no marker, and not an older build's
+                // renamed split/): split first
+                if (!Job.splitComplete(split)) {
                     j.stepState("split", "pending");
                     return "interrupted";
                 }
@@ -565,6 +587,18 @@ public final class PackService extends Service {
         PackEngine.setenv("NX_PACK_WORK", od.getPath());
         PackEngine.setenv("NX_PACK_VERSION", v);
         PackEngine.setenv("TMPDIR", getCacheDir().getPath());
+        // A .nup used where it is (PickedNup): the tools read its stand-in path through a descriptor this process holds (dm/tools/nup.py, DM_NUP_FD=<fd>:<path>);
+        // empty for any other dump
+        String nupFd = "";
+        if (Nup.picked(dump)) {
+            try {
+                nupFd = nupFd(dump) + ":" + dump.getAbsolutePath();
+            } catch (IOException e) {   // moved, deleted, or its permission taken back: the user picks it again (its card), then Retry
+                stepCode = GameFlow.DUMP;
+                return e.getMessage();
+            }
+        }
+        PackEngine.setenv("DM_NUP_FD", nupFd);
         // vk_android_build.py: the per-shader results (kept until the job is done: a rerun resumes from them), the translator and SPIRV-Tools from the APK's lib/
         // (bare names: the linker finds them in the APK, as System.loadLibrary does; ctypes loads them in this process)
         PackEngine.setenv("DMSH_VK_RESULTS", xlate.getPath());
@@ -598,9 +632,7 @@ public final class PackService extends Service {
             // A completed scan can still omit an unreadable archive. Do not publish that partial split or blame the user's dump.
             String incomplete = incompleteSplit(log);
             if (incomplete != null) return incomplete;
-            Job.syncTree(splitTmp);   // on the disk before the rename, so a reboot after the step is recorded done cannot leave cut tables in split/
-            Job.deleteTree(split);
-            Files.move(splitTmp.toPath(), split.toPath(), StandardCopyOption.ATOMIC_MOVE);
+            Outputs.finish(split);   // every output synced, then the marker: a reboot after the step is recorded done cannot leave cut tables accepted in split/
             // the scan results go only once job.json records the split done (work()): a kill before that resumes from them instead of scanning everything again
         }
         long t = j.stepTotal(i);
@@ -637,7 +669,7 @@ public final class PackService extends Service {
         } catch (IOException | RuntimeException | UnsatisfiedLinkError e) {
             return "cannot compare the dump's shaders with the app's list: " + e.getMessage();
         }
-        Job.deleteTree(split);   // a Retry splits again, from the start
+        Outputs.deleteQuietly(split);   // a Retry splits again, from the start (a folder left behind keeps Outputs.BEGUN, and the next Outputs.begin deletes it)
         Job.deleteTree(j.splitScan(this));
         j.stepState("split", "pending");
         stepCode = GameFlow.DUMP;

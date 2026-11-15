@@ -9,6 +9,7 @@ A Switch 2 game: update v655360 (the title screen says Ver. 2.0.1), SDK 20.5.25 
 | `mem_reserve 0x270000000`, `app_pool 0x240000000` | [`game.tsv`](game.tsv) | Donkey Kong Bananza's 9 GB layout. The game asks `SetHeapSize` for all of it (8.92 GB) and makes its five memory pools (4,988 MiB) and its allocators inside; what it touches is far less ([Memory](#memory)). The NPDM declares no system resource |
 | `mem_used 0x5600000` | `game.tsv` | the rewritten modules take 82 MB, more than the default 64 MB that `SetHeapSize` checks the game's request against |
 | `pad_layout full` | `game.tsv` | |
+| `res_levels 76a489f3… 0x2849658 34 …` | `game.tsv` | the dynamic resolution's size table and its nine level lists in update v655360's main: the host lowers the lists to fit `DM_WINDOW_SIZE` (the Android launcher's Game resolution) at load ([Render size](#render-size)) |
 
 ## Files
 
@@ -26,6 +27,16 @@ A Switch 2 game: update v655360 (the title screen says Ver. 2.0.1), SDK 20.5.25 
 - Frames take about 16.7 ms. A cold file cache, as after a reboot, keeps the game on the loading icon for over a minute, and a clean run there says nothing: check that `[nvn] frame N: … calls` reached about 3,500.
 - The lit HDR target is RG11B10, exposure a 2x1 RGBA32F image, tone map `075fd7285c64b798` with a 32³ LUT, final `ed5f4c6386ca621d`, the luminance histogram compute `2118ab534fac88c6`.
 - `texraw` pads rows: an RG11B10 dump has a 16-byte stride with 4-byte pixels at the head of each row. It returns one slice of a 3D texture, and serials shift between runs.
+
+## Render size
+
+KTGL's dynamic resolution, found by Raphix91 by disassembly of update v655360's main (BananaNative PR #29, 2026-11-05; our main build is the same, `76a489f3…`):
+
+- **The table:** 34 sizes at `main+0x2849658` (u32 widths, then the heights at `+0x28496e0`), read by the getters at `main+0x1129990` / `+0x11299d0`. Level 0 is 960x540 and each level adds 32x18 up to level 30, 1920x1080; levels 31-33 are 2560x1440, 3840x2160 and 7680x4320. The leaf functions at `main+0x1129980` / `+0x11299c0` return 1920 / 1080 only as a fallback when the display object at `[main+0x35618d0]` is missing, so `window_fn` has nothing to write here.
+- **The controller:** stepped at `main+0x22cd20`, which moves an index down a level list when its late-frame counter passes 1.25 and up when the other one does; the render size is the level's size times a scale, capped at the maximum size; the per-frame budget is 1/60 s.
+- **The lists** (`main+0x22d338`, by `oe::GetCurrentGraphicsScale`, `oe::GetOperationMode` and a flag): docked at scale 1 (what the host reports docked) `main+0x2804ff0`, levels 24 down to 17 (1728x972 to 1472x828); docked at scale 0 `+0x28055c0`, 30 down to 23; handheld at scale 0 `+0x2808b69`, 20 down to 11; the others 22 down to 1. No list starts at 720p.
+- **`res_levels`** ([the entry](../../../docs/reference/rendering.md#a-dynamic-resolution-with-no-window-getter-capped-by-its-level-lists)): with `DM_WINDOW_SIZE=1280x720` (Game resolution, Phone 720p) the log should say `resolution: at most 1280x720 (level 10 of the game's 34, DM_WINDOW_SIZE=1280x720): 9 of 9 level lists lowered`. Ported 2026-11-08; not yet run on our phone (open).
+- **Upstream's measurement** (a user's Samsung S25 Ultra, Adreno 830, Turnip): 36 ms of GPU a frame (23 fps) at the game's own lists, 28 ms (31 fps) with them starting at 1280x720, picture clean. Lowering the table itself gave 12.8 ms (59 fps) but the ground and objects drew wrongly: something else assumes the game's own maximum (open). One compute pass, the luminance histogram `2118ab534fac88c6`, took 13.6 ms of a 15 ms frame in light areas whatever the size (open there).
 
 ## Memory
 
@@ -54,8 +65,11 @@ The first boot shows the language list: `A`, `LUp`, `A` picks English. The chara
 
 ## Found on this game
 
+- [An imported preparation remains interrupted at 100 percent](../../../docs/reference/packing.md#an-imported-preparation-remains-interrupted-at-100-percent): stale idle-service snapshots overrode newer completion on disk. Pokopia reached character selection using the imported library on 2026-11-10; the UI reconciliation and pinned preparation identity still need verification in the corrective APK.
+
 - [Large pools placed whole for one buffer in them](../../../docs/reference/memory.md#large-pools-placed-whole-for-one-buffer-in-them-android): killed before its first frame on the phone (resolved).
 - [Large compressed NUP files decompressed into memory](../../../docs/reference/memory.md#large-compressed-nup-files-decompressed-into-memory-android) (resolved).
+- [A dynamic resolution with no window getter, capped by its level lists](../../../docs/reference/rendering.md#a-dynamic-resolution-with-no-window-getter-capped-by-its-level-lists): Game resolution through `res_levels` (ported from upstream, not yet run on our phone).
 - [A log line inside a placed-memory swap stops every thread](../../../docs/reference/memory.md#a-log-line-inside-a-placed-memory-swap-stops-every-thread-android) (resolved).
 
 - [KTGL on NVN2: Switch 2 GLSLC outputs and LD_ / LI_ LINKDATA](../../../docs/reference/shaders.md#ktgl-on-nvn2-switch-2-glslc-outputs-and-ld_--li_-linkdata): the split found almost none of its shaders.

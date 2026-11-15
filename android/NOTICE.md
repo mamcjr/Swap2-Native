@@ -48,3 +48,11 @@ were generated with ElevenLabs Sound Effects on a paid plan that grants commerci
 The Zelda-themed touch artwork (for example `s2_zelda_controls.png`) depicts Nintendo trademarks. They are used only to identify the game the layout is for;
 Swap2-Native is not affiliated with, endorsed or sponsored by Nintendo. Nintendo, The Legend of Zelda, Mario Kart, Donkey Kong and Nintendo Switch are
 trademarks of Nintendo.
+
+## Adapted runtime fixes in 0.1.5-beta
+
+Queue dependency scheduling, texture-object ownership and file-backed pools were adapted from BananaNative v0.2.8 (moceure, MIT), revision `7ea6a966e4be51d5e2ac0be08543ff44c036e447`. File-backed pool helpers originate in AnkaNative v0.2.2, Copyright (c) 2026 EddizEge, MIT. Their notices are preserved in the source.
+
+**bcdec 0.985** (Sergii "iOrange" Kudlai, MIT or the Unlicense) decodes BC1-BC7 texture blocks on the CPU on GPUs without BC textures (ARM Mali, Samsung Xclipse). See `dm/third_party/bcdec/LICENSE`. The hardware-buffer guest memory backing follows the route DroidPlay Core (enjoyerofslop, MIT) uses for its raw global memory.
+
+**dav1d 1.5.4** (VideoLAN and dav1d contributors, BSD 2-Clause) is included for AV1 software decoding and midstream hardware recovery. See `dm/third_party/dav1d/COPYING` and `THANKS.md`; this Android build uses its C implementation.

@@ -61,6 +61,7 @@ static uint8_t *lib_make(size_t *size) {
     return L;
 }
 
+#include "vka_mesh_selftest.inc"
 int nxhost_vk_selftest(ANativeWindow *w, int frames) {
     if (w) nxhost_set_window(w);
     if (!vka_init()) { VRED("selftest: no Vulkan device"); return 1; }
@@ -238,6 +239,7 @@ int nxhost_vk_selftest(ANativeWindow *w, int frames) {
         last = tk;
     }
     mtl_present_flush(); mtl_finish();
+    if (getenv("DM_VK_MESH_SELFTEST")) bad += mesh_selftest(&t, base + (50u << 20));
     // DM_VK_SHLIB=<a game's dmsh_vk.lib>: every shader of it through this device's compiler (any game's library: the chain must match, the game is not checked)
     const char *gl = getenv("DM_VK_SHLIB");
     if (gl && *gl) {

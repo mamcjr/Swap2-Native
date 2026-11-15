@@ -3,10 +3,12 @@
 // by validation. DM_VK_SPV_DIR=<folder of .spv vertex modules> also rewrites each of those (every vec4 input as uint) and validates it. DM_VK_GS_SPV=<a geometry module
 // that writes memory> puts its writes under a per-primitive claim (vka_spv_gs_claim, after the one-invocation subgroup rewrite) and validates it. The storage image retype
 // (vka_spv_img_retype) runs on t_android_spvpatch_img.h's modules, on every float storage image of format Unknown in DM_VK_SPV_DIR's modules (as uint, then as int)
-// and on each of their float sampled images
+// and on each of their float sampled images. The texture pool reads' rewrite (vka_spv_pool_fb, Banana Native v0.3.11) runs on t_android_spvpatch_pfb.h's pixel shaders and,
+// with DM_VK_PFB_SPV_DIR=<folder of .spv modules>, on each of those that reads the pool. Build: clang -I.. t_android_spvpatch.c ../../gfx/vk_android/vka_spvpatch.c
 #include "../../gfx/vk_android/vka_spvpatch.h"
 #include "../../gfx/vk_android/vka_selftest_spv.h"
 #include "t_android_spvpatch_img.h"
+#include "t_android_spvpatch_pfb.h"
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,6 +64,20 @@ static int float_images(const uint32_t *w, size_t n, uint32_t *bind, int max, in
 }
 int main(void) {
     int val = have_val();
+    {   // Mesh fragments may already mark integer inputs Flat. Keep one Flat and
+        // preserve unrelated RelaxedPrecision decorations (whose numeric value is zero).
+        uint32_t w[] = {0x07230203,0x00010600,0,16,0,
+            3u<<16|71,1,0, 3u<<16|71,2,5271, 3u<<16|71,2,14,
+            4u<<16|72,3,0,5271, 4u<<16|72,3,0,14,
+            3u<<16|71,4,5271};
+        size_t z=sizeof w/4;
+        CHECK(vka_spv_mesh_fragment(w,&z), "mesh fragment rewrite");
+        CHECK(z==5+3+3+4+3, "duplicate Flat annotations removed");
+        CHECK(w[7]==0 && w[10]==14 && w[14]==14 && w[17]==14, "Flat and RelaxedPrecision preserved");
+        uint32_t broken[]={0x07230203,0x00010600,0,16,0,3u<<16|71,2};
+        z=sizeof broken/4;
+        CHECK(!vka_spv_mesh_fragment(broken,&z), "malformed mesh fragment rejected");
+    }
     size_t n = sizeof SPV_TRI_VERT / 4, on = 0; char err[200] = "";
     uint32_t *o = vka_spv_vin_retype(SPV_TRI_VERT, n, 1, 2, &on, err, sizeof err);
     CHECK(o, "selftest vertex shader not rewritten: %s", err);
@@ -221,6 +237,85 @@ int main(void) {
             }
             printf("t_android_spvpatch: %s: %d memory writes claimed\n", gs, found);
             free(w); }
+    }
+    {   // Texture pool reads (vka_spv_pool_fb): a bit set before each read of the pool, early depth tests where they give the same result
+        size_t pn = sizeof SPV_PFB_FRAG / 4; int sites = 0, early = 0;
+        uint32_t *x = vka_spv_pool_fb(SPV_PFB_FRAG, pn, 1, 0, 2, 0, VKA_PFB_EARLY, 1, &on, &sites, &early, err, sizeof err);
+        CHECK(x, "pool reads: not rewritten: %s", err);
+        if (x) {
+            CHECK(sites == 3, "pool reads: three reads (glslang loads t again for each, so the same-index test in a block does not apply): %d", sites);
+            CHECK(early == 1, "pool reads: early depth tests (no discard, export or store): %d", early);
+            CHECK(count_op(x, on, 241) == 3 && count_op(x, on, 247) == count_op(SPV_PFB_FRAG, pn, 247) + 3, "pool reads: an atomic OR under a selection per site (%d)", count_op(x, on, 241));
+            CHECK(count_op(x, on, 16) == count_op(SPV_PFB_FRAG, pn, 16) + 1, "pool reads: EarlyFragmentTests added");
+            {   // the bitmap in a set of its own (set 2 binding 0 here): in the pool's set Qualcomm's driver never wrote it
+                int set2 = 0;
+                for (size_t i = 5; i < on && (x[i] >> 16); i += x[i] >> 16)
+                    if ((x[i] & 0xffff) == 71 && (x[i] >> 16) == 4 && x[i + 2] == 34 && x[i + 3] == 2) set2++;   // OpDecorate <id> DescriptorSet 2
+                CHECK(set2 == 1, "pool reads: the bitmap decorated DescriptorSet 2 (%d)", set2);
+            }
+            if (val) CHECK(validate(x, on, "pool reads"), "pool reads valid");
+            free(x);
+        }
+        x = vka_spv_pool_fb(SPV_PFB_FRAG, pn, 1, 0, 2, 0, 0, 1, &on, &sites, &early, err, sizeof err);
+        CHECK(x && early == 0 && count_op(x, on, 16) == count_op(SPV_PFB_FRAG, pn, 16), "pool reads: without VKA_PFB_EARLY no mode added");
+        if (x && val) CHECK(validate(x, on, "pool reads, late"), "pool reads (late) valid");
+        free(x);
+        size_t dn = sizeof SPV_PFB_DISCARD / 4;
+        x = vka_spv_pool_fb(SPV_PFB_DISCARD, dn, 1, 0, 2, 0, VKA_PFB_EARLY, 1, &on, &sites, &early, err, sizeof err);
+        CHECK(x && sites == 1 && early == 0, "pool reads: a discard of its own keeps late tests (sites %d, early %d)", sites, early);
+        if (x && val) CHECK(validate(x, on, "pool reads, discard"), "pool reads (discard) valid");
+        free(x);
+        x = vka_spv_pool_fb(SPV_TRI_FRAG, sizeof SPV_TRI_FRAG / 4, 1, 0, 2, 0, VKA_PFB_EARLY, 1, &on, &sites, &early, err, sizeof err);
+        CHECK(!x && !err[0], "pool reads: a module that reads no pool is left alone (%s)", err);
+    }
+    // DM_VK_PFB_SPV_DIR=<folder of .spv modules>: each one that reads the pool rewritten (vertex-pipeline stores allowed, early tests asked for) and validated
+    const char *pd = getenv("DM_VK_PFB_SPV_DIR");
+    if (pd) {
+        DIR *dir = opendir(pd); int nmod = 0, nrw = 0;
+        struct dirent *de;
+        while (dir && (de = readdir(dir))) {
+            size_t l = strlen(de->d_name); if (l < 5 || strcmp(de->d_name + l - 4, ".spv")) continue;
+            char path[1024]; snprintf(path, sizeof path, "%s/%s", pd, de->d_name);
+            FILE *f = fopen(path, "rb"); if (!f) continue;
+            long sz = fseek(f, 0, SEEK_END) ? -1 : ftell(f);
+            if (sz < 20 || fseek(f, 0, SEEK_SET)) { fclose(f); continue; }
+            uint32_t *w = malloc((size_t)sz); size_t nw = w ? fread(w, 1, (size_t)sz, f) / 4 : 0; fclose(f);
+            if (!w) continue;
+            int sites = 0, early = 0; nmod++;
+            uint32_t *x = vka_spv_pool_fb(w, nw, 1, 0, 2, 0, VKA_PFB_VTX_STORES | VKA_PFB_EARLY, 1, &on, &sites, &early, err, sizeof err);
+            CHECK(x || !err[0], "%s: pool reads refused: %s", path, err);
+            if (x) { nrw++; if (val) CHECK(validate(x, on, path), "%s pool reads valid", path); free(x); }
+            free(w);
+        }
+        if (dir) closedir(dir);
+        printf("t_android_spvpatch: %d of %d modules in %s read the pool and were rewritten\n", nrw, nmod, pd);
+    }
+    {   // vka_spv_array_len: the texture pool's 2^20 array at (set 1, binding 0) cut to a device's table; the sampler array at binding 1 (4096) and everything else stay
+        enum { BOUND = 13 };
+        const uint32_t m[] = {0x07230203u, 0x00010300u, 0, BOUND, 0,
+            (2u << 16) | 17, 1, (3u << 16) | 14, 0, 1,
+            (4u << 16) | 71, 9, 34, 1, (4u << 16) | 71, 9, 33, 0, (4u << 16) | 71, 11, 34, 1, (4u << 16) | 71, 11, 33, 1,
+            (3u << 16) | 22, 1, 32, (9u << 16) | 25, 2, 1, 1, 0, 0, 0, 1, 0, (4u << 16) | 21, 3, 32, 0,
+            (4u << 16) | 43, 3, 4, 0x100000, (4u << 16) | 28, 5, 2, 4, (4u << 16) | 32, 6, 0, 5, (4u << 16) | 59, 6, 9, 0,
+            (2u << 16) | 26, 7, (4u << 16) | 43, 3, 8, 4096, (4u << 16) | 28, 10, 7, 8, (4u << 16) | 32, 12, 0, 10, (4u << 16) | 59, 12, 11, 0};
+        size_t mn = sizeof m / sizeof *m, an = 0; uint32_t *a = vka_spv_array_len(m, mn, 1, 0, 499680, &an);
+        CHECK(a, "the pool array is not cut");
+        if (a) {
+            CHECK(an == mn + 4 && a[3] == BOUND + 1, "one constant added (%zu words, bound %u)", an, a[3]);
+            int arr = 0, cst = 0, other = 0;
+            for (size_t i = 5; i < an; i += a[i] >> 16) {
+                uint32_t op = a[i] & 0xffff;
+                if (op == 28 && a[i + 1] == 5) arr = a[i + 3] == BOUND;
+                if (op == 28 && a[i + 1] == 10) other = a[i + 3] == 8;
+                if (op == 43 && a[i + 2] == BOUND) cst = a[i + 1] == 3 && a[i + 3] == 499680 && (a[i + 4] & 0xffff) == 28;   // right before its array
+            }
+            CHECK(arr && cst && other, "the array takes the new constant (%d), which holds the length and sits before it (%d); the sampler array is as it was (%d)", arr, cst, other);
+            free(a);
+        }
+        CHECK(!vka_spv_array_len(m, mn, 1, 0, 0x100000, &an), "an array no longer than the table is left alone");
+        CHECK(!vka_spv_array_len(m, mn, 1, 1, 4096, &an), "the sampler array at its own length is left alone");
+        CHECK(!vka_spv_array_len(m, mn, 0, 0, 16, &an), "no variable at that set: nothing changes");
+        CHECK(!vka_spv_array_len(m, 9, 1, 0, 16, &an), "a module cut short is refused");
     }
     printf("t_android_spvpatch: %s%s\n", g_fail ? "FAILED" : "ok", val ? "" : " (no spirv-val: structure only)");
     return g_fail != 0;

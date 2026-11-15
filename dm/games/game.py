@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Game profiles: dm/games/<base game title ID>/game.tsv (key <TAB> values..., lines starting with # are comments) + the shader tables (and patches.py, the rewriter's patches of the game's builds) in the same folder. The shader tools, the host build, iOS packaging and the NSP script take each game's constants from here.
 # Usage: game.py list (list all profiles); game.py <id> <key> [<default>] (print that key's value, for shell; without a default a missing key is an error); game.py header <id> <out.h> (generate the host's game_profile.h);
+#   game.py seed <id> <out.h> (the Android host's vk_prewarm_seed.h: the profile's vk_prewarm.bin, the pipeline keys a first start makes ahead, as bytes; dm/gfx/vk_android/vka_pwlist.h);
 #   game.py dir <id> (print the profile folder); game.py link <id> <link> (point a symlink at the profile folder: make cannot take paths with spaces)
 #   From Python: import game; g = game.load() (takes DM_GAME; there is no default game: unset is an error that lists the profiles); game.by_title(title ID); g.get / g.words / g.int / g.builds() / g.table(file name)
 # DM_GAMES_DIR (folders separated by ':') adds profile folders outside the repository, searched after dm/games: the NSP script writes a provisional profile for a game without one into
@@ -135,7 +136,7 @@ def header(g):
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
-    mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
+    mml = g.get('mem_map_limit', 'on')   # Horizon application-pool accounting; explicit off remains supported.
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
     cm, ic = g.get('core_mask', '0x7'), g.get('ideal_core', '0')   # the NPDM's cores (ThreadInfo min..max core; META +0xf): hle_svc.c GetInfo(CoreMask), hle_thread.c ideal core -2; 0x7 / 0 = a Switch 1 application
     if not re.fullmatch(r'0x[0-9a-fA-F]{1,2}|\d{1,3}', cm) or not 0 < int(cm, 0) < 0x100: sys.exit(f'{g.id}: core_mask must be a non-zero mask of cores 0-7 (0x3f on the Switch 2): {cm}')
@@ -166,6 +167,22 @@ def header(g):
                 sys.exit(f'{g.id}: graphics_scale takes <WxH | original> <scale 0|1|2> <console | handheld>, one row per choice: {r}')
             seen.add(r[0])
         if wfn: sys.exit(f'{g.id}: graphics_scale and window_fn are two levers for one setting: keep one')
+    # Dynamic resolution level lists, one row per main build: <main build ID> <size table offset> <levels> <list offset>:<length>... (loader.c levels_apply): for a game
+    # with no window getter, DM_WINDOW_SIZE=WxH caps the render size by lowering the lists that start above it; the table (the game's maximum) stays. Game resolution as
+    # with window_fn (build.gradle resolutionOf, Profile.user)
+    rlv = []
+    if g.get('res_levels', ''):
+        for r in g.values('res_levels'):
+            if len(r) < 4 or len(r) > 3 + 12 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not re.fullmatch(r'0x[0-9a-fA-F]+', r[1]) or not re.fullmatch(r'\d{1,3}', r[2]) \
+                    or not all(re.fullmatch(r'0x[0-9a-fA-F]+:\d{1,2}', x) for x in r[3:]):
+                sys.exit(f"{g.id}: res_levels takes <main build ID (32 hex)> <size table offset> <levels> <list offset>:<length> (1 to 12 lists): {r}")
+            n = int(r[2])
+            if not 2 <= n <= 255: sys.exit(f'{g.id}: res_levels: the size table must have 2..255 levels: {r[2]}')
+            ls = [(x.split(':')[0], int(x.split(':')[1])) for x in r[3:]]
+            if not all(1 <= ln <= 32 for _, ln in ls): sys.exit(f'{g.id}: res_levels: each list is 1..32 bytes: {r}')
+            ls += [('0', 0)] * (12 - len(ls))
+            rlv.append('{' + q(r[0]) + f', {r[1]}, {n}, {len(r) - 3}, ' + '{' + ', '.join(f'{{{o}, {ln}}}' for o, ln in ls) + '}}')
+        if g.get('graphics_scale', ''): sys.exit(f'{g.id}: graphics_scale and res_levels are two levers for one setting: keep one')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -213,20 +230,22 @@ def header(g):
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          '#define DM_GAME_WINDOW_FN {' + (', '.join(wfn) or '{"", 0, 0, 0, 0}') + '}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
+         '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
     return '\n'.join(L)
 
 
 
-RUNTIME_LISTS = {'MODULES': 'MODULE', 'DISPLAY_VERSIONS': 'DISPLAY_VERSION', 'WINDOW_FN': 'WINDOW_FN'}
+RUNTIME_LISTS = {'MODULES': 'MODULE', 'DISPLAY_VERSIONS': 'DISPLAY_VERSION', 'WINDOW_FN': 'WINDOW_FN', 'RES_LEVELS': 'RES_LEVELS'}
 _Q = r'"((?:[^"\\]|\\.)*)"'   # a C string literal as header() writes it
 
 
 def runtime(g):
     """The same constants as header(g), as the host reads them at start instead of compiling them in (Swap2-Native: one host for every game, dm/host/game_rt.c):
     one row per constant, <name without DM_GAME_> TAB <value> (strings as they are, numbers in decimal), and one row per item of a list (MODULE <name>,
-    DISPLAY_VERSION <main build> <version>, WINDOW_FN <main build> <width fn> <height fn> <w> <h>). The derived counts (NMOD, NWINDOW_FN) are not written.
+    DISPLAY_VERSION <main build> <version>, WINDOW_FN <main build> <width fn> <height fn> <w> <h>,
+    RES_LEVELS <main build> <size table> <levels> <list>:<length>...). The derived counts (NMOD, NWINDOW_FN, NRES_LEVELS) are not written.
     pack_android.py writes it into the pack as game_profile.tsv"""
     unq = lambda s: re.sub(r'\\(.)', r'\1', s)
     out = [f'# Generated by dm/games/game.py runtime from the profile {g.id}; read by the host at start (dm/host/game_rt.c)', 'FORMAT\t1']
@@ -234,10 +253,15 @@ def runtime(g):
         m = re.fullmatch(r'#define DM_GAME_([A-Z0-9_]+) (.*)', line)
         if not m: continue
         name, v = m[1], m[2]
-        if name in ('NMOD', 'NWINDOW_FN'): continue
+        if name in ('NMOD', 'NWINDOW_FN', 'NRES_LEVELS'): continue
         if name in RUNTIME_LISTS:
             if name == 'MODULES': rows = [[unq(s)] for s in re.findall(_Q, v)]
             elif name == 'DISPLAY_VERSIONS': rows = [[unq(a), unq(b)] for a, b in re.findall(r'\{' + _Q + ', ' + _Q + r'\}', v)]
+            elif name == 'RES_LEVELS':   # {"build", table, n, nl, {{off, len}, ... 12}}: the first nl lists, numbers in decimal
+                rows = []
+                for b, t, n, nl, ls in re.findall(r'\{"([0-9a-f]{32})", (0x[0-9a-fA-F]+), (\d+), (\d+), \{((?:\{[0-9a-fA-Fx]+, \d+\}(?:, )?)+)\}\}', v):
+                    lists = re.findall(r'\{([0-9a-fA-Fx]+), (\d+)\}', ls)[:int(nl)]
+                    rows.append([b, str(int(t, 0)), n, *(f'{int(o, 0)}:{ln}' for o, ln in lists)])
             else: rows = [[a, str(int(b, 0)), str(int(c, 0)), d, e] for a, b, c, d, e in re.findall(r'\{"([0-9a-f]{32})", (0x[0-9a-fA-F]+), (0x[0-9a-fA-F]+), (\d+), (\d+)\}', v)]
             out += ['\t'.join([RUNTIME_LISTS[name], *r]) for r in rows]
         elif v.startswith('"'):
@@ -248,14 +272,32 @@ def runtime(g):
     return '\n'.join(out) + '\n'
 
 
+SEED = 'vk_prewarm.bin'   # the profile's prewarm seed list (dm/gfx/vk_android/vka_pwlist.h; made by dm/tools/vk_prewarm.py)
+def seed_header(g):   # vk_prewarm_seed.h: the seed's bytes for vka_pso.c (none: length 0)
+    p = g.dir / SEED
+    b = p.read_bytes() if p.is_file() else b''
+    L = [f'// Generated by dm/games/game.py seed from {g.id}/{SEED} ({len(b)} bytes): the prewarm seed list (dm/gfx/vk_android/vka_pwlist.h). Do not edit', '#include <stddef.h>',
+         f'static const unsigned char dm_vk_prewarm_seed[{max(len(b), 1)}] __attribute__((aligned(8))) = {{']
+    for i in range(0, len(b), 32): L.append(''.join(f'{x},' for x in b[i:i + 32]))
+    if not b: L.append('0')
+    L += ['};', f'static const size_t dm_vk_prewarm_seed_len = {len(b)};', '']
+    return '\n'.join(L)
+
+
+def write_if_changed(out, text):   # written only when it changes: make runs this every time (the profile folder can change under the same GAME), and an unchanged header must not rebuild the host
+    out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
+    if not (out.exists() and out.read_text() == text):
+        tmp = out.with_name(out.name + '.tmp'); tmp.write_text(text); tmp.replace(out)
+
+
 if __name__ == '__main__':
     a = sys.argv[1:]
     if a == ['list']:
         for g in all_games(): print(f'{g.id}\t{g.title_id:016X}\t{g.get("name", "")}')
     elif len(a) == 3 and a[0] == 'header':
-        out, text = Path(a[2]), header(load(a[1])); out.parent.mkdir(parents=True, exist_ok=True)
-        if not (out.exists() and out.read_text() == text):   # written only when it changes: make runs this every time (the profile folder can change under the same GAME), and an unchanged header must not rebuild the host
-            tmp = out.with_name(out.name + '.tmp'); tmp.write_text(text); tmp.replace(out)
+        write_if_changed(a[2], header(load(a[1])))
+    elif len(a) == 3 and a[0] == 'seed':
+        write_if_changed(a[2], seed_header(load(a[1])))
     elif len(a) == 3 and a[0] == 'runtime':
         out = Path(a[2]); out.parent.mkdir(parents=True, exist_ok=True); out.write_text(runtime(load(a[1])), encoding='utf-8', newline=chr(10))
     elif len(a) == 2 and a[0] == 'dir':
@@ -268,4 +310,4 @@ if __name__ == '__main__':
     elif len(a) in (2, 3):
         print(load(a[0]).get(*a[1:]))
     else:
-        sys.exit(__doc__ or 'usage: game.py list | game.py <id> <key> [<default>] | game.py header <id> <out.h> | game.py runtime <id> <out.tsv> | game.py dir <id> | game.py link <id> <link>')
+        sys.exit(__doc__ or 'usage: game.py list | game.py <id> <key> [<default>] | game.py header <id> <out.h> | game.py seed <id> <out.h> | game.py runtime <id> <out.tsv> | game.py dir <id> | game.py link <id> <link>')

@@ -260,3 +260,18 @@ preparation takes on this phone before it starts, and how long is left while it 
 - **Cost**: no file work on the UI thread: the counts come from the card's check (off the main thread), the rates from preferences in memory.
 
 Not verified on a phone (no adb in this change). A step without progress lines (rewrite, pack) only counts down when the service publishes a state.
+
+## Preparation safe-area correction (2026-11-09, unreleased)
+
+
+Observed the running DK preparation screen on the POCO at 3200x1440 landscape, density 600: the header logo and right edge of the progress card extended beyond the physical display. `PrepareScreen.fit` already subtracted the camera-cutout/system-bar insets from its available width, but then applied asymmetric inset margins to a `FrameLayout.CENTER` child. FrameLayout centers that width and adds `leftMargin - rightMargin`, shifting it out of the opposite edge when the cutout is only on one side.
+
+The page now uses absolute top/left gravity, with its left position calculated once as `safeInsets.left + (availableWidth - pageWidth)/2`, its top as `safeInsets.top`, and zero opposing margins. The maximum content width, safe-area height and no-scroll layout remain. It handles left/right/top/bottom cutouts without relying on symmetric insets. Capture of the old clipping: `output/analysis/prepare-clipped-20261109.png`.
+
+Validation: Android Java/resources compilation; the correction is in source only. No APK replacement or preparation interruption was performed. Verify the installed update later in both landscape directions, portrait and with navigation bars shown/hidden, including paused/failure states with extra actions visible.
+
+## Imported shaders and completed-job identity (2026-11-10, corrective APK pending)
+
+Observed on the POCO: Pokopia's card said interrupted at 100% while the actual `job.json` was done and its preparation screen offered Play. The imported 10.26 GB library loaded and the game reached character selection after Continue refreshed the job. Preserve that library and all progress; repeating the import is not the correction.
+
+The interface now compares job timestamps and reconciles an idle service's stale snapshot with newer completion on disk. Every preparation screen pins the selected job file and returns it with Play/import, rather than looking up whichever game became globally remembered meanwhile. Active worker progress retains priority. See the [mechanism, tests and remaining device verification](reference/packing.md#an-imported-preparation-remains-interrupted-at-100-percent). Validation: the five game-flow tests pass; the corrective APK's card refresh and cross-game return still need device testing.

@@ -64,6 +64,17 @@ class Abi(unittest.TestCase):
         self.assertIn(f'"{r.stdout.strip()}"', (REPO / 'dm/gfx/nvn/dmsh_chain_vk.h').read_text(),
                       'dm/gfx/nvn/dmsh_chain_vk.h is stale: run dm/gfx/tools/vk_android_build.py --header and commit it')
 
+    def test_version_files_lf(self):
+        """The library version hashes its files' bytes, and git stores and checks out every text file with LF (.gitattributes): a file written with CRLF on Windows
+        and not yet committed gives a version no clone reproduces (vk_android_mesh.py, 2026-11-12: d13a6ee0d6a7 with CRLF, 96979a7c89ff as committed)"""
+        import dmsh_chain
+        files = re.search(r'^VK_FILES = \[([^\]]*)\]', (TOOLS / 'vk_android_build.py').read_text(encoding='utf-8'), re.M)
+        self.assertIsNotNone(files, 'vk_android_build.py: no VK_FILES list')
+        files = re.findall(r"'([^']+)'", files.group(1)) + list(dmsh_chain.FILES)
+        self.assertIn('tools/vk_android_mesh.py', files)
+        crlf = [f for f in files if b'\r' in (TOOLS.parent / f).read_bytes()]
+        self.assertEqual(crlf, [], 'files of the chain digests with CR bytes: convert them to LF, then run dmsh_chain.py --header and vk_android_build.py --header')
+
     def test_same_rows(self):
         """vk_android_same.tsv: each row a tools digest, the earlier library version it was shown to reproduce, and the evidence; a version is never itself a
         digest with a row (no chains: the row names the version the libraries carry), and --version is the row's version when the tree's digest has one"""

@@ -75,6 +75,9 @@ final class GpuDriver {
     /** A game's own pick (its Game settings), stored per title ID: absent = the default above, SYSTEM = the phone's own driver, else a driver's folder name
      *  (":" is never in one, DriverZip.safe()) */
     static final String SYSTEM = ":system";
+    /** One run's driver in the game's process, over the game's pick (AutoDiag's driver runs): the driver is loaded by the readiness check, before the run's
+     *  environment is read, so a DM_VK_DRIVER line added to that environment comes too late (the first test of those runs loaded the game's own driver) */
+    static volatile String runChoice;
     static String choice(Context c, String titleId) { return Prefs.of(c).getString(Prefs.gameKey("gpu_driver", titleId), null); }
     /** null: back to the default */
     static void choice(Context c, String titleId, String v) {
@@ -85,7 +88,7 @@ final class GpuDriver {
 
     /** The driver a game starts with: its own pick, else the default; null = the system's (also when the picked one was removed) */
     static Info selected(Context c, String titleId) {
-        String s = choice(c, titleId);
+        String s = runChoice != null ? runChoice : choice(c, titleId);
         if (s == null) return selected(c);
         if (s.equals(SYSTEM)) return null;
         for (Info i : installed(c)) if (i.dir.getName().equals(s)) return i;

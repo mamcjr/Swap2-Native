@@ -1,5 +1,6 @@
 // Exercise the production SVC dispatcher, including its fatal path, without game files.
 #include "../dm.h"
+#include "../plat/plat_guestmap.h"
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
@@ -58,7 +59,7 @@ static int heap_mprotect(void *addr, size_t size, int prot) {
 static void *heap_mmap(void *addr, size_t size, int prot, int flags, int fd, off_t offset) {
     if (flags & MAP_FIXED) {
         map_calls++; last_addr = addr; last_size = size; last_prot = prot;
-        assert(flags == (MAP_PRIVATE | MAP_ANON | MAP_FIXED) && fd == -1 && offset == 0);
+        assert(flags == (PLAT_GUEST_MAP | MAP_FIXED) && fd == -1 && offset == 0);   // the guest block's flags (plat_guestmap.h): the range merges with its neighbours again
         assert(g_heap_cur == old_size && regs[0] == sentinel && regs[1] == requested);
         if (injected_map_error) { errno = injected_map_error; return MAP_FAILED; }
     }

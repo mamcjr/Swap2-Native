@@ -118,6 +118,13 @@ VkResult vka_imem_bind_zero(VkImage img, uint32_t type, const VkMemoryRequiremen
 uint64_t vka_imem_zbytes(void) { uint64_t b; pthread_mutex_lock(&g_imu); vkz_stats(&Z, NULL, NULL, &b, NULL); pthread_mutex_unlock(&g_imu); return b; }
 uint64_t vka_imem_zbytes_nolock(void) { uint64_t b = 0; for (int i = 0; i < Z.n; i++) b += Z.e[i].size; return b; }   // (a log line's value, read without the lock)
 void vka_imem_zowned(void) { pthread_mutex_lock(&g_imu); vkz_note_own(&Z); pthread_mutex_unlock(&g_imu); }
+int vka_imem_adopt_zero(vka_imem *m) {
+    if (!m->z) return 0;
+    pthread_mutex_lock(&g_imu);
+    uint64_t size = vkz_take_sole(&Z, (uint64_t)(uintptr_t)m->dm);
+    if (size) { m->z = 0; m->size = size; S.ded++; S.ded_bytes += size; }
+    pthread_mutex_unlock(&g_imu); return size != 0;
+}
 
 // The memory back (after vkDestroyImage of the image bound to it, once the GPU is done with it)
 void vka_imem_free(vka_imem *m) {
@@ -139,15 +146,21 @@ void vka_imem_free(vka_imem *m) {
     if (fr == -2) VRED_ONCE("image memory block: units %llu+%u given back twice or never given (left as they are)", (unsigned long long)(m->off / UNIT), m->units);
     else if (fr) { VRED_ONCE("image memory block: free extent list not grown, %u units lost to reuse until the block empties", m->units); b->free.used -= m->units; }   // still counted free: the block can be released
     if (fr != -2) { S.runs--; S.run_bytes -= m->units * UNIT; S.req_bytes -= m->size; }   // a bad free was never a run
-    if (vke_empty(&b->free)) {   // freed unless it is the memory type's only empty block
-        int empties = 0; for (iblock *x = g_blocks[b->type]; x; x = x->next) empties += vke_empty(&x->free);
-        if (empties > 1) {
-            for (iblock **p = &g_blocks[b->type]; *p; p = &(*p)->next) if (*p == b) { *p = b->next; break; }
-            gone = b; S.blocks--; S.freed++;
-        }
+    // Keep one empty block only when occupied blocks lack 16 MiB free or a 4 MiB run.
+    uint64_t available = 0; int large_run = 0, empties = 0;
+    for (iblock *x = g_blocks[b->type]; x; x = x->next) {
+        if (vke_empty(&x->free)) { empties++; continue; }
+        available += (uint64_t)(x->free.units - x->free.used) * UNIT;
+        for (uint32_t i = 0; i < x->free.nf; i++) large_run |= x->free.f[i].n >= VKA_IMEM_MAX / UNIT;
+    }
+    int keep = available < (16ull << 20) || !large_run;
+    if (empties > keep) for (iblock **p = &g_blocks[b->type]; *p;) {
+        iblock *x = *p;
+        if (!vke_empty(&x->free) || (keep && keep--)) { p = &x->next; continue; }
+        *p = x->next; x->next = gone; gone = x; S.blocks--; S.freed++;
     }
     pthread_mutex_unlock(&g_imu);
-    if (gone) { vk.vkFreeMemory(V.dev, gone->dm, NULL); vke_fini(&gone->free); free(gone); }
+    while (gone) { iblock *x = gone; gone = x->next; vk.vkFreeMemory(V.dev, x->dm, NULL); vke_fini(&x->free); free(x); }
     memset(m, 0, sizeof *m);
 }
 

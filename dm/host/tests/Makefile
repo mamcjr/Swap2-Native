@@ -67,7 +67,14 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_android_shlib
 	$(B)/t_android_imgmem
 	$(B)/t_android_zshare
+	$(B)/t_android_bcdec
+	$(B)/t_android_placedkill
 	$(B)/t_android_place
+	$(B)/t_android_psogate
+	$(B)/t_android_gbar
+	$(B)/t_android_ubq
+	$(B)/t_android_rcix
+	$(B)/t_android_smap
 	$(B)/t_audio_instream
 run: $(B)/t_nro
 run: $(B)/t_symbols
@@ -351,7 +358,7 @@ run: $(B)/t_audio_instream
 $(B)/t_audio_instream: t_audio_instream.c ../audio_instream.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_audio_instream.c
 # The Android host's pure parts (dm/host/android): resampler, channel map, SPS size, MediaCodec picture layouts; gamepad / touch / sensor mapping
-run: $(B)/t_android_av $(B)/t_android_input $(B)/t_android_shlib $(B)/t_android_spvpatch $(B)/t_android_imgmem $(B)/t_android_zshare $(B)/t_android_place
+run: $(B)/t_android_av $(B)/t_android_input $(B)/t_android_shlib $(B)/t_android_spvpatch $(B)/t_android_imgmem $(B)/t_android_zshare $(B)/t_android_bcdec $(B)/t_android_placedkill $(B)/t_android_place
 $(B)/t_android_av: t_android_av.c ../android/av_android.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_av.c
 $(B)/t_android_input: t_android_input.c ../android/input_map.c ../android/input_map.h ../motion_fusion.h ../dm_input.h | $(B)
@@ -368,10 +375,55 @@ $(B)/t_android_imgmem: t_android_imgmem.c $(VKA)/vka_extents.h | $(B)
 # Zero-shared image memory's bookkeeping (vka_zshare.h; vka_imgmem.c vka_imem_bind_zero, vka_tex.c img_own)
 $(B)/t_android_zshare: t_android_zshare.c $(VKA)/vka_zshare.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_zshare.c
+# BC blocks decoded on the CPU for a GPU without BC textures (vka_bcdec.h over dm/third_party/bcdec): the decoded formats and the texel layout
+# Fixed maps in the guest block merge with their neighbours again (plat_guestmap.h; hle_svc.c guest_release, vka_mem.c sw_mmap_fixed). Linux only (the kernel's merge rules,
+# counted in /proc/self/maps): make guestmap
+.PHONY: guestmap
+guestmap: $(B)/t_android_guestmap
+	$(B)/t_android_guestmap
+$(B)/t_android_guestmap: t_android_guestmap.c ../plat/plat_guestmap.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_guestmap.c
+$(B)/t_android_placedkill: t_android_placedkill.c $(VKA)/vka_placedkill.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_placedkill.c
+$(B)/t_android_bcdec: t_android_bcdec.c $(VKA)/vka_bcdec.h ../../third_party/bcdec/bcdec.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -I../../third_party/vulkan-headers/include -o $@ t_android_bcdec.c
 # Large memory pools placed by parts: the range arithmetic (vka_place.h; vka_mem.c mtl_pool_need)
 $(B)/t_android_place: t_android_place.c $(VKA)/vka_place.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_place.c
+# The background pipeline compiles' gate: slots by MemAvailable and the maps' headroom, the frame's compiles before prewarm's and the optimizer's, the asynchronous
+# queue's order (vka_psogate.h; vka_pso.c gate_enter, as_main)
+run: $(B)/t_android_psogate
+$(B)/t_android_psogate: t_android_psogate.c $(VKA)/vka_psogate.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_psogate.c
+# The game's barriers between compute dispatches: the barrier chosen for each, checked against NVN's ordering over every short sequence (vka_gbar.h; vka_gbar.c)
+run: $(B)/t_android_gbar
+$(B)/t_android_gbar: t_android_gbar.c $(VKA)/vka_gbar.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_gbar.c
+# Inline uniform updates on the Vulkan replay: the batch rule and the updates kept in a pass, against the updates one by one, and a draw's index and indirect-count
+# ranges (vka_ubq.h; vka_exec.c "Inline uniform updates (OP_UPDATE_UB)", vka_draw.c ub_hazard)
+run: $(B)/t_android_ubq
+$(B)/t_android_ubq: t_android_ubq.c $(VKA)/vka_ubq.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_ubq.c
+# Render conditions' index of the newest report by address against the reverse scan, and the occlusion queries' batch rule against the reads by report
+# (vka_rcix.h, vka_oqbatch.h; vka_exec.c rc_known, oq_batch_init)
+run: $(B)/t_android_rcix
+$(B)/t_android_rcix: t_android_rcix.c $(VKA)/vka_rcix.h $(VKA)/vka_oqbatch.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_rcix.c
+# The texture cache's serial -> image map and early-CPU-write set (vka_smap.h, upstream Banana Native v0.3.13; vka_tex.c "Images by serial": tombstones, live count, bounded table)
+run: $(B)/t_android_smap
+$(B)/t_android_smap: t_android_smap.c $(VKA)/vka_smap.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_smap.c
 # The replay's SPIR-V rewrites (vka_spvpatch.c): integer-fed vertex inputs (the selftest's vertex shader), storage and sampled images bound to integer textures (t_android_spvpatch_img.h),
 # validated by spirv-val when it is on the PATH; DM_VK_SPV_DIR=<.spv folder> adds those modules
 $(B)/t_android_spvpatch: t_android_spvpatch.c t_android_spvpatch_img.h $(VKA)/vka_spvpatch.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_spvpatch.c $(VKA)/vka_spvpatch.c
+
+# NVN dependencies and copied-texture ownership (BananaNative 0.2.8).
+run: $(B)/t_android_qsched $(B)/t_android_texown
+$(B)/t_android_qsched: t_android_qsched.c $(VKA)/vka_qsched.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -o $@ t_android_qsched.c
+$(B)/t_android_texown: t_android_texown.c $(VKA)/vka_texown.h ../../gfx/nvn/nvn_hmap.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -o $@ t_android_texown.c
+# Linux/Android real mmap/mremap + file extent test; not available on the Mac.
+$(B)/t_android_fileback: t_android_fileback.c $(VKA)/vka_fileback.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -pthread -o $@ t_android_fileback.c

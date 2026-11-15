@@ -140,6 +140,43 @@ def nso_build_id(path):   # the module's build ID (NSO header +0x40), as the pro
     return b[0x40:0x50].hex()
 
 
+def child_env(**extra):
+    """The environment for a Python child: UTF-8 output and files"""
+    return {**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8:backslashreplace', **extra}
+
+
+def unregistered(g, ids):
+    """{module: [builds in the profile]} for each module in ids whose build ID is in none of the profile's `build` rows (a profile may register several
+    versions of the game, each its own `build` row)"""
+    known = {}
+    for v in g.builds().values():
+        for m, i in v.items():
+            if m != 'display': known.setdefault(m, []).append(i)
+    return {m: known[m] for m, i in ids.items() if m in known and i not in known[m]}
+
+
+def dump_modules(g, exe):
+    """The modules to pack from exe, in the profile's load order: g.words('modules') when every one of them is in exe, else the modules of the profile's
+    `build` row whose build IDs match the NSOs in exe (Mario Kart World 1.8.0 adds subsdk1, which 1.0.0 does not have: 1.0.0's build row names main,
+    subsdk0 and sdk, and a 1.0.0 dump has those three). If no row matches, g.words('modules') is returned so the caller reports the missing files"""
+    mods = g.words('modules')
+    present = [m for m in mods if (exe / m).is_file()]
+    if len(present) == len(mods): return mods
+    have = {m: nso_build_id(exe / m) for m in present}
+    for v in g.builds().values():
+        row = {m: i for m, i in v.items() if m != 'display'}
+        if row and row == have: return [m for m in mods if m in row]
+    return mods
+
+
+def optional_keys(g):
+    """The shader keys of g's shader_map.tsv that only some registered builds of the game have (dm/games/<id>/shader_optional.tsv, one `<key>\\t<build>` a
+    line): a dump of another registered build may lack them, and split_shaders lists the ones it lacks in `<pkg>/_absent.tsv` for vk_android_build.py"""
+    p = g.dir / 'shader_optional.tsv'
+    if not p.is_file(): return set()
+    return {l.split('\t')[0].strip() for l in p.read_text(encoding='utf-8').splitlines() if l.strip() and not l.startswith('#')}
+
+
 def run_in_process(script, args, env, log):
     """script run as `python3 script args` would run it, in this process: its sys.argv, env added to os.environ, stdout and stderr to the file log;
     everything put back after it (the modules it imported from outside the standard library are dropped, so the next run starts afresh). → its exit code"""
@@ -185,13 +222,18 @@ def rewriter_src(src, out, m, mods=()):
     .nup-src/<module>/ under the module's own name. The rewriter then reads a plain file, so its files (REWRITER, rewrite_key) are the same for a NUP
     file and a folder, and a pack made from either keeps the other's rewritten modules. With exefs patches (mods) the copy is the patched module
     (exefs_patches.apply: before the rewriter, so a code cave's svc and timer reads become gates too), and each file is listed with its records"""
-    if '.nup:' not in str(src) and not mods: return src
+    if '.nup:' not in str(src).lower() and not mods: return src   # (the extension in any case: nup.split)
     d = out / '.nup-src' / m; d.mkdir(parents=True, exist_ok=True)
     data = src.read_bytes()
     if mods:
         data, report = exefs_patches.apply(data, mods, m)
         for label, n, w in report: print(f'  {m}: exefs patch {label}: {n} records, {w} bytes', flush=True)
     f = d / src.name; f.write_bytes(data); return f
+
+
+def mod_labels(mods, m):
+    """The labels of module m's exefs patches, for the rewriter (DM_EXEFS_MODS: a frame-step site a mod changed yields to the mod, patch_nso.py); '' without"""
+    return ', '.join(label for label, _ in mods.get(m, ()))
 
 
 def rewrite(py, srcs, out, jobs, g, in_process=False, mods=None):
@@ -214,7 +256,8 @@ def rewrite(py, srcs, out, jobs, g, in_process=False, mods=None):
             shutil.rmtree(staging(out, m), ignore_errors=True)
             print(f'  {m}: rewriting {src} (in process)', flush=True)
             t0 = time.monotonic()
-            rc = run_in_process(REPO / 'dm/tools/patch_nso.py', [str(rewriter_src(src, out, m, mods.get(m, ()))), staging(out, m), m, '--target', 'android'], {'DM_GAME': g.id, 'DM_REWRITE_J': '1'}, out / f'rewrite_{m}.log')
+            rc = run_in_process(REPO / 'dm/tools/patch_nso.py', [str(rewriter_src(src, out, m, mods.get(m, ()))), staging(out, m), m, '--target', 'android'],
+                                {'DM_GAME': g.id, 'DM_REWRITE_J': '1', 'DM_EXEFS_MODS': mod_labels(mods, m)}, out / f'rewrite_{m}.log')
             if rc:
                 tail = (out / f'rewrite_{m}.log').read_text(errors='replace').splitlines()[-20:]
                 raise Error(f'patch_nso.py exit code {rc} on {m}:\n' + '\n'.join(tail))
@@ -229,7 +272,8 @@ def rewrite(py, srcs, out, jobs, g, in_process=False, mods=None):
                 m = pending.pop(0); kf = out / f'{m}.android.key'; kf.unlink(missing_ok=True); shutil.rmtree(staging(out, m), ignore_errors=True)
                 print(f'  {m}: rewriting {todo[m][0]}', flush=True)
                 log = open(out / f'rewrite_{m}.log', 'w')
-                procs[m] = (subprocess.Popen([py, str(REPO / 'dm/tools/patch_nso.py'), str(rewriter_src(todo[m][0], out, m, mods.get(m, ()))), str(staging(out, m)), m, '--target', 'android'], env=env, stdout=log, stderr=subprocess.STDOUT), log)
+                procs[m] = (subprocess.Popen([py, str(REPO / 'dm/tools/patch_nso.py'), str(rewriter_src(todo[m][0], out, m, mods.get(m, ()))), str(staging(out, m)), m, '--target', 'android'],
+                                             env=dict(env, DM_EXEFS_MODS=mod_labels(mods, m)), stdout=log, stderr=subprocess.STDOUT), log)
             for m in list(procs):
                 p, log = procs[m]
                 if p.poll() is None: continue
@@ -290,33 +334,38 @@ def map_keys(path):
     with open(path) as f: return {c[3] for c in (l.rstrip('\n').split('\t') for l in f) if len(c) > 4 and c[0].endswith('.bin')}
 
 
-def split_shaders(a, g, vdir, pkg):
+def split_shaders(a, g, vdir, pkg, parts=None):   # parts: the version's (romfs, exefs) when they are not vdir's own (pack_dump.version_part)
     """The Switch shader package from the dump, as the phone's split step makes it (the version's romfs and main, android/app PackService "split"): shader_split.py into
     <pkg> (written beside it, then renamed, so a stopped split leaves no half package). Its tables go beside the package. The library is the profile's (its shader_map.tsv
     decides what is built, and vk_android_build.py finds each of its shaders in the package by key), so the split must hold every shader of the profile's map: one that
     lacks any (a dump of another version, or incomplete) stops here"""
+    rd, ed = parts or (pack_dump.romfs_of(vdir) or vdir / 'romfs', vdir / 'exefs')
     py = shader_python(a.shader_python, split=True)
     tmp = pkg.with_name(pkg.name + '.tmp'); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
-    rom = pack_dump.romfs_of(vdir) or vdir / 'romfs'
-    print(f'shaders: splitting the shaders out of {rom} into {pkg} with {py} (a few minutes)', flush=True)
-    env = dict(os.environ, DM_GAME=g.id)
-    r = subprocess.run([py, str(SPLIT), str(rom), str(vdir / 'exefs' / 'main'), str(tmp / 'pkg'),
+    print(f'shaders: splitting the shaders out of {rd} into {pkg} with {py} (a few minutes)', flush=True)
+    env = child_env(DM_GAME=g.id, DM_SPLIT_TARGETED='1')   # as the phone: only the files the profile's map names, when the build is the profile's and the tables come out the same
+    r = subprocess.run([py, str(SPLIT), str(rd), str(ed / 'main'), str(tmp / 'pkg'),
                         *[str(tmp / f) for f in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')]], env=env)
     if r.returncode: raise Error(f'shader_split.py exit code {r.returncode}')
     if (g.dir / 'shader_map.tsv').is_file():
         want, have = map_keys(g.dir / 'shader_map.tsv'), map_keys(tmp / 'shader_map.tsv')
-        if missing := sorted(want - have):
-            raise Error(f'the dump\'s shaders lack {len(missing)} of the {len(want)} in the profile\'s shader_map.tsv (e.g. {", ".join(missing[:3])}): the dump is of another version '
+        missing = sorted(want - have)
+        if hard := [k for k in missing if k not in optional_keys(g)]:
+            raise Error(f'the dump\'s shaders lack {len(hard)} of the {len(want)} in the profile\'s shader_map.tsv (e.g. {", ".join(hard[:3])}): the dump is of another version '
                         f'or incomplete, and the profile\'s shader library cannot be built from it (the split is in {tmp})')
         for f in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv'):
             if (g.dir / f).is_file() and (g.dir / f).read_bytes() != (tmp / f).read_bytes():
                 print(f'shaders: the dump\'s {f} differs from the profile\'s ({len(have - want)} shaders more); the library is the profile\'s, its shaders found in the package by key')
     shutil.rmtree(pkg, ignore_errors=True); (tmp / 'pkg').rename(pkg)
+    absent = sorted(want - have) if (g.dir / 'shader_map.tsv').is_file() else []   # the keys only another registered build has (shader_optional.tsv): listed for a library build to leave out
+    if absent:
+        (pkg / '_absent.tsv').write_text(''.join(k + '\n' for k in absent))
+        print(f'shaders: {len(absent)} of the profile\'s {len(want)} shaders are not in this dump (they belong to another registered build of the game, shader_optional.tsv): listed in {pkg.name}/_absent.tsv')
     for f in tmp.iterdir(): f.replace(pkg.with_name(f.name))
     tmp.rmdir()
 
 
-def pack_shaders(a, g, work, out, vdir):
+def pack_shaders(a, g, work, out, vdir, parts=None):
     """shaders/v-<V>/ in the pack: an up-to-date library from the cache (built there first when it is missing or stale, from the shader package, split from the dump
     first when there is none and --shader-pkg names none). → the library path in the pack, or None"""
     v = vk_chain(); name = VK_PREFIX + v
@@ -325,11 +374,11 @@ def pack_shaders(a, g, work, out, vdir):
     if not library_current(lib, g):
         if a.in_process: raise Error(f'no current shader library {lib}: --in-process does not build one yet (vk_android_build.py starts the translator and spirv-val as programs); --no-shaders packs without')
         pkg = (a.shader_pkg or work / 'android-shaders' / 'pkg').resolve()
-        if not pkg.is_dir(): split_shaders(a, g, vdir, pkg)   # also into a --shader-pkg folder that is not there yet
+        if not pkg.is_dir(): split_shaders(a, g, vdir, pkg, parts)   # also into a --shader-pkg folder that is not there yet
         py = shader_python(a.shader_python)
         print(f'shaders: building the Vulkan library {lib} from {pkg} with {py} (J={a.J}; about 10 minutes on DKB)', flush=True)
         (work / 'android-shaders' / 'work').mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ, DM_GAME=g.id, J=str(a.J), WORK=str(work / 'android-shaders' / 'work'))
+        env = child_env(DM_GAME=g.id, J=str(a.J), WORK=str(work / 'android-shaders' / 'work'))
         r = subprocess.run([py, str(VK_BUILD), '--target', 'vulkan', str(pkg), str(cache)], env=env)
         if r.returncode: raise Error(f'vk_android_build.py exit code {r.returncode} (a package that lacks the profile\'s shaders stops it: delete {pkg} and the split runs again)')
         if not library_current(lib, g): raise Error(f'vk_android_build.py finished but {lib} is not a full library of {g.id} with the current inputs')
@@ -380,10 +429,10 @@ def main():
         ver = a.version if a.version is not None else max(vers, default=0)
         if ver and ver not in vers: raise Error(f'no updates/{ver} (have: {", ".join(map(str, sorted(vers))) or "none"})')
         vdir = pack_dump.version_dir(folder, vers, ver)
-        exe, romfs = vdir / 'exefs', pack_dump.romfs_of(vdir)   # (romfs/, or a romfs.bin image: pack_dump.romfs_of)
-        if not (exe / 'main.npdm').is_file() or romfs is None: raise Error(f'{vdir}: no exefs/main.npdm and romfs (a folder, or romfs.bin)')
+        exe, romfs = pack_dump.version_part(folder, vers, ver, 'exefs'), pack_dump.version_part(folder, vers, ver, 'romfs')   # its own, else the base's
+        if not (exe / 'main.npdm').is_file() or not (romfs.is_dir() or romfs.is_file()): raise Error(f'{vdir}: no exefs/main.npdm and romfs (neither its own nor the base\'s)')
         if (pid := pack_dump.program_id(exe / 'main.npdm')) != app: raise Error(f'{vdir}: program ID {pid:016X}, the base is {app:016X}')
-        mods = g.words('modules')
+        mods = dump_modules(g, exe)
         srcs = {m: exe / m for m in mods}
         if missing := [m for m in mods if not srcs[m].is_file()]: raise Error(f'{exe}: no {", ".join(missing)} (the profile\'s modules are {" ".join(mods)})')
         out = (a.out or folder.parent / f'{app:016X}-work' / 'android-pack').resolve()
@@ -391,10 +440,8 @@ def main():
         except ValueError: pass
         out.mkdir(parents=True, exist_ok=True)
         ids = {m: nso_build_id(srcs[m]) for m in mods}
-        known = {m: i for v in g.builds().values() for m, i in v.items() if m != 'display'}
         print(f'{app:016X} {g.get("name", "?")} version {ver}: {vdir}', flush=True)
-        for m in mods:
-            if known.get(m) and known[m] != ids[m]: print(f'[RED] {m} build {ids[m]} is not the profile\'s build {known[m]}: build-gated cuts do not apply')
+        for m, known in unregistered(g, ids).items(): print(f'[RED] {m} build {ids[m]} is none of the profile\'s builds ({", ".join(known)}): build-gated cuts do not apply')
         # Exefs patches (mods) for each module's whole build ID, listed and checked against its segments here, before any key goes (exefs_patches.plan: a mod
         # for another build stops the run with the pack as it was), and applied to the modules that are rewritten (rewriter_src); --keep-code rewrites nothing
         patches = {}
@@ -427,7 +474,8 @@ def main():
             if not re.search(rf'^{row}\t', rt, re.M): raise Error(f'game.runtime wrote no {row} row')
         for row, v in (('SYS_RESOURCE', sysres), ('CORE_MASK', cmask), ('IDEAL_CORE', ideal)): rt = re.sub(rf'^{row}\t\d+$', f'{row}\t{v}', rt, flags=re.M)
         (out / 'game_profile.tsv').write_text(rt, encoding='utf-8', newline='\n')   # the profile the host reads at start (dm/host/rt/game_rt.c)
-        shaders = None if a.no_shaders else pack_shaders(a, g, folder.parent / f'{app:016X}-work', out, vdir)
+        if (g.dir / 'vk_prewarm.bin').is_file(): shutil.copyfile(g.dir / 'vk_prewarm.bin', out / 'vk_prewarm.bin')
+        shaders = None if a.no_shaders else pack_shaders(a, g, folder.parent / f'{app:016X}-work', out, vdir, (romfs, exe))
         top = folder.parent if pack_dump.nup.is_nup(folder) else folder   # a NUP file's paths are `<name>.nup:<package>/...`, relative to its folder
         rel = lambda p: p.relative_to(top).as_posix()
         rows = [('format', str(FORMAT)), ('title_id', f'{app:016X}'), ('name', g.get('name', '')), ('version', str(ver)), ('target', 'android'),

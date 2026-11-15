@@ -14,6 +14,7 @@ final class PrepareState {
 
     final String titleId, name;
     final long version;
+    final long updated;
     final File dump;          // the game's folder or .nup: Game.gameDir of its card
     final File file;          // the job's job.json
     final Phase phase;
@@ -41,6 +42,7 @@ final class PrepareState {
         titleId = j.titleId();
         name = j.name().isEmpty() ? j.titleId() : j.name();
         version = j.version();
+        updated = j.updated();
         dump = j.dump();
         file = j.file;
         String s = j.state();

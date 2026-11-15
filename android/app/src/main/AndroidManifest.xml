@@ -7,7 +7,10 @@
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x402000" android:required="false" />
     <!-- allowNativeHeapPointerTagging off: the host hands malloc'd blocks to guest code, which must see untagged pointers (also turned off in nxhost_main) -->
     <!-- hasFragileUserData: the app's storage holds the saves and the packs (AppStorage); uninstalling asks whether to keep it -->
+    <!-- appCategory game: the system's game dashboard, Game Mode and the vendors' game boosters see the app as a game (Banana Native 0.3.24's manifest has it) -->
     <application
+        android:name=".NxApp"
+        android:appCategory="game"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -64,7 +67,7 @@
             android:launchMode="singleTask"
             android:process=":game"
             android:screenOrientation="sensorLandscape"
-            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+            android:theme="@style/Theme.Swap2.Game"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
         <!-- The graphics selftest (nxhost_vk_selftest), in a process of its own so it never meets a running game's Vulkan device -->
         <activity

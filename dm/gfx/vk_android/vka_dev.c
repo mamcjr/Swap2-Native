@@ -3,15 +3,50 @@
 #if defined(__ANDROID__)
 #include "vka.h"
 #include <dlfcn.h>
+#include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "vka_fd_alias.h"
+#include "vka_ahb_alias.h"
+
+// The device's facts as init_once found them, for the game's log (said once by vka_mem.c at the first memory pool: init_once runs before that log is open)
+static char g_facts[3][900];
+void vka_dev_facts_log(void) { for (int i = 0; i < 3; i++) if (g_facts[i][0]) VLOG("%s", g_facts[i]); }
+
+// One placed map of a 64 KiB host-visible allocation at an address reserved for it (vka_dev.c, unadvertised placed maps): 1 when the driver maps it exactly there and
+// the memory reads back what was written through it
+static int vka_placed_probe(void) {
+    VkPhysicalDeviceMemoryProperties mp; vk.vkGetPhysicalDeviceMemoryProperties(V.pd, &mp);
+    uint32_t type = ~0u;
+    for (uint32_t i = 0; i < mp.memoryTypeCount && type == ~0u; i++)
+        if ((mp.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) type = i;
+    if (type == ~0u) return 0;
+    const VkDeviceSize n = 64 << 10;
+    VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = n, .memoryTypeIndex = type};
+    VkDeviceMemory mem; if (vk.vkAllocateMemory(V.dev, &mai, NULL, &mem)) return 0;
+    void *at = mmap(NULL, n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    int ok = 0; void *q = NULL; VkResult r = VK_ERROR_UNKNOWN;
+    if (at != MAP_FAILED) {
+        VkMemoryMapPlacedInfoEXT pi = {VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = at};
+        VkMemoryMapInfoKHR mi = {VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pi, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT, .memory = mem, .offset = 0, .size = VK_WHOLE_SIZE};
+        r = vk.vkMapMemory2KHR(V.dev, &mi, &q);
+        if (!r && q == at) { volatile uint32_t *w = q; w[0] = 0x5eed1234u; w[n / 4 - 1] = 0xc0ffee00u; ok = w[0] == 0x5eed1234u && w[n / 4 - 1] == 0xc0ffee00u; }
+        if (!r) { VkMemoryUnmapInfoKHR ui = {VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .memory = mem}; vk.vkUnmapMemory2KHR(V.dev, &ui); }
+        munmap(at, n);
+    }
+    vk.vkFreeMemory(V.dev, mem, NULL);
+    VLOG("placed maps: not advertised by the driver; a placed map %s (vkMapMemory2 %d, asked %p, got %p)%s", ok ? "works" : "does not work", r, at, q,
+         ok ? ": used without the extension (DM_VK_PLACED_PROBE=0: off)" : "");
+    return ok;
+}
 
 vka_fns vk;
 vka_dev V = {.qmu = PTHREAD_MUTEX_INITIALIZER};
 static int g_state;   // 0 not tried, 1 up, -1 failed
 static pthread_mutex_t g_init_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_fault_on;
 
 
 uint32_t vka_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid) {
@@ -24,10 +59,36 @@ static int has_ext(const VkExtensionProperties *e, uint32_t n, const char *name)
 
 static void *completion_main(void *arg);
 static void vka_host_compile_fns(void);   // (below: the host's floating-point environment)
+#include "vka_placedkill.h"
+int vka_placed_unused;   // the driver has placed maps and this run leaves them (an alias by choice or by the switch): vka_mem.c's line says which
+// The two records of vka_placedkill.h, in the game's temp folder, read and written here once a start: 1 = this run takes the alias in place of placed maps.
+// forget: placed maps again and the count cleared (DM_VK_ALIAS=placed). asked: this run's backing was asked for, or the switch is off: it neither counts nor acts
+static int placed_kill_check(int forget, int threshold, int asked) {
+    const char *t = getenv("DM_TEMP"), *d = getenv("DM_VK_DRIVER"); if (!t || !*t) return 0;
+    char key[96] = "system"; if (d && *d && strcmp(d, "system")) { const char *s = strrchr(d, '/'); snprintf(key, sizeof key, "%s", s && s[1] ? s + 1 : d); }
+    for (char *c = key; *c; c++) if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || *c == '.' || *c == '-' || *c == '_')) *c = '_';
+    char pl[700], pm[700], last[200] = "", mine[200] = "", lo[200], mo[200];
+    snprintf(pl, sizeof pl, "%s/vk_backing-last.txt", t); snprintf(pm, sizeof pm, "%s/vk_backing-%s.txt", t, key);
+    if (forget) remove(pm);
+    FILE *f = fopen(pl, "re"); if (f) { size_t n = fread(last, 1, sizeof last - 1, f); last[n] = 0; fclose(f); }
+    f = fopen(pm, "re"); if (f) { size_t n = fread(mine, 1, sizeof mine - 1, f); mine[n] = 0; fclose(f); }
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    vkpk_result r = vkpk_decide(last, mine, getenv("NX_PREV_EXIT"), key, (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000, threshold, asked, lo, sizeof lo, mo, sizeof mo);
+    if ((f = fopen(pl, "we")) != NULL) { fputs(lo, f); fclose(f); }
+    if ((f = fopen(pm, "we")) != NULL) { fputs(mo, f); fclose(f); }
+    if (r.use_alias)
+        VLOG("guest memory: %d run%s of this game on this driver (%s) ended killed from outside in the foreground while its memory was placed Vulkan memory: the exported alias "
+             "in its place from now on (%s; DM_VK_ALIAS=placed: placed maps again; DM_VK_PLACED_KILLS=0: never switch)", r.kills, r.kills == 1 ? "" : "s", key, pm);
+    else if (r.counted > 0)
+        VLOG("guest memory: the run before on this driver (%s) ended killed from outside in the foreground on placed maps (%d in a row, the alias is taken at %d; DM_VK_PLACED_KILLS)", key, r.kills, threshold);
+    return r.use_alias;
+}
+#include "vka_validation.inc"
 static int init_once(void) {
     void *lib = vka_driver_open();   // DM_VK_DRIVER: a custom driver through libadrenotools (vka_driver.c); NULL = the system's
     if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
     if (!lib || !(vk.vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr"))) { VRED("no libvulkan.so: %s", dlerror()); return 0; }
+    if(!val_open())return 0;
 #define G(f) vk.f = (PFN_##f)vk.vkGetInstanceProcAddr(NULL, #f);
     VKA_GLOBAL_FNS(G)
 #undef G
@@ -37,6 +98,7 @@ static int init_once(void) {
     VkExtensionProperties *ie = calloc(ne ? ne : 1, sizeof *ie); vk.vkEnumerateInstanceExtensionProperties(NULL, &ne, ie);
     const char *iext[4]; uint32_t niext = 0;
     if (has_ext(ie, ne, VK_KHR_SURFACE_EXTENSION_NAME) && has_ext(ie, ne, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME)) { iext[niext++] = VK_KHR_SURFACE_EXTENSION_NAME; iext[niext++] = VK_KHR_ANDROID_SURFACE_EXTENSION_NAME; V.has_android_surface = 1; }
+    if(val_layer && has_ext(ie,ne,VK_EXT_DEBUG_REPORT_EXTENSION_NAME))iext[niext++]=VK_EXT_DEBUG_REPORT_EXTENSION_NAME;
     free(ie);
     const char *layer = "VK_LAYER_KHRONOS_validation"; uint32_t nlayer = 0;
     const char *ve = getenv("DM_VK_VALIDATE");
@@ -75,15 +137,22 @@ static int init_once(void) {
 
     uint32_t nde = 0; vk.vkEnumerateDeviceExtensionProperties(V.pd, NULL, &nde, NULL);
     VkExtensionProperties *de = calloc(nde ? nde : 1, sizeof *de); vk.vkEnumerateDeviceExtensionProperties(V.pd, NULL, &nde, de);
-    const char *dext[16]; uint32_t ndext = 0;
+    const char *dext[32]; uint32_t ndext = 0;
     { char q[700]; size_t qn = 0; q[0] = 0;   // the vendor's own extensions (tile properties, render pass transforms ...): what a tiler-specific path could use
       for (uint32_t i = 0; i < nde && qn < sizeof q; i++) if (strstr(de[i].extensionName, "_QCOM_")) qn += (size_t)snprintf(q + qn, sizeof q - qn, " %s", de[i].extensionName + 3);
       if (qn) VLOG("device extensions of the vendor:%s", q); }
     int swap = has_ext(de, nde, VK_KHR_SWAPCHAIN_EXTENSION_NAME), map2 = has_ext(de, nde, VK_KHR_MAP_MEMORY_2_EXTENSION_NAME), placed = map2 && has_ext(de, nde, VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME);
     V.display_timing = swap && has_ext(de, nde, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
     if (swap) dext[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    V.mem_budget = has_ext(de, nde, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    if (V.mem_budget) dext[ndext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
     if (map2) dext[ndext++] = VK_KHR_MAP_MEMORY_2_EXTENSION_NAME;
     if (placed) dext[ndext++] = VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME;
+    int x_fd = has_ext(de, nde, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+    if (x_fd) dext[ndext++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+    // Hardware buffers as pool memory (vka_ahb_alias.h): for a driver without placed maps (Mali, Xclipse). Enabled wherever it is, used only when its probe passes below
+    int x_ahb = has_ext(de, nde, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME) && has_ext(de, nde, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+    if (x_ahb) { dext[ndext++] = VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME; dext[ndext++] = VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME; }
     if (V.display_timing) dext[ndext++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
     // The draw path (vka_draw.c): each one optional, with a fallback when absent
     int x_push = has_ext(de, nde, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME), x_vin = has_ext(de, nde, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
@@ -98,10 +167,24 @@ static int init_once(void) {
     int x_gpl = has_ext(de, nde, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) && has_ext(de, nde, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
     if (x_gpl) { dext[ndext++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME; dext[ndext++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME; }
     int mesh_ext = has_ext(de, nde, VK_EXT_MESH_SHADER_EXTENSION_NAME); const char *mesh_env = getenv("DM_VK_MESH");   // restart only: the device's extensions
-    int x_mesh = mesh_ext && !(mesh_env && !strcmp(mesh_env, "0"));
+    // Qualcomm's own driver (driver ID 8) draws NVN2's task and mesh programs through the compute fallback (vka_mesh.inc) even where it has VK_EXT_mesh_shader (the
+    // Adreno 840 and 850 packages): its native mesh pipelines drew Ocarina of Time's scene as scattered garbage triangles on an Adreno 850 (891.14), and on the Adreno 840
+    // put that game's foliage colour pass behind its own mesh depth prepass (DroidPlay Core f7447509), where the fallback, which every Adreno 830 package runs, draws it
+    // right (docs/reference/shaders.md "Native mesh shading on Qualcomm's driver"). DM_VK_MESH=1: native all the same (an A/B); =0: off on every driver; Turnip keeps it
+    int mesh_qcom = 0;
+    if (mesh_ext && !(mesh_env && (!strcmp(mesh_env, "0") || !strcmp(mesh_env, "1")))) {
+        VkPhysicalDeviceDriverProperties dp0 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 pp0 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &dp0};
+        vk.vkGetPhysicalDeviceProperties2(V.pd, &pp0);
+        mesh_qcom = dp0.driverID == VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
+    }
+    int x_mesh = mesh_ext && !(mesh_env && !strcmp(mesh_env, "0")) && !mesh_qcom;
     if (x_mesh) dext[ndext++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
     int x_ph = has_ext(de, nde, "VK_QCOM_queue_perf_hint");
     if (x_ph) dext[ndext++] = "VK_QCOM_queue_perf_hint";
+    const char *fault_env = getenv("DM_VK_DEVICE_FAULT");
+    int x_fault = has_ext(de, nde, VK_EXT_DEVICE_FAULT_EXTENSION_NAME) && !(fault_env && !strcmp(fault_env, "0"));
+    if (x_fault) dext[ndext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     free(de);
 
     // Every feature the device has, but robustness and capture-replay (they cost and nothing needs them); the shader side takes what it needs from the same device
@@ -112,17 +195,21 @@ static int init_once(void) {
     VkPhysicalDeviceVertexAttributeDivisorFeatures fdiv = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES};
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT fgpl = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
     VkPhysicalDeviceMeshShaderFeaturesEXT fmesh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
+    VkPhysicalDeviceFaultFeaturesEXT ffault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     void *chain = placed ? &fmp : NULL;
 #define LINK(on, st) if (on) { (st).pNext = chain; chain = &(st); }
     struct { VkStructureType sType; void *pNext; VkBool32 queuePerfHint; } fph = {(VkStructureType)1000302001};   // VkPhysicalDeviceQueuePerfHintFeaturesQCOM (not in the NDK's headers yet)
-    LINK(x_vin, fvin) LINK(x_rob, frob) LINK(x_i8, fi8) LINK(x_div, fdiv) LINK(x_ph, fph) LINK(x_gpl, fgpl) LINK(x_mesh, fmesh)
+    LINK(x_vin, fvin) LINK(x_rob, frob) LINK(x_i8, fi8) LINK(x_div, fdiv) LINK(x_ph, fph) LINK(x_gpl, fgpl) LINK(x_mesh, fmesh) LINK(x_fault, ffault)
 #undef LINK
     VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = chain};
     VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = &f12};
     VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f11};
     vk.vkGetPhysicalDeviceFeatures2(V.pd, &f2);
-    f2.features.robustBufferAccess = VK_FALSE; f13.robustImageAccess = VK_FALSE;
+    ffault.deviceFaultVendorBinary = VK_FALSE;
+    g_fault_on = x_fault && ffault.deviceFault;
+    // Diagnostic A/B for descriptor-range violations; never enabled by a game profile.
+    f2.features.robustBufferAccess &= VKA_ENV("DM_VK_ROBUST_DIAG", 0) != 0; f13.robustImageAccess = VK_FALSE;
     f12.bufferDeviceAddressCaptureReplay = VK_FALSE; f12.bufferDeviceAddressMultiDevice = VK_FALSE;
     frob.robustBufferAccess2 = VK_FALSE; frob.robustImageAccess2 = VK_FALSE;   // only nullDescriptor: unbound slots read a null descriptor
     // Mesh shading: the task and mesh stages only (multiview, shading-rate and query support each need more of the device than the replay enables or uses)
@@ -133,6 +220,7 @@ static int init_once(void) {
     V.divisor = x_div && fdiv.vertexAttributeInstanceRateDivisor; V.logic_op = f2.features.logicOp; V.dual_src = f2.features.dualSrcBlend; V.geom = f2.features.geometryShader;
     V.tess = f2.features.tessellationShader; V.depth_clamp = f2.features.depthClamp; V.fill_lines = f2.features.fillModeNonSolid; V.depth_bias_clamp = f2.features.depthBiasClamp;
     V.multi_vp = f2.features.multiViewport; V.a2c = 1; V.mesh = x_mesh && fmesh.meshShader; V.task = V.mesh && fmesh.taskShader;
+    V.vstores = f2.features.vertexPipelineStoresAndAtomics; V.fstores = f2.features.fragmentStoresAndAtomics;   // (enabled with the rest: texture pool reads, vka_tex.c)
     if (!f12.timelineSemaphore || !f13.dynamicRendering) { VRED("the device lacks timeline semaphores (%d) or dynamic rendering (%d)", f12.timelineSemaphore, f13.dynamicRendering); return 0; }
     // (enabled with the rest above when the device has them) vertex shaders read the draw's base instance from BaseInstance (vk_android_spv.py base_instance), and an indirect draw's firstInstance must be honoured
     if (!f11.shaderDrawParameters || !f2.features.drawIndirectFirstInstance) VRED("the device lacks shaderDrawParameters (%d) or drawIndirectFirstInstance (%d): instanced vertex shaders and indirect draws' first instances will be wrong", f11.shaderDrawParameters, f2.features.drawIndirectFirstInstance);
@@ -151,10 +239,53 @@ static int init_once(void) {
 #define D(f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(V.dev, #f);
     VKA_DEVICE_FNS(D)
 #undef D
+    val_probe();
     if (!vk.vkMapMemory2KHR) vk.vkMapMemory2KHR = (PFN_vkMapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkMapMemory2");   // core in 1.4
     if (!vk.vkUnmapMemory2KHR) vk.vkUnmapMemory2KHR = (PFN_vkUnmapMemory2KHR)vk.vkGetDeviceProcAddr(V.dev, "vkUnmapMemory2");
     if (!vk.vkMapMemory2KHR || !vk.vkUnmapMemory2KHR) V.placed = V.placed_range = 0;
+    // DM_VK_ALIAS=fd / ahb (restart only, a diagnostic): run as a driver without placed maps does, on the exported alias or the hardware buffer alias, to test
+    // those paths on a phone that has placed maps
+    // DM_VK_ALIAS=prefer (the launcher's default since 2026-11-14, a game's Graphics setting "GPU memory sharing"): an alias when the driver has one (the
+    // exported one, else the hardware buffer one), placed maps when it has none: unlike fd / ahb it never leaves the GPU without the game's memory
+    const char *alias_env = getenv("DM_VK_ALIAS");
+    int force_fd = alias_env && !strcmp(alias_env, "fd"), force_ahb = alias_env && !strcmp(alias_env, "ahb"), prefer = alias_env && !strcmp(alias_env, "prefer");
+    // A game killed from outside on placed maps twice in a row takes the exported alias from then on (vka_placedkill.h: a Redmagic 11 Air; the cause in that
+    // phone's kernel is open). DM_VK_PLACED_KILLS=<n>: the kills in a row that switch (2), 0: never; DM_VK_ALIAS=placed: placed maps again, the count cleared.
+    // Its records are written on every start of a driver with placed maps, whatever the run's backing: the next run must know what this one was
+    int auto_alias = 0, keep_placed = V.placed, keep_range = V.placed_range, keep_reserve = V.unmap_reserve;
+    if (keep_placed) {
+        int forget = alias_env && !strcmp(alias_env, "placed"), threshold = VKA_ENV("DM_VK_PLACED_KILLS", 2), asked = (alias_env && !forget) || threshold <= 0 || !x_fd || !vka_fd_enabled();
+        if (placed_kill_check(forget, threshold, asked)) auto_alias = 1;
+    }
+    if (prefer) { auto_alias = 1; VLOG("DM_VK_ALIAS=prefer: an alias of guest memory when this driver has one, placed maps when it has none"); }
+    if (force_fd || force_ahb) { V.placed = V.placed_range = V.unmap_reserve = 0; VLOG("DM_VK_ALIAS=%s: placed maps are left unused", alias_env); }
+    if (auto_alias) { V.placed = V.placed_range = V.unmap_reserve = 0; force_fd = 1; }   // (force_fd: the exported alias is tried, and the unadvertised placed map only as the fallback below)
+    // A driver that has the placed map but does not advertise it (Qualcomm 512.863 on the Adreno 740: the strings and vkMapMemory2 are in the driver, the extension is
+    // not reported and cannot be enabled): try one placed map of a small allocation at a reserved address; when it lands there, use placed maps without enabling the
+    // extension (whole allocations only, no unmap-reserve). DM_VK_PLACED_PROBE=0 turns the try off
+    if (!V.placed && !force_fd && !force_ahb && vk.vkMapMemory2KHR && vk.vkUnmapMemory2KHR) {
+        const char *e = getenv("DM_VK_PLACED_PROBE");
+        if (!e || strcmp(e, "0")) V.placed = vka_placed_probe();
+    }
+    if (!V.placed && !force_ahb && x_fd && vka_fd_enabled()) {
+        char why[160]; V.fd_alias = vka_fd_probe(&vk, V.pd, V.dev, &V.memp, V.bda, why, sizeof why);
+        VLOG("exported guest memory alias: %s (%s; DM_VK_FD_ALIAS=0: off)", V.fd_alias ? "on" : "unavailable", why);
+    }
+    // The third way to guest-address memory (V.fd_alias 2): a hardware buffer the host maps over the pool's address itself (vka_ahb_alias.h)
+    if (!V.placed && !V.fd_alias && x_ahb && vka_ahb_enabled()) {
+        char why[240]; int ok = vka_ahb_probe(vk.vkGetDeviceProcAddr, vk.vkGetPhysicalDeviceExternalBufferProperties, V.pd, V.dev, &V.memp, V.qf, V.bda, why, sizeof why);
+        if (ok) V.fd_alias = 2;
+        VLOG("hardware buffer guest memory alias: %s (%s; DM_VK_AHB_ALIAS=0: off)", ok ? "on" : "unavailable", why);
+        vka_mem_backing_note(why);   // (said again at the first pool: these lines come before the game's log file is open)
+    } else if (!V.placed && !V.fd_alias) vka_mem_backing_note(!x_ahb ? "the driver lacks VK_ANDROID_external_memory_android_hardware_buffer or VK_EXT_queue_family_foreign" : "off (DM_VK_AHB_ALIAS=0)");
+    if (auto_alias && !V.fd_alias) {   // (no alias on this driver: placed maps are better than no GPU memory at all)
+        if (keep_placed) { V.placed = keep_placed; V.placed_range = keep_range; V.unmap_reserve = keep_reserve; }
+        else if (vk.vkMapMemory2KHR && vk.vkUnmapMemory2KHR) { const char *e = getenv("DM_VK_PLACED_PROBE"); if (!e || strcmp(e, "0")) V.placed = vka_placed_probe(); }
+        if (V.placed) { VLOG("guest memory: this driver has no alias to take in place of its placed maps: placed maps this run"); vka_mem_backing_note(""); }
+    }
+    vka_placed_unused = keep_placed && !V.placed;
     vka_host_compile_fns();
+    vka_shader_pfb_hook();   // (over the FPCR wrapper: the module it makes is the rewritten one; vka_shader.c "Texture pool reads")
     vk.vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
     if (x_ph && fph.queuePerfHint) V.perf_hint = (void *)vk.vkGetDeviceProcAddr(V.dev, "vkQueueSetPerfHintQCOM");
     VLOG("GPU clock floor (VK_QCOM_queue_perf_hint): %s", V.perf_hint ? "available (DM_VK_GPU_FLOOR)" : x_ph ? "extension without the feature" : "not on this device");
@@ -186,7 +317,7 @@ static int init_once(void) {
     if (V.mesh) { V.mesh_inv = pmesh.maxMeshWorkGroupInvocations; V.task_inv = pmesh.maxTaskWorkGroupInvocations; V.mesh_out_v = pmesh.maxMeshOutputVertices;
                   V.mesh_out_p = pmesh.maxMeshOutputPrimitives; V.task_payload = pmesh.maxTaskPayloadSize;
                   V.task_groups = pmesh.maxTaskWorkGroupCount[0]; V.mesh_groups = pmesh.maxMeshWorkGroupCount[0]; }
-    VLOG("mesh shading (NVN2 task and mesh programs): %s", V.task ? "on" : V.mesh ? "mesh shaders only (no taskShader)" : !mesh_ext ? "not on this device" : !x_mesh ? "off (DM_VK_MESH=0)" : "extension without the mesh stage");
+    VLOG("mesh shading (NVN2 task and mesh programs): %s", V.task ? "on" : V.mesh ? "mesh shaders only (no taskShader)" : !mesh_ext ? "not on this device" : mesh_qcom ? "the compute fallback on Qualcomm's driver, which has VK_EXT_mesh_shader (DM_VK_MESH=1: native)" : !x_mesh ? "off (DM_VK_MESH=0)" : "extension without the mesh stage");
     if (V.mesh) VLOG("mesh shading limits: workgroups mesh %u / task %u invocations, mesh output %u vertices / %u primitives / %u components / %u bytes, task payload %u bytes, mesh shared %u bytes",
                      V.mesh_inv, V.task_inv, V.mesh_out_v, V.mesh_out_p, pmesh.maxMeshOutputComponents, pmesh.maxMeshOutputMemorySize, V.task_payload, pmesh.maxMeshSharedMemorySize);
     VLOG("subgroups: size %u, stages %#x (geometry %s, fragment %s, vertex %s), operations %#x, quad operations in all stages %s, required size stages %#x", p11.subgroupSize, p11.subgroupSupportedStages,
@@ -199,9 +330,11 @@ static int init_once(void) {
     if (!vk.vkCmdPushDescriptorSetKHR) V.push_desc = 0, V.max_push = 0;
     if (!vk.vkCmdSetVertexInputEXT) V.vin_dyn = 0;
     vka_enc_install();
+    vka_gbar_install();   // on top of the encoder: sees every work command the replay records (vka_gbar.c)
     const VkPhysicalDeviceLimits *lim = &V.props.limits;
     V.ub_align = lim->minUniformBufferOffsetAlignment ? lim->minUniformBufferOffsetAlignment : 256; V.sb_align = lim->minStorageBufferOffsetAlignment ? lim->minStorageBufferOffsetAlignment : 256;
     V.ub_range = lim->maxUniformBufferRange; V.sb_range = lim->maxStorageBufferRange; V.max_vin_bindings = lim->maxVertexInputBindings;
+    vka_tex_pfb_flags();   // texture pool reads decided (and their buffers made) here, before any module is made, so no module's hook makes them under a caller's lock
 
     VkMemoryPropertyFlags HV = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     V.guest_type = vka_mem_type(~0u, HV | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0);
@@ -223,7 +356,27 @@ static int init_once(void) {
          "uniform alignment %llu (range %llu), storage alignment %llu, subgroups %u (%u-%u)",
          V.push_desc ? "yes" : "no", V.max_push, V.vin_dyn ? "yes" : "no", V.null_desc ? "yes" : "no", V.idx8 ? "yes" : "no", V.divisor ? "yes" : "no", V.logic_op ? "yes" : "no",
          V.dual_src ? "yes" : "no", V.geom ? "yes" : "no", V.tess ? "yes" : "no", (unsigned long long)V.ub_align, (unsigned long long)V.ub_range, (unsigned long long)V.sb_align, V.subgroup_size, V.subgroup_min, V.subgroup_max);
-    if (!V.placed) VRED("no VK_EXT_map_memory_placed: guest memory stays anonymous and the GPU sees no memory pool");
+    if (!V.placed && !V.fd_alias) VRED("no placed maps, exported alias or hardware buffer alias of guest memory: guest memory stays anonymous and the GPU sees no memory pool");
+    // The same facts kept for the game's log (vka_dev_facts_log): the device is made before the launcher opens that file, so none of the lines above is in it, and a
+    // report from a phone nobody here has (a Mali, an Xclipse) starts from them
+    snprintf(g_facts[0], sizeof g_facts[0], "device %s, vendor %#x, Vulkan %u.%u.%u, driver ID %d, driver version %#x; placed maps %s, guest memory alias %d, buffer device address %s, update-after-bind %s; "
+             "guest memory type %u (%#x), max allocation %llu MiB, at most %u allocations and %u samplers",
+             V.props.deviceName, V.props.vendorID, VK_API_VERSION_MAJOR(V.props.apiVersion), VK_API_VERSION_MINOR(V.props.apiVersion), VK_API_VERSION_PATCH(V.props.apiVersion), V.driver_id, V.props.driverVersion,
+             V.placed ? "yes" : "no", V.fd_alias, V.bda ? "yes" : "no", V.uab ? "yes" : "no", V.guest_type, V.guest_type < 32 ? V.memp.memoryTypes[V.guest_type].propertyFlags : 0,
+             (unsigned long long)(V.max_alloc >> 20), V.props.limits.maxMemoryAllocationCount, V.props.limits.maxSamplerAllocationCount);
+    snprintf(g_facts[1], sizeof g_facts[1], "draw path: push descriptors %s (%u), vertex input dynamic state %s, null descriptors %s, 8-bit indices %s, instance divisors %s, indirect count %s, logic op %s, "
+             "dual source %s, geometry %s, tessellation %s, mesh %s, sparse residency %s; uniform alignment %llu (range %llu), storage alignment %llu (range %llu), subgroups %u (%u-%u) in stages %#x",
+             V.push_desc ? "yes" : "no", V.max_push, V.vin_dyn ? "yes" : "no", V.null_desc ? "yes" : "no", V.idx8 ? "yes" : "no", V.divisor ? "yes" : "no", V.indirect_count ? "yes" : "no", V.logic_op ? "yes" : "no",
+             V.dual_src ? "yes" : "no", V.geom ? "yes" : "no", V.tess ? "yes" : "no", V.task ? "task and mesh" : V.mesh ? "mesh only" : "no", V.sparse_res ? "yes" : "no",
+             (unsigned long long)V.ub_align, (unsigned long long)V.ub_range, (unsigned long long)V.sb_align, (unsigned long long)V.sb_range, V.subgroup_size, V.subgroup_min, V.subgroup_max, V.subgroup_stages);
+    VkPhysicalDeviceVulkan12Properties p12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES}; VkPhysicalDeviceProperties2 pq = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &p12};
+    vk.vkGetPhysicalDeviceProperties2(V.pd, &pq);
+    snprintf(g_facts[2], sizeof g_facts[2], "features and limits: BC textures %s, ASTC %s, ETC2 %s, vertex stage stores %s, fragment stage stores %s, 64-bit integers %s, 16-bit integers %s, storage images without a format read %s / write %s, "
+             "multi draw indirect %s, depth clamp %s; compute shared memory %u bytes, workgroup %u invocations, update-after-bind sampled images %u a stage / %u a set, bound sets %u",
+             f2.features.textureCompressionBC ? "yes" : "no", f2.features.textureCompressionASTC_LDR ? "yes" : "no", f2.features.textureCompressionETC2 ? "yes" : "no", V.vstores ? "yes" : "no", V.fstores ? "yes" : "no",
+             f2.features.shaderInt64 ? "yes" : "no", f2.features.shaderInt16 ? "yes" : "no", f2.features.shaderStorageImageReadWithoutFormat ? "yes" : "no", f2.features.shaderStorageImageWriteWithoutFormat ? "yes" : "no",
+             f2.features.multiDrawIndirect ? "yes" : "no", f2.features.depthClamp ? "yes" : "no", V.props.limits.maxComputeSharedMemorySize, V.props.limits.maxComputeWorkGroupInvocations,
+             p12.maxPerStageDescriptorUpdateAfterBindSampledImages, p12.maxDescriptorSetUpdateAfterBindSampledImages, V.props.limits.maxBoundDescriptorSets);
     if (!swap) VRED("no VK_KHR_swapchain: nothing is presented");
     vka_present_init();
     return 1;
@@ -268,7 +421,20 @@ int vka_init(void) {
 }
 int vka_ok(void) { return __atomic_load_n(&g_state, __ATOMIC_ACQUIRE) > 0; }
 
+static VkResult submit_x(VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const VkSemaphore *wait, const uint64_t *wait_vals, const VkPipelineStageFlags *stages, VkSemaphore bin_signal, VkFence fence);
+// Every vka_submit's time waiting for the queue's lock and in the driver's vkQueueSubmit, and the calls (cumulative; the pace cost line, vka_perf.c)
+static _Atomic uint64_t g_qs_lock_ns, g_qs_call_ns, g_qs_n;
+void vka_submit_stats(uint64_t *lock_ns, uint64_t *call_ns, uint64_t *n) { *lock_ns = g_qs_lock_ns; *call_ns = g_qs_call_ns; *n = g_qs_n; }
+// Who else holds the queue lock, and for how long (the pace cost line): the present's submission and vkQueuePresentKHR, and the GPU clock floor
+static _Atomic uint64_t g_qh_ns[4];
+void vka_qhold_add(int k, uint64_t ns) { g_qh_ns[k & 3] += ns; }
+void vka_qhold_stats(uint64_t *v) { for (int i = 0; i < 4; i++) v[i] = g_qh_ns[i]; }
 VkResult vka_submit(VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const VkSemaphore *wait, const uint64_t *wait_vals, const VkPipelineStageFlags *stages, VkSemaphore bin_signal) {
+    return submit_x(cb, signal, nwait, wait, wait_vals, stages, bin_signal, VK_NULL_HANDLE);
+}
+// A submission with a fence of its own (vka_exec.c: a commit no timeline value signals yet, whose command buffer slot is reused once that fence is reached)
+VkResult vka_submit_fence(VkCommandBuffer cb, uint64_t signal, VkFence fence) { return submit_x(cb, signal, 0, NULL, NULL, NULL, VK_NULL_HANDLE, fence); }
+static VkResult submit_x(VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const VkSemaphore *wait, const uint64_t *wait_vals, const VkPipelineStageFlags *stages, VkSemaphore bin_signal, VkFence fence) {
     VkSemaphore sig[2]; uint64_t sv[2]; uint32_t ns = 0;
     if (signal) { sig[ns] = V.tl; sv[ns++] = signal; }
     if (bin_signal) { sig[ns] = bin_signal; sv[ns++] = 0; }
@@ -276,14 +442,18 @@ VkResult vka_submit(VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const V
     VkSemaphore ws[9]; uint64_t wv[9]; VkPipelineStageFlags wst[9];
     if (nwait > 8) { VRED_ONCE("vka_submit: %u waits, at most 8 taken: the rest are dropped", nwait); nwait = 8; }
     for (uint32_t i = 0; i < nwait; i++) { ws[i] = wait[i]; wv[i] = wait_vals[i]; wst[i] = stages[i]; }
+    uint64_t t0 = now_ns();
     pthread_mutex_lock(&V.qmu);
+    uint64_t t1 = now_ns();
     vks_queue_locked(&nwait, ws, wv, wst);
     VkTimelineSemaphoreSubmitInfo ti = {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO, .waitSemaphoreValueCount = nwait, .pWaitSemaphoreValues = wv, .signalSemaphoreValueCount = ns, .pSignalSemaphoreValues = sv};
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &ti, .waitSemaphoreCount = nwait, .pWaitSemaphores = ws, .pWaitDstStageMask = wst,
                        .commandBufferCount = cb ? 1 : 0, .pCommandBuffers = &cb, .signalSemaphoreCount = ns, .pSignalSemaphores = sig};
-    VkResult r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, VK_NULL_HANDLE);
+    VkResult r = vka_hung() ? VK_ERROR_DEVICE_LOST : vk.vkQueueSubmit(V.q, 1, &si, fence);
+    g_qs_lock_ns += t1 - t0; g_qs_call_ns += now_ns() - t1; g_qs_n++;
     if (!r && signal > V.tl_queued) __atomic_store_n(&V.tl_queued, signal, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&V.qmu);
+    if (r == VK_ERROR_DEVICE_LOST) vka_device_lost("vkQueueSubmit");
     return r;
 }
 // The queue idle, bounded by the hang time: the timeline up to the last value handed to it (the present's copies wait for no more), then vkQueueWaitIdle for the rest
@@ -330,6 +500,7 @@ uint64_t vka_done(void) { return __atomic_load_n(&g_done, __ATOMIC_ACQUIRE); }
 int vka_wait_done(uint64_t fence, uint64_t timeout_ns) {
     if (vka_done() >= fence) return 1;
     if (!timeout_ns) return 0;
+    vka_worker_cpu_wait(fence);   // a queue the replay parked at a GPU wait (vka_qsched.h) goes on now if it holds this fence back
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
     uint64_t ns = (uint64_t)dl.tv_nsec + (timeout_ns > 3600000000000ull ? 3600000000000ull : timeout_ns);
     dl.tv_sec += (time_t)(ns / 1000000000ull); dl.tv_nsec = (long)(ns % 1000000000ull);
@@ -357,16 +528,58 @@ uint64_t vka_hang_ns(void) {
 }
 static void *hang_exit_main(void *arg) { (void)arg; pthread_setname_np(pthread_self(), "vk-hang"); dm_host_shutdown("GPU hang"); return NULL; }
 void vka_exec_hang_report(uint64_t fence);   // vka_exec.c: what the stuck submission held
+// Based on BananaNative 0.3.0: request bounded textual fault details, never a vendor binary.
+static void fault_report(void) {
+    if (!g_fault_on) { VLOG("GPU fault details unavailable (VK_EXT_device_fault absent or disabled)"); return; }
+    PFN_vkGetDeviceFaultInfoEXT get = (PFN_vkGetDeviceFaultInfoEXT)vk.vkGetDeviceProcAddr(V.dev, "vkGetDeviceFaultInfoEXT");
+    if (!get) { VRED("GPU fault: vkGetDeviceFaultInfoEXT missing"); return; }
+    VkDeviceFaultCountsEXT n = {VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    VkResult r = get(V.dev, &n, NULL);
+    if (r && r != VK_INCOMPLETE) { VRED("GPU fault counts: %d", r); return; }
+    if (n.addressInfoCount > 32) n.addressInfoCount = 32;
+    if (n.vendorInfoCount > 32) n.vendorInfoCount = 32;
+    n.vendorBinarySize = 0;
+    VkDeviceFaultAddressInfoEXT ai[32] = {0}; VkDeviceFaultVendorInfoEXT vi[32] = {0};
+    VkDeviceFaultInfoEXT fi = {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = n.addressInfoCount ? ai : NULL, .pVendorInfos = n.vendorInfoCount ? vi : NULL};
+    r = get(V.dev, &n, &fi);
+    if (r && r != VK_INCOMPLETE) { VRED("GPU fault details: %d", r); return; }
+    VRED("GPU fault: %.*s (%u addresses, %u vendor codes)", (int)sizeof fi.description, fi.description, n.addressInfoCount, n.vendorInfoCount);
+    for (uint32_t i = 0; i < n.addressInfoCount && i < 32; i++)
+        VRED("GPU fault address %#llx, precision %#llx, type %u", (unsigned long long)ai[i].reportedAddress, (unsigned long long)ai[i].addressPrecision, ai[i].addressType);
+    for (uint32_t i = 0; i < n.vendorInfoCount && i < 32; i++)
+        VRED("GPU vendor fault %.*s: code %#llx, data %#llx", (int)sizeof vi[i].description, vi[i].description, (unsigned long long)vi[i].vendorFaultCode, (unsigned long long)vi[i].vendorFaultData);
+}
+static void hang_declare(uint64_t want, uint64_t at, double s, const char *what);
+void vka_device_lost(const char *what) {
+    if (vka_hung()) return;
+    char message[128]; snprintf(message, sizeof message, "%s returned -4 (device lost)", what);
+    uint64_t done = vka_done(); hang_declare(done + 1, done, 0, message);
+}
 static void hang_declare(uint64_t want, uint64_t at, double s, const char *what) {
     if (atomic_exchange(&g_hung, 1)) return;
     VRED("GPU hang: %s; fence %llu not reached in %.1f s (the timeline at %llu, %llu handed to the queue, %llu reserved): nothing more is submitted, every fence reads as done",
          what, (unsigned long long)want, s, (unsigned long long)at, (unsigned long long)vka_fence_queued(), (unsigned long long)vka_fence_last());
     vka_exec_hang_report(at + 1);
+    if (strstr(what, "-4")) fault_report();
     if (!VKA_ENV("DM_VK_HANG_EXIT", 1)) { VRED("GPU hang: DM_VK_HANG_EXIT=0, the game runs on without the GPU"); return; }
     VRED("GPU hang: the host exits (DM_VK_HANG_EXIT=0 runs on without the GPU)");
     pthread_t th; if (!pthread_create(&th, NULL, hang_exit_main, NULL)) pthread_detach(th);
 }
 
+// A host wait for the timeline. Test switch DM_VK_TL_POLL=1 (live): it reads the counter every 0.25 ms instead of blocking in vkWaitSemaphores (does a driver's
+// blocking wait hold its submissions back? Turnip v32 on KGSL, Ocarina of Time's note)
+VkResult vka_tl_wait(VkSemaphore s, uint64_t v, uint64_t timeout_ns) {
+    if (vka_hung()) return VK_ERROR_DEVICE_LOST;
+    if (!VKA_ENV("DM_VK_TL_POLL", 0)) { VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &s, .pValues = &v}; return vk.vkWaitSemaphores(V.dev, &wi, timeout_ns); }
+    uint64_t end = now_ns() + timeout_ns;
+    for (;;) {
+        uint64_t c = 0; VkResult r = vk.vkGetSemaphoreCounterValue(V.dev, s, &c);
+        if (r) return r;
+        if (c >= v) return VK_SUCCESS;
+        if (now_ns() >= end) return VK_TIMEOUT;
+        struct timespec ts = {0, 250000}; nanosleep(&ts, NULL);
+    }
+}
 static void *completion_main(void *arg) {
     (void)arg; pthread_setname_np(pthread_self(), "vk-complete"); vka_host_fp("vk-complete"); void vka_perf_thread(int nice); vka_perf_thread(-8);   // vka_perf.c
     uint64_t stall_t0 = 0, stall_at = 0; int stall_logged = 0;
@@ -379,9 +592,12 @@ static void *completion_main(void *arg) {
         uint64_t sub = g_submitted, done = g_done, want = VKA_ENV("DM_VK_DONE_LAST", 0) ? sub : done + 1; pthread_mutex_unlock(&g_fmu);
         uint64_t v = 0;
         if (!vka_hung()) {
-            VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &V.tl, .pValues = &want};
-            VkResult r = vk.vkWaitSemaphores(V.dev, &wi, 500000000ull);
-            vk.vkGetSemaphoreCounterValue(V.dev, V.tl, &v);
+            VkResult r = vka_tl_wait(V.tl, want, 500000000ull);
+            if (r == VK_ERROR_DEVICE_LOST) vka_device_lost("vkWaitSemaphores");
+            if (!vka_hung()) {
+                VkResult cr = vk.vkGetSemaphoreCounterValue(V.dev, V.tl, &v);
+                if (cr == VK_ERROR_DEVICE_LOST) vka_device_lost("vkGetSemaphoreCounterValue");
+            }
             uint64_t t = now_ns();
             if (r == VK_TIMEOUT && v <= done) {   // no progress in this wait
                 if (!stall_t0 || stall_at != done) { stall_t0 = t - 500000000ull; stall_at = done; stall_logged = 0; }
@@ -424,7 +640,11 @@ static VkSemaphore g_utl;   // the upload timeline: value n = upload batch n has
 static VkDeviceSize g_ubytes;   // staging taken by the open upload batch (under g_smu)
 static uint64_t up_done(void) {   // the upload timeline's value (every batch counts as done after a GPU hang)
     if (vka_hung()) return UINT64_MAX;
-    uint64_t v = 0; if (g_utl) vk.vkGetSemaphoreCounterValue(V.dev, g_utl, &v); return v;
+    uint64_t v = 0;
+    if (g_utl && vk.vkGetSemaphoreCounterValue(V.dev, g_utl, &v) == VK_ERROR_DEVICE_LOST) {
+        vka_device_lost("upload vkGetSemaphoreCounterValue"); return UINT64_MAX;
+    }
+    return v;
 }
 static int sblk_idle(const sblk *b, uint64_t done, uint64_t udone) { return b->fence <= (b->up ? udone : done); }
 static sblk *sblk_new(VkDeviceSize n) {
@@ -512,6 +732,7 @@ static int up_wait(uint64_t v) {   // 1 = the upload timeline reached v
     if (up_done() >= v) return 1;
     VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_utl, .pValues = &v};
     uint64_t t0 = now_ns(); VkResult r = vk.vkWaitSemaphores(V.dev, &wi, vka_hang_ns());
+    if (r == VK_ERROR_DEVICE_LOST) vka_device_lost("upload vkWaitSemaphores");
     g_n_uwait++; g_uwait_ns += now_ns() - t0;
     if (r && !vka_hung()) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VRED("upload batch %llu not done in %.1f s (%d)", (unsigned long long)v, vka_hang_ns() / 1e9, r); }
     return !r || vka_hung();
@@ -580,7 +801,8 @@ void vka_up_flush(void) {
     pthread_mutex_unlock(&V.qmu);
     // Nothing on the GPU will signal it: the host does, so later batches and the slot are not held; only once the batch before it is done (a host signal must be below
     // every value still pending on the queue)
-    if (r && !vka_hung() && (v == 1 || up_wait(v - 1))) { VkSemaphoreSignalInfo ss = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = g_utl, .value = v}; vk.vkSignalSemaphore(V.dev, &ss); }
+    if (r == VK_ERROR_DEVICE_LOST) vka_device_lost("upload vkQueueSubmit");
+    if (r && !vka_hung() && (v == 1 || up_wait(v - 1)) && !vka_hung()) { VkSemaphoreSignalInfo ss = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = g_utl, .value = v}; vk.vkSignalSemaphore(V.dev, &ss); }
     if (r) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("upload batch %llu: %d (its images keep what they held)", (unsigned long long)v, r); }
     g_ub[k].val = v; g_n_ubatch++;
     retire(1, v);
@@ -750,7 +972,7 @@ static _Atomic int g_tail_n;   // DM_VK_GPU_FLOOR_AUTO=2: submissions with draws
 static void floor_set_(int s, int tail, int again) {   // again: send it even if unchanged (the KGSL rule, see kg_apply)
     static _Atomic int cur = -1;
     if (!tail && !again && atomic_load(&cur) == s) return;
-    pthread_mutex_lock(&V.qmu);
+    pthread_mutex_lock(&V.qmu); uint64_t th = now_ns();
     if (tail) s = atomic_load(&g_tail_n) > 0 ? s : 0;
     if (!again && atomic_load(&cur) == s) { pthread_mutex_unlock(&V.qmu); return; }
     VkResult r;
@@ -759,6 +981,7 @@ static void floor_set_(int s, int tail, int again) {   // again: send it even if
         r = ((VkResult (*)(VkQueue, const void *))V.perf_hint)(V.q, &h);
     } else r = kg_apply(s);
     int was = atomic_exchange(&cur, s);
+    vka_qhold_add(2, now_ns() - th);
     pthread_mutex_unlock(&V.qmu);
     if (was < 0 || (was != s && VKA_ENV("DM_VK_GPU_FLOOR_LOG", 0) > 1)) VLOG("GPU clock floor%s: %d %% (%s): %d", V.perf_hint ? "" : " (KGSL)", s, s >= 100 ? "highest" : s ? "scaled" : "default governor", r);
 }

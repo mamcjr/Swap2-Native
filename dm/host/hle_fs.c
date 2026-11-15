@@ -760,6 +760,36 @@ static void fs_stat_note(int read, uint64_t t0, uint64_t bytes) {
 void dm_fs_time(uint64_t *open_ns, uint64_t *read_ns, uint64_t *read_bytes) {
     if (open_ns) *open_ns = atomic_load(&g_fst_open_ns); if (read_ns) *read_ns = atomic_load(&g_fst_read_ns); if (read_bytes) *read_bytes = atomic_load(&g_fst_read_b);
 }
+// The last files the game opened, for the crash report (crash.c prints them after the threads): a game that crashes in its own code a moment after it starts has
+// usually just read something wrong, and on a phone nobody here holds the report is all there is (Ocarina of Time on a POCO X7 Pro, 2026-11-14: a null texture
+// descriptor at main+0x773270, 3.5 s in, the same on two GPU drivers, the resource's memory all zeros: a damaged copy of the dump is the first suspect, and the files
+// named here are the ones to compare). A ring of 24 different paths with the image extent of each: a path opened again keeps its entry and counts (a streamed sound the
+// game opens every second took 10 of 16 entries in the first test), so the ring holds the last 24 files, not the last 24 opens. Written without a lock (a torn entry is
+// a diagnostic's cost)
+enum { FS_RECENT = 24 };
+static struct { char path[200]; uint64_t off, size; double t; unsigned opens; } g_fs_recent[FS_RECENT];
+static _Atomic unsigned g_fs_recent_n;
+static void fs_recent_note(const char *path, uint64_t off, uint64_t size) {
+    double t = (now_ns() - g_t0_ns) / 1e9; if (!path) path = "?";
+    atomic_fetch_add(&g_fs_recent_n, 1);
+    unsigned i = 0;   // (the entry a new path takes: a free one, or the one opened longest ago)
+    for (unsigned k = 0; k < FS_RECENT; k++) {
+        if (g_fs_recent[k].opens && !strncmp(g_fs_recent[k].path, path, sizeof g_fs_recent[k].path - 1)) { g_fs_recent[k].t = t; g_fs_recent[k].opens++; return; }
+        if (g_fs_recent[i].opens && (!g_fs_recent[k].opens || g_fs_recent[k].t < g_fs_recent[i].t)) i = k; }
+    snprintf(g_fs_recent[i].path, sizeof g_fs_recent[i].path, "%s", path); g_fs_recent[i].off = off; g_fs_recent[i].size = size; g_fs_recent[i].t = t; g_fs_recent[i].opens = 1;
+}
+void fs_recent_dump(void) {   // (crash handler: fprintf, as the rest of the report)
+    unsigned n = atomic_load(&g_fs_recent_n); if (!n) return;
+    unsigned char ord[FS_RECENT]; unsigned m = 0;
+    for (unsigned i = 0; i < FS_RECENT; i++) if (g_fs_recent[i].opens) {   // by the time of the last open, oldest first
+        unsigned k = m++; while (k && g_fs_recent[ord[k - 1]].t > g_fs_recent[i].t) { ord[k] = ord[k - 1]; k--; }
+        ord[k] = (unsigned char)i; }
+    fprintf(stderr, "[dm] the last %u files the game opened (%u opens in all), by the time of the last open, oldest first; a file of the game's package with its extent in it:\n", m, n);
+    for (unsigned k = 0; k < m; k++) { unsigned i = ord[k]; char times[24] = "";
+        if (g_fs_recent[i].opens > 1) snprintf(times, sizeof times, ", opened %u times", g_fs_recent[i].opens);
+        if (g_fs_recent[i].size) fprintf(stderr, "[dm]   [%.2fs] %s (at %#llx, %llu bytes%s)\n", g_fs_recent[i].t, g_fs_recent[i].path, (unsigned long long)g_fs_recent[i].off, (unsigned long long)g_fs_recent[i].size, times);
+        else fprintf(stderr, "[dm]   [%.2fs] %s%s\n", g_fs_recent[i].t, g_fs_recent[i].path, times); }
+}
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) {
     int mi; int64_t k; uint64_t fst0 = now_ns();
     if (img_path(path, &mi, &k)) {
@@ -774,6 +804,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
             if (!nup_z_get(g_mnt[mi].img, ent->a, why, sizeof why)) { LOG("[RED] fs %s: cannot decompress it from %s: %s", path, ((nup_aux *)g_mnt[mi].img->aux)->what, why); return RES_FAIL; }
         }
         *out = FH_OUT(IMG_HANDLE(mi, k));
+        fs_recent_note(path, ent->a, ent->b ? ent->b : 1);
         if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → image entry %lld", (now_ns() - g_t0_ns) / 1e9, path, mode, (long long)k);
         return RES_OK;
     }
@@ -791,6 +822,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     fslog_init();
     if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }
     fs_stat_note(0, fst0, 0);
+    fs_recent_note(path, 0, 0);
     if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
     return RES_OK;
 }

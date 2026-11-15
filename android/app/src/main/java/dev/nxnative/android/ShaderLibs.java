@@ -111,10 +111,15 @@ final class ShaderLibs {
             if (d.getName().equals("v-" + current)) continue;
             File lib = new File(d, "dmsh_vk.lib");
             Header h = header(lib);
-            if (h == null || !titleId.equals(h.game) || !abi.equals(h.abi)) continue;
+            if (h == null || !titleId.equals(h.game) || !compatibleAbi(abi, h.abi)) continue;
             if (best == null || lib.lastModified() > best.lastModified()) best = lib;
         }
         return best;
+    }
+
+    /** Same audited additive mesh extension accepted by vka_shlib_check; no restamping. */
+    static boolean compatibleAbi(String current, String library) {
+        return current.equals(library) || (current.equals("623c0a2f1e8a") && library.equals("674db0a4ff79"));
     }
 
     /**
@@ -272,5 +277,27 @@ final class ShaderLibs {
     static String jobMinutesText(int n) {
         int[] m = minutes(n);
         return String.format(Locale.ROOT, "about %d-%d minutes", m[0] + 2, m[1] + 5);
+    }
+
+    /**
+     * A loose shader library folder: dmsh_vk.lib at its top (a library shared as a folder, as Banana Native's packs keep theirs beside pack.tsv), or in its
+     * v-&lt;V&gt;/ or shaders/v-&lt;V&gt;/ (a pack's shaders folder), the newest of those, with no game code beside it (a pack's main.patched.bin: then it is a
+     * pack, read as one). Its library file, null when the folder is not one. The header says whose and which version it is (header())
+     */
+    static File loose(File dir) {
+        if (dir == null || !dir.isDirectory()) return null;
+        File[] code = dir.listFiles((d, n) -> n.endsWith(".patched.bin"));
+        if (code != null && code.length > 0) return null;
+        File top = new File(dir, "dmsh_vk.lib");
+        if (top.isFile()) return top;
+        File best = null;
+        for (File base : new File[] {dir, new File(dir, "shaders")}) {
+            File[] vs = base.listFiles(f -> f.getName().startsWith("v-") && new File(f, "dmsh_vk.lib").isFile());
+            if (vs != null) for (File v : vs) {
+                File lib = new File(v, "dmsh_vk.lib");
+                if (best == null || lib.lastModified() > best.lastModified()) best = lib;
+            }
+        }
+        return best;
     }
 }

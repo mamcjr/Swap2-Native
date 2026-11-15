@@ -31,4 +31,10 @@
     <color name="s2_dock">#FFFAFAF8</color>          <!-- the floating lower dock -->
     <color name="s2_brand_cyan">#FF42D4E5</color>    <!-- the mark's small offset shadows, the focus frame's offset edges -->
     <color name="s2_brand_coral">#FFFF777D</color>
+    <!-- The Play transition and the game's loading curtain (PlayCurtain): one dark stage in both themes, as the game's window behind it (Theme.Swap2.Game) -->
+    <color name="s2_play_stage">#FF0E1014</color>
+    <color name="s2_play_tile">#FF262A31</color>     <!-- the cover's box while there is no cover (the game's initial) -->
+    <color name="s2_play_text">#FFF4F4F2</color>
+    <color name="s2_play_text_2">#FFAEB4BF</color>
+    <color name="s2_play_track">#33FFFFFF</color>    <!-- the loading bar's track -->
 </resources>

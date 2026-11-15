@@ -39,6 +39,8 @@ mem_reserve	0x140000000
 mem_alias	0x118000000
 mem_stack	0x10000000
 app_pool	0x40000000
+# Preserve the measured legacy exception: Unity maps over this reported pool. Open: reconcile the profile's pool with those commitments before enabling enforcement.
+mem_map_limit	off
 
 # ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
 # engine built-ins (the unitybuiltinshaders bundle, Resources/) go to engine, the player's serialized files to data, the other Addressables bundles to assets

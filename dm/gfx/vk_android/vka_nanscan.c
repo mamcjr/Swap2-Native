@@ -4,6 +4,8 @@
 // DM_VK_NANSCAN=2 also splits long passes to find the draw: the Vulkan pass is ended (and reopened by the next draw, its attachments loaded) after every
 // DM_VK_NANSCAN_STEP draws (default 64), in passes into the image DM_VK_NANSCAN_SERIAL (default any), of the game's pass whose index is in DM_VK_NANSCAN_DRAWS=<from>-<to> (default all), at most MAXSPLIT times a submission,
 // and only the scans after which an attachment has more NaN / infinite texels than at its previous scan in the submission are logged, with the pass's draw range.
+// DM_VK_NANSCAN_BIG=<value>: a finite texel whose magnitude passes it counts with the infinite ones (blown-out HDR values, which NaN / infinity checks miss).
+// DM_VK_NANSCAN_MINW=<n>: targets narrower than n pixels are not scanned; DM_VK_NANSCAN_LINES=<n>: lines logged at most (default 200).
 // Bisect with a coarse step over the whole pass, then step 1 over the range it names. Costs a dispatch per attachment per pass (per split with 2): for finding a
 // cause, not for play
 #if defined(__ANDROID__)
@@ -30,7 +32,8 @@ int vka_nan_on(void) {
         const char *o = getenv("DM_VK_NANSCAN_SERIAL"); if (o) g_only = strtoull(o, NULL, 10);
         if (r) { char *x; g_from = (uint32_t)strtoul(r, &x, 10); if (*x == '-') g_to = (uint32_t)strtoul(x + 1, NULL, 10); }
         VLOG("DM_VK_NANSCAN=2: passes split every %u draws in draws %u-%u of a pass%s, at most %d splits a submission", g_step, g_from, g_to, g_only ? " into DM_VK_NANSCAN_SERIAL" : "", MAXSPLIT);
-    } else if (v) VLOG("DM_VK_NANSCAN: every pass's float attachments are scanned for NaN / infinite texels");
+    } else if (v) VLOG("DM_VK_NANSCAN: every pass's float attachments are scanned for NaN / infinite texels%s%s", getenv("DM_VK_NANSCAN_BIG") ? "; finite ones over DM_VK_NANSCAN_BIG=" : "",
+                       getenv("DM_VK_NANSCAN_BIG") ? getenv("DM_VK_NANSCAN_BIG") : "");
     return v;
 }
 // DM_VK_NANSCAN=2, after a draw: 1 = end the Vulkan pass now for a scan (the game's pass goes on)
@@ -118,6 +121,7 @@ static int scan_one(VkCommandBuffer cb, batch_t *b, vka_img *im, uint32_t lv, ui
     VkImageView v = vka_view(im, im->f.view, v3 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_ASPECT_COLOR_BIT, lv, 1, v3 ? 0 : l0, 1, NULL);
     if (!v) return 0;
     uint32_t w = im->w >> lv ? im->w >> lv : 1, h = im->h >> lv ? im->h >> lv : 1, dz = v3 ? (im->depth >> lv ? im->depth >> lv : 1) : 1;
+    if (w < (uint32_t)VKA_ENV("DM_VK_NANSCAN_MINW", 0)) return 0;   // targets narrower than it are not scanned (small ones that hold large values by design fill the log)
     int k = b->n++;
     b->res[k] = (res_t){0, 0, 0xffffffffu, 0};
     b->r[k] = (rec_t){vka_frame(), im->serial, pass, (uint32_t)im->d.format, w, h, lv, l0, g_d0, g_pdraws, g_pn, {0}, {0}, bind, tid};
@@ -126,7 +130,8 @@ static int scan_one(VkCommandBuffer cb, batch_t *b, vka_img *im, uint32_t lv, ui
     VkDescriptorBufferInfo bi = {g_res.buf, b->off + (VkDeviceSize)k * sizeof(res_t), sizeof(res_t)};
     VkWriteDescriptorSet wr[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii},
                                   {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi}};
-    uint32_t pc[4] = {w, h, v3 ? dz : 0, 0};
+    float big = 0; { const char *e = getenv("DM_VK_NANSCAN_BIG"); if (e) big = (float)atof(e); }   // finite texels over it count with the infinite ones
+    uint32_t pc[4] = {w, h, v3 ? dz : 0, 0}; memcpy(&pc[3], &big, 4);
     vk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, v3 ? g_pipe3 : g_pipe);
     vk.vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_lay, 0, 2, wr); vka_dyn_invalidate();   // the draws' last push is no longer bound (vka_draw.c push_same)
     vk.vkCmdPushConstants(cb, g_lay, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
@@ -177,7 +182,7 @@ static void report(void *arg) {
         const res_t *r = &b->res[k]; const rec_t *c = &b->r[k];
         if (!r->nan && !r->inf) continue;
         if (c->bind >= 0) {
-            if (atomic_fetch_add(&g_lines, 1) >= 200) return;
+            if (atomic_fetch_add(&g_lines, 1) >= VKA_ENV("DM_VK_NANSCAN_LINES", 200)) return;
             VLOG("NaN scan: frame %llu pass %u (fragment %016llx): input binding %d texture ID %d serial %llu (format %#x %ux%u level %u layer %u): %u NaN + %u infinite texels, first at (%u, %u)",
                  (unsigned long long)c->frame, c->pass, (unsigned long long)g_probe, c->bind, c->tid, (unsigned long long)c->serial, c->fmt, c->w, c->h, c->lv, c->layer, r->nan, r->inf, r->first & 0xffff, r->first >> 16);
             continue;
@@ -186,7 +191,7 @@ static void report(void *arg) {
             int j = k - 1; while (j >= 0 && (b->r[j].serial != c->serial || b->r[j].lv != c->lv || b->r[j].layer != c->layer)) j--;
             if (j >= 0 && b->res[j].nan + b->res[j].inf >= r->nan + r->inf) continue;
         }
-        if (atomic_fetch_add(&g_lines, 1) >= 200) return;
+        if (atomic_fetch_add(&g_lines, 1) >= VKA_ENV("DM_VK_NANSCAN_LINES", 200)) return;
         char keys[400] = ""; size_t o = 0;
         for (uint32_t i = 0; i < c->nkeys && o < sizeof keys - 40; i++) o += (size_t)snprintf(keys + o, sizeof keys - o, " %016llx/%016llx", (unsigned long long)c->vs[i], (unsigned long long)c->fs[i]);
         VLOG("NaN scan: frame %llu pass %u: %u NaN + %u infinite texels in serial %llu (format %#x %ux%u level %u layer %u), first at (%u, %u); draws %u-%u of the pass, vertex/fragment%s%s",

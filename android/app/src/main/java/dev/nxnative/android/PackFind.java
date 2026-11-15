@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -19,8 +20,8 @@ import java.util.Set;
  *     with the game (the Judge: PackCheck.blocking on the phone), and of those one with this APK's shader library ({@link #READY}) before one that the automatic
  *     restamp or delta shader update brings current ({@link #UPDATE}); within a tier the first candidate wins (the picked folder, then the app's, then the nearest).
  *     A pack whose code is of another game build is never chosen.</li>
- * <li>{@link #gamesIn}: the games a picked folder holds (Add game on a folder adds all of them): each .nup in it and each dump subfolder (base/exefs/main.npdm
- *     or exefs/main.npdm) one level deep, not work or pack folders, and those of its Games/ folder (the Switch2 folder: Switch2Layout).</li>
+ * <li>{@link #gamesIn}: the games a picked folder holds (Add game on a folder adds all of them): each .nup in it, each dump subfolder (base/exefs/main.npdm
+ *     or exefs/main.npdm) and each .nup in its other subfolders, one level deep, not work or pack folders, and those of its Games/ folder (the Switch2 folder: Switch2Layout).</li>
  * </ul>
  */
 final class PackFind {
@@ -129,8 +130,9 @@ final class PackFind {
     }
 
     /**
-     * The games a picked folder holds, sorted by name: its .nup files (and files named .NUP, which Add game then asks to rename), and its subfolders with
-     * base/exefs/main.npdm or exefs/main.npdm, one level deep; not an &lt;id&gt;-work folder (extraction and work files), not Work/, and not a pack folder (pack.tsv).
+     * The games a picked folder holds, sorted by name: its .nup files (the extension in any case: Nup.isNup), its subfolders with base/exefs/main.npdm or
+     * exefs/main.npdm, and the .nup files directly inside its other subfolders (Games/Zelda/zelda.nup: a .nup kept in a folder of its own), one level deep; not
+     * an &lt;id&gt;-work folder (extraction and work files), not Work/, not a pack folder (pack.tsv), and not the Switch2 folder's own data (Switch2Layout.RESERVED).
      * Then the games of its Games/ folder (the Switch2 folder's layout, Switch2Layout), the same way: the Switch2 folder holds its games there, and in itself
      * until the launcher's start has moved them (Switch2Migration)
      */
@@ -148,10 +150,21 @@ final class PackFind {
         for (File f : l) {
             String n = f.getName();
             if (n.startsWith(".")) continue;
-            if (f.isFile() && (Nup.isNup(f) || Nup.wrongCase(f))) out.add(f);
-            else if (f.isDirectory() && !n.matches("(?i)[0-9a-f]{16}-work") && !n.equalsIgnoreCase("Work") && !new File(f, "pack.tsv").isFile() && Pack.npdmOf(f) != null) out.add(f);
-            else if (top && f.isDirectory() && n.equalsIgnoreCase("Games")) games = f;
+            if (f.isFile() && Nup.isNup(f)) out.add(f);
+            else if (!f.isDirectory()) continue;
+            else if (top && n.equalsIgnoreCase(Switch2Layout.GAMES)) games = f;
+            else if (Switch2Layout.isOldWork(n) || n.equalsIgnoreCase(Switch2Layout.WORK) || new File(f, "pack.tsv").isFile()) continue;
+            else if (Pack.npdmOf(f) != null) out.add(f);
+            else if (!Switch2Layout.RESERVED.contains(n.toLowerCase(Locale.ROOT))) nupsIn(f, out);
         }
         if (games != null) scan(games, out, false);
+    }
+
+    /** The .nup files directly inside a folder (a .nup in a folder of its own), sorted by name; not deeper */
+    private static void nupsIn(File dir, List<File> out) {
+        File[] l = dir.listFiles(f -> !f.getName().startsWith(".") && Nup.isNup(f) && f.isFile());
+        if (l == null) return;
+        Arrays.sort(l);
+        out.addAll(Arrays.asList(l));
     }
 }

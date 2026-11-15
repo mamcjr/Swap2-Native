@@ -17,15 +17,26 @@ static int zbind(vkz_tab *t, const key *k, uint64_t size, uint64_t *next_h, uint
 }
 
 int main(void) {
-    // candidates: large, dense, one sample, 2D, uncompressed, not linear or a display texture
-    CHECK(vkz_candidate(341 * MIB, 4 * MIB, 0, 1, 0, 0, 0), "a 16384² R8 target is a candidate");
-    CHECK(!vkz_candidate(3 * MIB, 4 * MIB, 0, 1, 0, 0, 0), "under the size: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 1, 1, 0, 0, 0), "a sparse residency image: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 0, 4, 0, 0, 0), "multisampled: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 0, 1, 1, 0, 0), "3D: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 0, 1, 0, 1, 0), "block-compressed: not");
-    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, 0, 1, 0, 0, 1), "linear or a window texture: not");
-    CHECK(!vkz_candidate(341 * MIB, 0, 0, 1, 0, 0, 0), "a size of 0 turns it off");
+    // candidates: at least min_bytes and at most the limit vkz_max gives, dense, one sample, 2D, uncompressed, not linear or a display texture. Color images have no upper
+    // limit on Turnip (Mario Kart World's 16384² R8 terrain targets, which zero-sharing was made for); depth / stencil images and other drivers keep 32 MiB (upstream 5a0ee9c9)
+    CHECK(vkz_candidate(341 * MIB, 4 * MIB, 0, 0, 1, 0, 0, 0), "a 16384² R8 target (341 MiB with its levels): a candidate with no upper limit");
+    CHECK(vkz_candidate(341 * MIB, 4 * MIB, vkz_max(0, 1, -1), 0, 1, 0, 0, 0), "a 341 MiB color image on Turnip: a candidate");
+    CHECK(vkz_max(0, 1, -1) == 0 && vkz_max(0, 0, -1) == VKZ_CAP && vkz_max(1, 1, -1) == VKZ_CAP && vkz_max(1, 0, -1) == VKZ_CAP,
+          "the limit: none for color on Turnip, 32 MiB for color elsewhere and for depth anywhere");
+    CHECK(vkz_max(0, 0, 0) == 0 && vkz_max(0, 1, 64) == 64 * MIB && vkz_max(0, 0, 341) == 341 * MIB && vkz_max(1, 1, 0) == VKZ_CAP,
+          "DM_VK_ZSHARE_MAX_MB sets the color limit (0: none), never the depth one");
+    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, vkz_max(0, 0, -1), 0, 1, 0, 0, 0), "a 341 MiB color image off Turnip is over the cap: not");
+    CHECK(!vkz_candidate(341 * MIB, 4 * MIB, vkz_max(1, 1, -1), 0, 1, 0, 0, 0), "a 341 MiB depth image is over the depth cap, on Turnip too: not");
+    CHECK(vkz_candidate(32 * MIB, 4 * MIB, VKZ_CAP, 0, 1, 0, 0, 0), "a depth image at the cap: a candidate");
+    CHECK(!vkz_candidate(32 * MIB + 1, 4 * MIB, VKZ_CAP, 0, 1, 0, 0, 0), "a depth image a byte over the cap: not");
+    CHECK(vkz_candidate(16 * MIB, 4 * MIB, 0, 0, 1, 0, 0, 0), "a 16 MiB target is a candidate");
+    CHECK(!vkz_candidate(3 * MIB, 4 * MIB, 0, 0, 1, 0, 0, 0), "under the size: not");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 0, 1, 1, 0, 0, 0), "a sparse residency image: not");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 0, 0, 4, 0, 0, 0), "multisampled: not");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 0, 0, 1, 1, 0, 0), "3D: not");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 0, 0, 1, 0, 1, 0), "block-compressed: not");
+    CHECK(!vkz_candidate(16 * MIB, 4 * MIB, 0, 0, 1, 0, 0, 1), "linear or a window texture: not");
+    CHECK(!vkz_candidate(16 * MIB, 0, 0, 0, 1, 0, 0, 0), "a size of 0 turns it off");
 
     vkz_tab t = {0}; uint64_t nh = 100, h[8];
     key r8 = {0x400, 9, 16384, 16384, 6, 0x17}, rg16 = {0x400, 77, 8192, 8192, 1, 0x17}, r8b = r8; r8b.levels = 5;
@@ -47,6 +58,13 @@ int main(void) {
     vkz_stats(&t, &im, &al, &by, &sv);
     CHECK(im == 3 && al == 3 && sv == 0 && t.made == 4 && t.owned == 2, "stats after: %llu images, %llu allocations, %llu made, %llu owned", (unsigned long long)im, (unsigned long long)al,
           (unsigned long long)t.made, (unsigned long long)t.owned);
+    // a sole image takes its allocation as memory of its own (vka_imem_adopt_zero: no second allocation, no clear); one of several cannot
+    uint64_t hs; key d16 = {0x400, 21, 4096, 4096, 1, 0x20};
+    CHECK(zbind(&t, &d16, 32 * MIB, &nh, &hs) == 1 && vkz_take_sole(&t, hs) == 32 * MIB && vkz_find_h(&t, hs) < 0 && t.owned == 3, "a sole image adopts its allocation");
+    CHECK(vkz_take_sole(&t, hs) == 0 && vkz_unref(&t, hs) == -1, "and it is no entry's any more (freed as memory of its own)");
+    uint64_t h2[2]; zbind(&t, &d16, 32 * MIB, &nh, &h2[0]); zbind(&t, &d16, 32 * MIB, &nh, &h2[1]);
+    CHECK(h2[0] == h2[1] && vkz_take_sole(&t, h2[0]) == 0 && t.owned == 3, "two images share it: neither adopts it");
+    CHECK(vkz_unref(&t, h2[0]) == 0 && vkz_take_sole(&t, h2[1]) == 32 * MIB && t.owned == 4, "once the other let go, the last one does");
     CHECK(vkz_add(&t, &r8, VKZ_KEY + 1, 999, 1) < 0 && vkz_ref(&t, &r8, VKZ_KEY + 1) < 0, "a key longer than VKZ_KEY is refused");
     // many keys: the table grows
     for (uint32_t i = 0; i < 1000; i++) { key k = {0x400, 9, 64 + i, 64, 1, 0x17}; uint64_t hh; zbind(&t, &k, 4 * MIB, &nh, &hh); }

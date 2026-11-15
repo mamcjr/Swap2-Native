@@ -118,6 +118,10 @@ static int (*g_trap_hook)(ucontext_t *uc);
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { g_trap_hook = fn; }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
+// Called once, on the crashing thread, before anything is printed: the graphics side writes down what it was compiling (vka_pso.c deadly_note), so the next run can leave
+// a pipeline that kills the driver out. Signal handler context: open / write only
+static void (*g_fatal_hook)(int sig);
+void crash_set_fatal_hook(void (*fn)(int sig)) { g_fatal_hook = fn; }
 // Dump the current state on demand (without exiting): the iOS app has no no-progress watchdog, so when the smoke test fails it sends dump through DM_LOG_PORT to trigger this -- what each guest thread is waiting on + the graphics-side wait points, the same thing the watchdog prints
 void crash_dump_now(const char *why) { fprintf(stderr, "[dm] state dump (%s): tick %u / stage %s\n", why, atomic_load(&g_watch_tick), g_watch_stage[atomic_load(&g_watch_stage_idx)]); if (g_dump_hook) g_dump_hook(); if (g_wait_dump) g_wait_dump(); }
 // Only the first crashing thread prints its state: when several threads crash at once (Unity's job threads often do), the dumps used to interleave and the process hung in the dump without exiting.
@@ -140,6 +144,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
     }
     crash_gate(sig);
+    if (g_fatal_hook && sig != SIGALRM) g_fatal_hook(sig);
     // The stderr lock may be held by another thread (stuck or suspended): the fprintf below would hang with it, the time limit's SIGALRM could not end the run, and the log would get nothing.
     // If it still cannot be taken after 1 s, write a single line with write() (pc / lr as module offsets) and exit. When this thread itself holds the lock, ftrylockfile still succeeds (file locks are recursive), unaffected
     for (int i = 0; ftrylockfile(stderr); i++) {
@@ -179,10 +184,17 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
             if (v < 0x100000000ull || (v & 3)) continue;
             int mod = -1; for (int k = 0; k < g_nmod; k++) { uint64_t b = (uint64_t)(uintptr_t)g_mod[k].base; if (v >= b && v < b + g_mod[k].size) mod = k; }
             if (mod >= 0) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, g_mod[mod].name, (unsigned long long)(v - (uint64_t)(uintptr_t)g_mod[mod].base)); n++; }
-            else if (dladdr((void *)v, &di) && di.dli_sname && di.dli_fname && strstr(di.dli_fname, "dmhost")) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, di.dli_sname, (unsigned long long)(v - (uint64_t)di.dli_saddr)); n++; }
+            else if (dladdr((void *)v, &di) && di.dli_sname && di.dli_fname && (strstr(di.dli_fname, "dmhost") || strstr(di.dli_fname, "nxhost"))) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, di.dli_sname, (unsigned long long)(v - (uint64_t)di.dli_saddr)); n++; }
+            // Another library's code (a GPU driver without symbols, libc): file + offset from its load base, which matches the tombstone's and a disassembly's
+            // addresses (a fault inside a stripped driver leaves lr stale and the tombstone one frame deep; return addresses on the stack name its callers)
+            else if (dladdr((void *)v, &di) && di.dli_fname && di.dli_fbase && (v & 3) == 0) {
+                const char *b = strrchr(di.dli_fname, '/'); b = b ? b + 1 : di.dli_fname;
+                if (strncmp(b, "libc.so", 7) && strncmp(b, "libart", 6)) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, b, (unsigned long long)(v - (uint64_t)di.dli_fbase)); n++; }
+            }
         }
         fputc('\n', stderr); }
     if (g_dump_hook) g_dump_hook();
+    { void fs_recent_dump(void) __attribute__((weak)); if (fs_recent_dump) fs_recent_dump(); }   // the files the game read last (hle_fs.c)
 #if PLAT_ANDROID
     // Hand the signal on to the handler that was there before ours (debuggerd's, behind ART's libsigchain), so the phone also writes a tombstone and logs a native backtrace with
     // libnxhost's symbols. A fault returns and runs the instruction again into that handler; abort and the others are raised again. SIGALRM (the watchdogs) ends here

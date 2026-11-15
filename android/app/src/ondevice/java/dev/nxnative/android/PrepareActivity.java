@@ -25,6 +25,7 @@ import java.io.IOException;
  */
 public final class PrepareActivity extends Activity implements ServiceConnection, PrepareScreen.Actions {
     static final String EXTRA_PLAY = "play";
+    static final String EXTRA_JOB = "prepare_job";
     /** The screen's Import shaders… (a job stopped at its shader steps): MainActivity opens the game's import (Ondevice.activityResult, ShaderUi) */
     static final String EXTRA_IMPORT_SHADERS = "import_shaders";
     /** Play's short job (Ondevice.fixCodeThenPlay): the screen plays the game by itself once the job is done (EXTRA_PLAY), and stays on a failure */
@@ -37,6 +38,7 @@ public final class PrepareActivity extends Activity implements ServiceConnection
     private boolean bound, resumed, jobAlive, saveFailed, autoPlay, played;
     private long resumedAt;
     private Job job;
+    private File jobFile;
 
     /** The launcher's theme choice (Settings › Theme, LauncherTheme) */
     @Override protected void attachBaseContext(android.content.Context base) {
@@ -47,6 +49,8 @@ public final class PrepareActivity extends Activity implements ServiceConnection
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         autoPlay = getIntent().getBooleanExtra(EXTRA_AUTOPLAY, false);
+        String path = getIntent().getStringExtra(EXTRA_JOB);
+        jobFile = path == null ? Job.remembered(this) : new File(path);
         screen = new PrepareScreen(this, this);
         setContentView(screen.view());
         load();
@@ -89,7 +93,7 @@ public final class PrepareActivity extends Activity implements ServiceConnection
     }
 
     private void load() {
-        File f = Job.remembered(this);
+        File f = jobFile;
         if (f == null || !f.isFile()) return;
         try { job = Job.read(f); } catch (IOException e) { /* being renamed over: keep the last one */ }
     }
@@ -107,8 +111,9 @@ public final class PrepareActivity extends Activity implements ServiceConnection
         if (m.what != PackService.MSG_STATE) return false;
         Bundle d = m.getData();
         Job j = Job.of(new File(d.getString("file", "")), d.getString("job", "{}"));
-        if (j != null) job = j;
+        if (j == null || jobFile != null && !SaveStore.same(j.file, jobFile)) return true;
         jobAlive = d.getBoolean("alive");
+        job = Job.latestSnapshot(j, jobAlive);
         saveFailed = d.getString("saveError") != null;
         render();
         return true;
@@ -142,7 +147,7 @@ public final class PrepareActivity extends Activity implements ServiceConnection
 
     @Override public void play() {
         if (job == null || !Ondevice.ready(job) || Ondevice.importBusy(this, job.titleId(), true)) return;
-        setResult(RESULT_OK, new Intent().putExtra(EXTRA_PLAY, true));
+        setResult(RESULT_OK, new Intent().putExtra(EXTRA_PLAY, true).putExtra(EXTRA_JOB, job.file.getPath()));
         LauncherEffects.handOver();   // the library plays Launch (or a refusal's Error) from onActivityResult, before its own resume
         finish();
     }
@@ -163,7 +168,7 @@ public final class PrepareActivity extends Activity implements ServiceConnection
 
     @Override public void importShaders() {
         if (job == null) return;
-        setResult(RESULT_OK, new Intent().putExtra(EXTRA_IMPORT_SHADERS, true));
+        setResult(RESULT_OK, new Intent().putExtra(EXTRA_IMPORT_SHADERS, true).putExtra(EXTRA_JOB, job.file.getPath()));
         finish();
     }
 

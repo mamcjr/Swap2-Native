@@ -67,7 +67,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private InputManager inputManager;
     private AudioManager audio;
     private AudioFocusRequest focus;
-    private AudioDeviceCallback route;
+    private volatile AudioDeviceCallback route;
     private boolean routeReady;
 
     @Override protected void onCreate(Bundle saved) {
@@ -75,6 +75,18 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         Ui.immersive(this);
         // This game's own host (libnxhost_<title ID>.so, with its profile compiled in): a game this APK has no profile for gets a sentence, not a crash
         String id = String.valueOf(getIntent().getStringExtra("title_id"));
+        // The run's exit record and the uncaught-exception handler (ExitWatch): first, so even a failure below reaches the launcher's notice. A new record only for a new run
+        // The automatic diagnosis (AutoDiag): its run comes from its own file, so a screen Android restored after the run before was killed (saved != null, the
+        // intent of that run) starts the next one all the same; with no run waiting such a screen has nothing to show and leaves (diagStale, below)
+        boolean diagIntent = getIntent().getBooleanExtra("diag", false) && !hostRunning;
+        diagRun = diagIntent ? AutoDiag.takeRun(this) : null;
+        boolean diagStale = diagIntent && diagRun == null;
+        if (diagRun != null) for (String kv : diagRun.env) if (kv.startsWith("DM_VK_DRIVER=")) {   // a driver run: as if the game's settings picked it (GpuDriver.runChoice)
+            String v = kv.substring("DM_VK_DRIVER=".length());
+            GpuDriver.runChoice = v.equals("system") ? GpuDriver.SYSTEM : new File(v).getName();
+        }
+        AutoDiag.screen(this);
+        ExitWatch.game(this, id, getIntent().getStringExtra("name"), (saved == null || diagRun != null) && !hostRunning && !diagStale);
         try {
             Native.load(id);
         } catch (IllegalStateException e) {
@@ -97,7 +109,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         tag.setText(Prefs.buildTag(this));
         tag.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(tag, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
-        tag.setVisibility(Prefs.overlayItem(this, "tag") ? View.VISIBLE : View.GONE);   // off by default since 2026-11-08 (the overlay items' "Build name"); the log's first line still names the build
+        if (diagRun != null) tag.setText(getString(R.string.s2_diag_tag, diagRun.ordinal, diagRun.key));
+        tag.setVisibility(diagRun != null || Prefs.overlayItem(this, "tag") ? View.VISIBLE : View.GONE);   // off by default since 2026-11-08 (the overlay items' "Build name"); the log's first line still names the build
         // The log block may grow at most up to the tag's bottom edge (its top margin), so a long log never runs under the tag
         tag.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) overlay.getLayoutParams();
@@ -107,7 +120,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         root.addView(fps, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
         stats = new Overlay(this);
         panel = new SidePanel(this, box -> controls.controlRows(this, box));
-        panel.onVisibility = controls::setSuspended;
+        // an open panel takes every pad key: it must never open under the curtain (the guide button, Back, the controls' settings), so the curtain leaves first
+        panel.onVisibility = open -> { if (open) curtainEnd(true); controls.setSuspended(open); };
         root.addView(panel, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         controls.openSettings = panel::open;
         // The layout editor needs the whole screen: the panel closes, and Paused (over the controls: its first tap would continue the game) hides while it is open;
@@ -155,8 +169,15 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         // change while in the background) takes its window over; a screen restored into a new process (Android ended the old one while it was in the background)
         // has no game to show: the game was stopped, and the user starts it again
         if (hostRunning) attach();
-        else if (saved == null) start();
-        else fail("The game was stopped while it was in the background (Android ended its process). Unsaved progress is lost; start it again from the launcher.");
+        else if (diagStale) {   // the launcher reads how that run ended and starts the next (AutoDiag.resume)
+            finish();
+            new Handler(Looper.getMainLooper()).postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 300);
+        }
+        else if (saved == null || diagRun != null) { curtainShow(root); start(); }
+        else {
+            String why = ExitWatch.restoredCause(this);   // what Android said about the end, told here once (the launcher does not tell it again)
+            fail("The game was stopped while it was in the background (Android ended its process)." + (why != null ? " " + why : "") + " Unsaved progress is lost; start it again from the launcher.");
+        }
     }
 
     /** The overlay's text (build tag, stats, log lines): all one small size, 8 sp (at 11-12 sp they covered the touch buttons games put in the corners), white with a
@@ -204,6 +225,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         File priv = new File(files, "save/" + id);
         String chosen = Prefs.folder(this, "save_" + id);   // the user's pick (Folders…): used as it is, never migrated into or seeded (the launcher asked about copying)
         File dir = testSave != null ? new File(testSave) : chosen != null ? new File(chosen) : defaultSave(game, id);
+        if (diagRun != null) {   // the automatic diagnosis never runs on the player's save: a copy of it, made by its first run
+            File copy = AutoDiag.saveCopy(this, id);
+            if (!copy.isDirectory() && dir.isDirectory() && !isEmpty(dir)) copyTree(dir, copy);
+            testSave = copy.getPath(); dir = copy;
+        }
         // The save's lock first (kept while the game runs), then a restore (Restore saves…) or swap stopped part way is finished (SaveStore's journal, the host's
         // rules); one that cannot be finished stops the start: never a half save
         holdLock(dir);
@@ -218,7 +244,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         }
         if (testSave != null) {   // a test run's own save folder (env.txt, test app only): used as it is
             if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cannot create the test save folder " + dir);
-            saveHow = "DM_SAVE from env-" + id + ".txt (test app)";
+            saveHow = diagRun != null ? "a copy for the automatic diagnosis" : "DM_SAVE from env-" + id + ".txt (test app)";
             return dir;
         }
         try {
@@ -291,6 +317,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         drv.addAll(quietEnv(new File(files, "env-" + id + ".txt")));
         String[] denv = Readiness.driverEnv(drv);
         overlay.setText(getIntent().getStringExtra("name") + ": checking this phone's GPU…");
+        if (curtain != null) curtain.caption(R.string.s2_play_checking_gpu);
         final boolean[] answered = {false};
         Runnable decide = () -> {   // on the UI thread, once: with the facts, or without them after READINESS_WAIT_MS
             if (answered[0] || isFinishing()) return;
@@ -317,12 +344,13 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (st != null) l.add(st);
         l.addAll(Readiness.evaluate(f, Readiness.parseReqs(p != null ? p.reqs : null)));
         rFacts = f;
-        fps.gpu(f.get("gpu.name"), f.get("driver.name"));
+        fps.gpu(f.get("gpu.name"), f.get("driver.name"), f.get("driver.id"), f.get("driver.custom"));
         rChecks = l;
         readinessLine = Readiness.summary(id, f, l);
         String report = Readiness.report(ReadinessActivity.header(this, (p != null ? p.name + " " : "") + id + " (start-up check)"), f, l);
         try { Files.write(new File(getExternalFilesDir(null), "readiness-" + id + ".txt").toPath(), report.getBytes(StandardCharsets.UTF_8)); } catch (IOException ignored) { /* the screen's report leaves it out */ }
         readinessDone = true;
+        if (diagRun != null) { start(); return; }   // the automatic diagnosis asks nothing: a driver that lacks something is a run's result (its line is in the log)
         List<Readiness.Check> fails = Readiness.of(l, Readiness.Status.FAIL), warns = Readiness.of(l, Readiness.Status.WARNING);
         String gpu = "GPU: " + Readiness.gpu(f) + "\nMemory: " + f.get("ram_gib") + " GiB as Android reports it.";
         // The notice is short (what is missing, by name); Details has each item's sentence, the GPU and Copy report
@@ -422,18 +450,29 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             String romfs = pack.romfsPath(game);   // a folder's RomFS folder, or <file>.nup:<selector>/romfs (NUP.md)
             if (romfs == null) throw new IOException(Nup.isNup(game) ? game.getName() + " has no " + pack.romfsSelector() + " with a RomFS" : "no RomFS in " + game);
             if (readinessHold(id)) return;   // after the pack's own checks (a missing pack says so first), before the save is locked or anything is written
+            PackMemoryUpdate.apply(this, pack);
+            // A .nup used where it is (PickedNup): the host gets a descriptor of it, fd:<n>/<name>, wherever it would get the file's path (DM_ROMFS, the add-on links);
+            // it stays open for this process's life, and the host duplicates it for each image it opens (nup_image.h)
+            int nupFd = PickedNup.is(this, game.getPath()) ? PickedNup.detachedFd(this, game) : -1;
+            if (nupFd >= 0) romfs = PickedPath.forHost(romfs, game, nupFd);
             // The user's lines, read first: the paths the launcher sets cannot be changed by them (guard), but the test app's env-<id>.txt may name a test save folder (one game's file only: a global DM_SAVE would point every game at one save)
             List<String> user = new ArrayList<>(guard(userEnv(new File(files, "env.txt")), "env.txt", false));   // diagnostic switches (every game: never DM_SAVE) (DM_SVC=1, DM_FS=1, ...), as the iPhone's Documents/env.txt
             user.addAll(guard(envLines(Prefs.gameEnv(this, id)), "the game's settings", false));   // the game's own lines (its Game settings): after env.txt, so they win for this game
             user.addAll(guard(userEnv(new File(files, "env-" + id + ".txt")), "env-" + id + ".txt", testApp()));   // and env-<title ID>.txt (adb), the same for one game
             File save = saveDir(files, game, id), temp = mkdirs(new File(files, "temp/" + id)), root = mkdirs(new File(files, "root"));
-            File aoc = aocLinks(mkdirs(new File(files, "aoc/" + id)), game, pack);
+            // The DLC links live in internal app storage: the external files folder is shared storage (FUSE), which refuses symbolic links (errno not yet confirmed on a phone; a refused link is now a [RED] line), so
+            // every link failed there and no game saw its DLC (docs/reference/packing.md "DLC links in shared storage"). Their targets stay where they are
+            File aoc = aocLinks(mkdirs(new File(getFilesDir(), "aoc/" + id)), game, pack, nupFd);
+            Pack.removeDir(new File(files, "aoc/" + id));   // the folder earlier builds used (empty, or links on a device that took them)
             log = new File(LogProvider.dir(this), id + "-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date()) + ".log");
             pruneLogs(id);
+            ExitWatch.log(log);
             List<String> env = new ArrayList<>(List.of(
                     "DM_ROMFS=" + romfs, "DM_SAVE=" + save, "DM_TEMP=" + temp, "DM_ROOT=" + root, "DM_AOC_DIR=" + aoc,
                     "HOME=" + files, "TMPDIR=" + getCacheDir(), "DM_BUILD_COMMIT=" + BuildConfig.NX_COMMIT,
-                    "DM_CTL=" + new File(files, "ctl.txt")));   // live control lines (android/TESTING.md "Live control", android/tools/nxctl.sh); DM_CTL= in env.txt turns it off
+                    "DM_CTL=" + new File(files, "ctl.txt"), "NX_EXIT_RECORD=" + ExitWatch.record(this)));   // live control lines (android/TESTING.md "Live control", android/tools/nxctl.sh); DM_CTL= in env.txt turns it off
+            String prev = prevExit();   // how the game process before this one ended, for the host (vka_pso.c bb_open: a kill from outside while the driver compiled a pipeline)
+            if (!prev.isEmpty()) env.add("NX_PREV_EXIT=" + prev);
             // Shaders the game binds that its library does not have are saved in the game's work folder (<Switch2>/Work/<title ID>/nvn_shdump, or an older
             // <title ID>-work beside the dump: Switch2Layout.workOf, as DumpCheck.workOf names it), where the next Prepare's split takes them in (PackService
             // DM_NVN_SHDUMP_DIR): only for a game prepared on the phone (its work folder is there)
@@ -448,19 +487,32 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if (prof != null) env.addAll(prof.ndsrEnv(Prefs.ndsr(this, id)));
             // Scene resolution 720p (Game settings): the RomFS overlay made on the phone from the player's files, while it matches this pack (SceneOverlay)
             String sceneNote = null;
-            if (prof != null && prof.hasScene() && Prefs.scene720(this, id)) {
-                if (SceneOverlay.current(files, id, prof.sceneScale(), prof.sceneExpect(), pack.version)) env.add("DM_ROMFS_OVERLAY=" + SceneOverlay.dir(files, id));
-                else sceneNote = "[RED] [nxlaunch] Scene resolution 720p: the overlay " + SceneOverlay.dir(files, id) + " was not made for this pack (version " + pack.version
-                        + ", scale " + prof.sceneScale() + "): the game's own scene size this run; choosing 720p in its Game settings makes it again";
+            String sceneScale = Prefs.sceneScale(this, id, prof);
+            if (sceneScale != null) {
+                if (SceneOverlay.current(files, id, sceneScale, prof.sceneExpect(), pack.version)) env.add("DM_ROMFS_OVERLAY=" + SceneOverlay.dir(files, id));
+                else sceneNote = "[RED] [nxlaunch] Scene resolution " + Prefs.sceneLabel(prof, sceneScale) + ": the overlay " + SceneOverlay.dir(files, id) + " was not made for this pack (version "
+                        + pack.version + ", scale " + sceneScale + "): the game's own scene size this run; choosing it again in its Game settings makes it again";
             }
             Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings
             Fsr.env(this, env);   // FSR 1 upscaling (the in-game panel)
+            GameGraphics.env(this, id, env);   // per-title choices, before the player's environment overrides
             int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
             if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
             String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)
+            // DM_TEST_CRASH (a test crash, ExitWatch): the test app only
+            boolean refusedCrash = !testApp() && user.removeIf(kv -> kv.startsWith("DM_TEST_CRASH="));
             env.addAll(user);
+            if (diagRun != null) {   // the run's switches last: they win (its driver is already there, through GpuDriver.env)
+                for (String kv : diagRun.env) if (!kv.startsWith("DM_VK_DRIVER=")) env.add(kv);
+                env.add("DM_VK_MEM_CENSUS_S=5");
+                env.add("DM_VK_PLACED_KILLS=0");   // a run of the diagnosis is what it says it is: no switch to the alias by itself, and its deaths are not counted (vka_placedkill.h)
+            }
             Fsr.started(this, env);   // the FSR values this run starts with (env.txt and env-<id>.txt win), which the in-game panel shows
-            for (String kv : env) if (kv.startsWith("DM_OVERLAY=")) overlayEnv = !kv.substring(11).trim().equals("0");
+            String testCrash = null;
+            for (String kv : env) {
+                if (kv.startsWith("DM_OVERLAY=")) overlayEnv = !kv.substring(11).trim().equals("0");
+                if (kv.startsWith("DM_TEST_CRASH=")) testCrash = kv.substring(14).trim();
+            }
             String[] args = {"nxhost", packDir.getPath()};
             int r = Native.start(args, env.toArray(new String[0]), log.getPath(), files.getPath());
             if (r != 0) throw new IOException("the host did not start (" + r + (r == -1 ? ": a start was already tried in this process" : "") + ")");
@@ -468,8 +520,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             // Read once the game has run a while (the host finds the game's limiter after it starts); the in-game panel updates it too
             ui.postDelayed(this::noteOwnRate, 30000);
             hostRunning = true;
+            if (diagRun != null) AutoDiag.started(this, diagRun);
+            if ("java".equals(testCrash)) { Native.note("[RED] DM_TEST_CRASH=java: an exception on the main thread in 10 s"); ExitWatch.testCrash(ui); }   // =native: nxlaunch.c
+            if (refusedCrash) Native.note("[nxlaunch] DM_TEST_CRASH not taken: the test app only");
             if (readinessLine != null) Native.note(readinessLine + (triedAnyway ? "; the player chose Try anyway" : ""));   // the readiness check (readinessHold)
-            Native.note("[nxlaunch] game: " + game + (Nup.isNup(game) ? " (.nup)" : " (folder)") + ", DM_ROMFS " + romfs + ", pack " + packDir);
+            Native.note("[nxlaunch] game: " + game + (nupFd >= 0 ? " (.nup used where it is, descriptor " + nupFd + ")" : Nup.isNup(game) ? " (.nup)" : " (folder)") + ", DM_ROMFS " + romfs + ", pack " + packDir);
             Native.note("[nxlaunch] save: " + save + " (" + saveHow + ")" + (saveNote != null ? "; " + saveNote : ""));
             // Its size and the room beside it: the host's commit copies the whole save (clonefile is a full copy on the phone's storage), so a save of several GB (a
             // wrong import) or a full storage fails every commit with errno 28 (a friend's run, 2026-11-08)
@@ -482,6 +537,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             Native.note("device " + Build.MANUFACTURER + " " + Build.MODEL + ", Android " + Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + "), " + Build.SUPPORTED_ABIS[0]
                     + "; game " + game + "; pack " + packDir);
             if (envProblem != null) Native.note("[RED] env.txt: " + envProblem);
+            if (aocLine != null) Native.note(aocLine);
+            for (String n : aocProblems) Native.note(n);
             if (sceneNote != null) {
                 Native.note(sceneNote);
                 android.widget.Toast.makeText(this, getString(R.string.s2_scene_not_ready), android.widget.Toast.LENGTH_LONG).show();
@@ -492,7 +549,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
                 Native.note("[RED] env: " + msg);
                 android.widget.Toast.makeText(this, "Environment lines " + msg, android.widget.Toast.LENGTH_LONG).show();
             }
-            if (testSave != null) Native.note("[nxlaunch] test app: DM_SAVE from env-" + id + ".txt: " + testSave);
+            if (testSave != null && diagRun == null) Native.note("[nxlaunch] test app: DM_SAVE from env-" + id + ".txt: " + testSave);
             Native.note("frame generation: " + (Lsfg.on(this) ? "on" : "off") + "; " + Lsfg.note);
             Native.note(gpuNote + " (picked in the launcher; a DM_VK_DRIVER line in env.txt wins, the host's [vk] driver line says which ran)");
             input = Native.hasInput();
@@ -501,6 +558,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             overlay.setText(name + ": starting. Log: " + log);
             ui.postDelayed(this::tail, 500);
             ui.postDelayed(this::fpsTick, 500);
+            ui.postDelayed(this::curtainPoll, CURTAIN_POLL_MS);
         } catch (IOException | RuntimeException e) {
             fail(String.valueOf(e.getMessage()));
         }
@@ -537,11 +595,17 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
      * this game's host (the next Play of another game would land in it, Native.load) and the save's lock
      */
     private void fail(String why) {
+        curtainEnd(true);
         new AlertDialog.Builder(this).setTitle("Cannot start " + getIntent().getStringExtra("name")).setMessage(why)
                 .setPositiveButton("OK", (d, w) -> end()).setCancelable(false).show();
     }
 
+    /** The automatic diagnosis: a run that lived its time ends as Stop does */
+    void diagEnd() { end(); }
+    private AutoDiag.Run diagRun;   // this screen's run of the automatic diagnosis (onCreate), else null
+
     private void end() {
+        ExitWatch.stopped();
         backToFrontend();
         finish();
         // On its own handler: onDestroy clears ui's callbacks
@@ -562,7 +626,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (inputManager != null) inputManager.unregisterInputDeviceListener(this);
         if (audio != null) {
             if (focus != null) audio.abandonAudioFocusRequest(focus);
-            if (route != null) audio.unregisterAudioDeviceCallback(route);
+            if (route != null) { audio.unregisterAudioDeviceCallback(route); route = null; }
         }
         super.onDestroy();
     }
@@ -613,6 +677,19 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         } catch (RuntimeException e) { Native.note("[nxlaunch] the previous run's exit reason: not readable (" + e + ")"); }
     }
 
+    /** The newest earlier game process's end as "reason,status,time in ms" (ApplicationExitInfo), "" when Android has none: read before the host starts, noted nowhere */
+    private String prevExit() {
+        try {
+            android.app.ActivityManager am = getSystemService(android.app.ActivityManager.class);
+            if (am == null) return "";
+            for (android.app.ApplicationExitInfo x : am.getHistoricalProcessExitReasons(getPackageName(), 0, 8)) {
+                if (x.getProcessName() == null || !x.getProcessName().endsWith(":game") || x.getPid() == android.os.Process.myPid()) continue;
+                return x.getReason() + "," + x.getStatus() + "," + x.getTimestamp() + "," + x.getImportance();   // (the importance: vka_placedkill.h counts a kill in the foreground only)
+            }
+        } catch (RuntimeException e) { /* no history: the host then takes nothing from the run before */ }
+        return "";
+    }
+
     private static String exitReason(int r) {
         switch (r) {
             case android.app.ApplicationExitInfo.REASON_LOW_MEMORY: return "low memory: killed by the system";
@@ -653,15 +730,21 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         return d;
     }
 
-    /** DM_AOC_DIR/<index> → each DLC's RomFS folder in the game folder, or DM_AOC_DIR/<index>.nup → the .nup (hle_fs.c aoc_dir; Pack.aocLinks), as symbolic links in app storage */
-    private static File aocLinks(File dir, File game, Pack pack) {
-        File[] old = dir.listFiles();
-        if (old != null) for (File f : old) f.delete();
-        for (Map.Entry<String, String> e : pack.aocLinks(game).entrySet()) {
-            try { Os.symlink(e.getValue(), new File(dir, e.getKey()).getPath()); } catch (ErrnoException ignored) { /* the game then runs without that DLC */ }
-        }
+    /**
+     * DM_AOC_DIR/<index> → each DLC's RomFS folder in the game folder, or DM_AOC_DIR/<index>.nup → the .nup (hle_fs.c aoc_dir; Pack.aocLinks), as symbolic links in
+     * app storage. A .nup used where it is (nupFd ≥ 0): the link's target is fd:<n>/<name>, which the host reads with readlink (nothing is at that path).
+     * A link that cannot be made is a [RED] line in the run's log (aocProblems): the game runs without that DLC
+     */
+    private File aocLinks(File dir, File game, Pack pack, int nupFd) {
+        Map<String, String> links = pack.aocLinks(game);
+        for (String p : Pack.makeAocLinks(dir, links, t -> nupFd >= 0 ? PickedPath.forHost(t, game, nupFd) : t, (target, path) -> {
+            try { Os.symlink(target, path); } catch (ErrnoException e) { throw new IOException(android.system.OsConstants.errnoName(e.errno) + " (" + e.getMessage() + ")"); }
+        })) aocProblems.add("[RED] [nxlaunch] DLC: " + p);
+        aocLine = "[nxlaunch] DLC: " + links.size() + " link" + (links.size() == 1 ? "" : "s") + " in DM_AOC_DIR " + dir + (links.isEmpty() ? "" : " " + links.keySet());
         return dir;
     }
+    private final List<String> aocProblems = new ArrayList<>();
+    private String aocLine;
 
     // A file `adb shell` writes here belongs to the shell user with mode 0660 and group ext_data_rw, which the app is not in: it exists but cannot be read
     // (TESTING.md, Diagnostic switches: chmod 666 after writing it). The run goes on without the switches and the log says why
@@ -691,7 +774,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         File[] logs = LogProvider.dir(this).listFiles((d, n) -> n.startsWith(id + "-") && n.endsWith(".log"));
         if (logs == null || logs.length < KEEP_LOGS) return;
         Arrays.sort(logs, Comparator.comparingLong(File::lastModified));
-        for (int i = 0; i <= logs.length - KEEP_LOGS; i++) logs[i].delete();
+        for (int i = 0; i <= logs.length - KEEP_LOGS; i++) { logs[i].delete(); ExitWatch.digestOf(logs[i]).delete(); }   // and its digest (the notice's), if any
     }
 
     /** The last lines of the log over the surface, once a second: until the game's first frame, then only with the setting on (TouchControls.showLog), or after a crash */
@@ -717,6 +800,58 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         ui.postDelayed(this::tail, 1000);
     }
 
+    // ---- The loading curtain (PlayCurtain): over everything from a new run's first frame (never on attach: the game already draws), the caption and the bar from
+    // the run's log, read here from where the last poll stopped so no line is missed; it fades into the game once frames are presented (tail's own signal too),
+    // ends at once on a failure (the log and the dialog show) or when the game is paused, and after CURTAIN_MAX_MS whatever the log says ----
+    private PlayCurtain curtain;
+    private long curtainPos;
+    private static final long CURTAIN_POLL_MS = 250, CURTAIN_MAX_MS = 120_000, CURTAIN_READ_MAX = 512 * 1024;
+
+    private void curtainShow(FrameLayout root) {
+        curtain = PlayCurtain.loading(this, root, titleId(), getIntent().getStringExtra("name"));
+    }
+
+    private void curtainPoll() {
+        if (curtain == null || log == null || isFinishing()) return;
+        if (paused) { curtainEnd(true); return; }   // never a curtain over Paused (pause() and onStart end it too; this is the backstop)
+        if (stopped) {   // in the background: the cap still holds, the log is read on return
+            if (curtain.shownMs() > CURTAIN_MAX_MS) curtainEnd(true); else ui.postDelayed(this::curtainPoll, 1000);
+            return;
+        }
+        boolean done = drawing || failed;
+        try (RandomAccessFile r = new RandomAccessFile(log, "r")) {
+            long n = r.length();
+            if (n - curtainPos > CURTAIN_READ_MAX) curtainPos = n - CURTAIN_READ_MAX;   // a burst: its last part (the newest step) is enough
+            if (n > curtainPos) {
+                byte[] b = new byte[(int) (n - curtainPos)];
+                r.seek(curtainPos);
+                r.readFully(b);
+                int end = b.length;
+                while (end > 0 && b[end - 1] != '\n') end--;   // whole lines only: the rest is read again next time
+                if (end > 0) {
+                    curtainPos += end;
+                    done |= curtain.feed(new String(b, 0, end, StandardCharsets.UTF_8));
+                }
+            }
+        } catch (IOException ignored) { /* next time */ }
+        curtain.tick();
+        if (done || curtain.shownMs() > CURTAIN_MAX_MS) {
+            boolean bad = failed || curtain.failed();
+            if (bad) failed = true;   // the log block shows (tail)
+            curtainEnd(bad);
+            return;
+        }
+        ui.postDelayed(this::curtainPoll, CURTAIN_POLL_MS);
+    }
+
+    /** The curtain leaves (fast: at once, for a failure, a pause or Back); nothing when it is gone already */
+    private void curtainEnd(boolean fast) {
+        if (curtain == null) return;
+        PlayCurtain c = curtain;
+        curtain = null;
+        c.finish(fast, null);
+    }
+
     // ---- The host's side of the Activity: input devices, audio focus and route, motion, lifecycle ----
     private void hostSetup() {
         inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
@@ -737,8 +872,15 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             @Override public void onAudioDevicesAdded(AudioDeviceInfo[] d) { if (routeReady) Native.audioRouteChanged(); }
             @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] d) { if (routeReady) Native.audioRouteChanged(); }
         };
-        audio.registerAudioDeviceCallback(route, ui);
-        ui.post(() -> routeReady = true);
+        // Off the UI thread (Banana Native 4299044a, its issue 251): the call lists the audio ports in system_server and can take seconds (an ANR in
+        // AudioSystem.listAudioPatches on an Exynos phone)
+        final AudioDeviceCallback cb = route; final AudioManager am = audio;
+        Thread rt = new Thread(() -> {
+            am.registerAudioDeviceCallback(cb, ui);
+            if (route != cb) am.unregisterAudioDeviceCallback(cb);   // the screen went meanwhile
+            else ui.post(() -> routeReady = true);
+        }, "audio-route");
+        rt.start();
     }
 
     // ---- Paused: the game suspended while its screen shows (nxhost_lifecycle 4 / 5); on its return from the background with pause-on-return on (the game's setting, on by
@@ -752,6 +894,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     void pause() {
         if (!started || paused) return;
         paused = true;
+        curtainEnd(true);   // a suspended game draws no first frame: Paused must be reachable
         Native.lifecycle(4);
         Native.motionStop();
         pausedView.setVisibility(View.VISIBLE);
@@ -773,6 +916,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             paused = true; Native.lifecycle(4);
             if (!controls.editing()) pausedView.setVisibility(View.VISIBLE);   // the layout editor stays usable; its Done shows Paused (onEditEnd)
         }
+        if (paused) curtainEnd(true);   // a suspended game draws no first frame: Paused must be reachable
         stopped = false;
         hostInBackground = false;
         Native.lifecycle(2);
@@ -883,5 +1027,5 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
 
     /** Back (the phone's button or its edge swipe) opens and closes the in-game panel, which has Stop */
     @SuppressWarnings("deprecation")
-    @Override public void onBackPressed() { if (panel != null) panel.toggle(); else end(); }
+    @Override public void onBackPressed() { curtainEnd(true); if (panel != null) panel.toggle(); else end(); }   // during the curtain: the panel (with Stop) shows, uncovered
 }

@@ -45,13 +45,16 @@ static uint8_t **rp_seg; static uint32_t rp_nseg;
 static uint64_t rp_bad;
 
 static int dec_addr(void *ctx, uint64_t *field, uint64_t len, int writable) {
-    (void)ctx; (void)writable;
+    (void)writable;
     uint64_t v = *field; if (!cap_is_addr(v)) return 1;
     uint32_t r = cap_addr_region(v); uint64_t off = cap_addr_off(v);
     if (r >= rp_nrg || !rp_rg[r].mem || off > rp_rg[r].size || (len && off + len > rp_rg[r].size && rp_rg[r].kind)) {
         if (rp_bad++ < 4) printf("[RED] nxreplay: region %u offset %#llx length %#llx: %s\n", r, (unsigned long long)off, (unsigned long long)len, r >= rp_nrg || !rp_rg[r].mem ? "no such region in the capture" : "past the region's end");
         *field = 0; return 0; }
-    *field = (uint64_t)(uintptr_t)rp_rg[r].mem + off; return 1;
+    *field = (uint64_t)(uintptr_t)rp_rg[r].mem + off;
+    // Live NVN records place their GPU buffer ranges before replay. Captured records bypass that recorder.
+    if (ctx) mtl_pool_need((const void *)(uintptr_t)*field, len ? len : rp_rg[r].size - off, "captured GPU buffer operand");
+    return 1;
 }
 static int dec_obj(void *ctx, int kind, uint64_t *field, uint8_t *payload, uint32_t size);
 static const cap_ops rp_dec = {dec_addr, dec_obj};
@@ -139,8 +142,39 @@ static void add_pools(const uint8_t *d, size_t n) {   // the replay's pool list,
         if (!dec_addr(NULL, &a.mem, 0, 0) || !a.mem) RFAIL("a pool lies in no captured region");
         if (nvn_hm_get(&g_seen_pool, &a.mem)) continue; nvn_hm_put(&g_seen_pool, &a.mem, (void *)1);
         mtl_pool_add((void *)(uintptr_t)a.mem, a.size); nvn_dirty_add_range((void *)(uintptr_t)a.mem, a.size); rp_pools_added++;
+        // Diagnostic for legacy captures, which did not preserve live GPU placement.
+        // A raw pointer stored inside another buffer names no command-record operand.
+        const char *probe = getenv("DM_VK_REPLAY_RAW_NEED");
+        while (probe && *probe) {
+            char *end; uint64_t address = strtoull(probe, &end, 0);
+            if (end == probe || (*end && *end != ',')) RFAIL("invalid legacy raw-address probe list");
+            if (address >= a.mem && address - a.mem < a.size) {
+                mtl_pool_need((void *)(uintptr_t)address, 1, "legacy capture raw-address probe");
+                VLOG("legacy capture diagnostic: raw address %#llx in pool %#llx+%#llx placed explicitly", (unsigned long long)address, (unsigned long long)a.mem, (unsigned long long)a.size);
+            }
+            probe = *end ? end + 1 : end;
+        }
     }
 }
+static void add_placed(const uint8_t *data, size_t size) {
+    if (size % sizeof(cap_padd)) RFAIL("malformed GPU placement chunk");
+    for (size_t off = 0; off < size; off += sizeof(cap_padd)) {
+        cap_padd range; memcpy(&range, data + off, sizeof range);
+        uint32_t r = cap_addr_region(range.mem); uint64_t at = cap_addr_off(range.mem);
+        if (!range.size || !cap_is_addr(range.mem) || r >= rp_nrg || !rp_rg[r].mem || at > rp_rg[r].size || range.size > rp_rg[r].size - at)
+            RFAIL("GPU placement is outside captured memory");
+        range.mem = (uint64_t)(uintptr_t)rp_rg[r].mem + at;
+        mtl_pool_need((void *)(uintptr_t)range.mem, range.size, "captured GPU placement");
+        uint64_t done = 0;
+        while (done < range.size) {
+            VkBuffer buffer; VkDeviceSize offset;
+            uint64_t run = vka_addr_run(range.mem + done, range.size - done, &buffer, &offset);
+            if (!run) RFAIL("cannot restore GPU placement at %#llx+%#llx", (unsigned long long)range.mem, (unsigned long long)range.size);
+            done += run;
+        }
+    }
+}
+
 // A texture of the captured image's format over the same storage and shape as t, from the records or the registrations: the texture whose image t shared in the live run
 static const tex_t *live_owner(const tex_t *t, uint32_t vkfmt) {
     vka_fmt f;
@@ -303,11 +337,16 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
     if (!getenv("DM_VK_PCACHE")) {   // a cache of this replayer's own beside it, seeded once from the live run's (read only: the app's file is left alone)
         // Its name carries the cache's generation (vka.h VKA_PCACHE_GEN): the vk_pipelines.bin of earlier builds may have been seeded from a live cache compiled with
         // the game's FPCR, so it is removed; a live file of an older generation (a capture of an earlier build) seeds nothing
-        char self[1024], pc[1100], old[1100]; ssize_t sl = readlink("/proc/self/exe", self, sizeof self - 1);
-        if (sl > 0) { self[sl] = 0; char *s = strrchr(self, '/'); if (s) *s = 0; snprintf(pc, sizeof pc, "%s/vk_pipelines" VKA_PCACHE_GEN ".bin", self); setenv("DM_VK_PCACHE", pc, 1);
+        // With the texture pool reads reported (DM_VK_POOL_FB, default on; the capture's own setting applied above) the file is VKA_PCACHE_PFB's, as vka_pso.c names the
+        // live run's. Decided by the switch here, before the device is up: on a device that cannot report them the name says -pfb over two-set pipelines (a file of the
+        // replayer's own either way)
+        const char *pfe = getenv("DM_VK_POOL_FB"); const char *pfs = !pfe || !*pfe || atoi(pfe) != 0 ? VKA_PCACHE_PFB : "";
+        char self[1024], pc[1100], old[1100], gen[64]; ssize_t sl = readlink("/proc/self/exe", self, sizeof self - 1);
+        snprintf(gen, sizeof gen, VKA_PCACHE_GEN "%s.bin", pfs);
+        if (sl > 0) { self[sl] = 0; char *s = strrchr(self, '/'); if (s) *s = 0; snprintf(pc, sizeof pc, "%s/vk_pipelines%s", self, gen); setenv("DM_VK_PCACHE", pc, 1);
             snprintf(old, sizeof old, "%s/vk_pipelines.bin", self); if (!unlink(old)) printf("pipeline cache %s removed: an earlier generation's (now %s)\n", old, pc);
             if (access(pc, R_OK) && head_get(head, hn, "vk_pcache", v, sizeof v)) {
-                if (!strstr(v, VKA_PCACHE_GEN ".bin")) printf("pipeline cache not seeded: the live run's %s is not of this generation (" VKA_PCACHE_GEN ")\n", v);
+                if (!strstr(v, gen)) printf("pipeline cache not seeded: the live run's %s is not of this generation (%s)\n", v, gen);
                 else if (copy_file(v, pc)) printf("pipeline cache seeded from the live run's %s\n", v); } }
     }
     if (!vka_init()) RFAIL("no Vulkan device");
@@ -367,6 +406,12 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
         if (m0 && !cap_is_addr(m0)) rp_bad++;   // a live address the capture could not place (outside every pool)
         if (rp_bad != b0) { if (ntreg_bad++ < 4) printf("[RED] nxreplay: texture registry entry %d (ser=%llu): its storage is in no captured region: left unregistered\n", e->tid, (unsigned long long)e->t.serial); e->ok = 0; rp_bad = b0; } }
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_PADD && rp_ch[i].c.submit <= 1) add_pools(rp_ch[i].d, rp_ch[i].c.raw);
+    int placed_metadata = 0;
+    for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_PLAC) {
+        placed_metadata = 1;
+        if (rp_ch[i].c.submit <= 1) add_placed(rp_ch[i].d, rp_ch[i].c.raw);
+    }
+    if (!placed_metadata) printf("[RED] nxreplay: legacy capture has no GPU placement metadata; raw-pointer reads may differ from the live run\n");
     if (rp_bad) RFAIL("%llu captured pointers (pools, descriptor pools) name no captured object or region", (unsigned long long)rp_bad);
     if (ntreg_bad) printf("%llu texture registry entries left unregistered (storage in no captured region)\n", (unsigned long long)ntreg_bad);
     check_programs(chain);
@@ -376,7 +421,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
 
     // what each submit takes before it: if nothing, the replay need not wait for the GPU in between
     uint8_t *has_state = calloc(nsub + 2, 1);
-    for (size_t i = 0; i < rp_nch; i++) { uint32_t t = rp_ch[i].c.tag; if (t == CAP_PADD || t == CAP_PDIF || t == CAP_TREG || t == CAP_SREG || t == CAP_TPIX) has_state[MIN(rp_ch[i].c.submit, nsub + 1)] = 1; }
+    for (size_t i = 0; i < rp_nch; i++) { uint32_t t = rp_ch[i].c.tag; if (t == CAP_PADD || t == CAP_PLAC || t == CAP_PDIF || t == CAP_TREG || t == CAP_SREG || t == CAP_TPIX) has_state[MIN(rp_ch[i].c.submit, nsub + 1)] = 1; }
     const uint8_t *lpix = NULL; uint64_t lpixn = 0;
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_LPIX) { lpix = rp_ch[i].d; lpixn = rp_ch[i].c.raw; }
     char live[65]; for (int i = 0; i < 32; i++) snprintf(live + 2 * i, 3, "%02x", pres->sha256[i]);
@@ -397,6 +442,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
             for (size_t i = 0; i < rp_nch; i++) {
                 cap_chunk *c = &rp_ch[i].c; uint8_t *d = rp_ch[i].d; if (c->submit != s) continue;
                 if (c->tag == CAP_PADD && s > 1) add_pools(d, c->raw);
+                else if (c->tag == CAP_PLAC && s > 1) add_placed(d, c->raw);
                 else if (c->tag == CAP_PDIF) for (size_t o = 0; o + 24 <= c->raw;) { uint32_t r; uint64_t off, len; memcpy(&r, d + o, 4); memcpy(&off, d + o + 8, 8); memcpy(&len, d + o + 16, 8);
                     if (r >= rp_nrg || off + len > rp_rg[r].size || o + 24 + len > c->raw) RFAIL("a pool change outside its region"); dm_guest_write_prepare(rp_rg[r].mem + off, (size_t)len); memcpy(rp_rg[r].mem + off, d + o + 24, (size_t)len); o += 24 + (size_t)len; }
                 else if (c->tag == CAP_TREG) for (size_t o = 0; o + sizeof(cap_treg) <= c->raw; o += sizeof(cap_treg)) { cap_treg *e = (cap_treg *)(d + o); if (!e->ok) continue;
@@ -412,7 +458,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
             for (size_t i = 0; i < rp_nch; i++) { cap_chunk *c = &rp_ch[i].c; if (c->submit != s || c->tag != CAP_SEGM) continue;
                 uint32_t idx, len; memcpy(&idx, rp_ch[i].d, 4); memcpy(&len, rp_ch[i].d + 4, 4);
                 for (uint32_t o = 0; o < len;) { op_hdr h; memcpy(&h, rp_seg[idx] + o, 8); if (h.size < 8 || o + h.size > len) RFAIL("submit %u segment %u: corrupt record at %u", s, idx, o);
-                    if (!cap_rec_fields(h.op, rp_seg[idx] + o + 8, h.size, &rp_dec, NULL) || rp_bad) RFAIL("submit %u segment %u: op %u at %u does not decode", s, idx, h.op, o); o += h.size; } }
+                    if (!cap_rec_fields(h.op, rp_seg[idx] + o + 8, h.size, &rp_dec, (void *)1) || rp_bad) RFAIL("submit %u segment %u: op %u at %u does not decode", s, idx, h.op, o); o += h.size; } }
             uint64_t *hs = malloc((size_t)MAX(nh, 1) * 8); for (uint32_t i = 0; i < nh; i++) { if (top[i] >= rp_nseg || !rp_seg[top[i]]) RFAIL("submit %u: handle %u names no segment", s, i); hs[i] = (uint64_t)(uintptr_t)rp_seg[top[i]]; }
             setup_ns += mono() - t0;
             if (s == 1) {   // untimed: what the captured state makes the replay do before it records (images of the registered textures made and uploaded, descriptors written)

@@ -13,9 +13,21 @@ typedef struct { uint8_t key[VKZ_KEY]; uint32_t klen; uint64_t h, size; int refs
 typedef struct { vkz_ent *e; int n, cap; uint64_t made, owned; } vkz_tab;   // made: allocations ever made; owned: images that left their entry for memory of their own (vkz_note_own)
 
 // An image is a candidate when it is dense (no residency image), single-sampled, not 3D, not block-compressed, not linear and not a display (window) texture, and its storage
-// takes at least min_bytes. Whether its content is the GPU's (ST_ZERO) is the caller's: only those are bound to shared memory
-static inline int vkz_candidate(uint64_t storage_bytes, uint64_t min_bytes, int res, uint32_t samples, int is3d, int compressed, int linear_or_display) {
-    return min_bytes && storage_bytes >= min_bytes && !res && samples <= 1 && !is3d && !compressed && !linear_or_display;
+// takes at least min_bytes and at most max_bytes (0: no upper limit). Whether its content is the GPU's (ST_ZERO) is the caller's: only those are bound to shared memory.
+// The upper limit (vkz_max, upstream 5a0ee9c9): upstream's a319e773 capped every image at 32 MiB against a giant depth duplication on Ocarina of Time, which also left out
+// Mario Kart World's 341 MiB color images that the game samples and never writes (1.8.0: two 16384² R8 and four 8192² RG16 ones, about 2 GB with memory of their own:
+// killed on a 12 GB device). So a depth or stencil image keeps the cap, and a color image has none on Turnip, where sharing them is measured (2.2 GB saved, a full race).
+// On Qualcomm's driver (V@0863, Adreno 740) the GPU hung during loading with the four 16384² R8 images shared, 3 runs of 3, and ran with the cap: other drivers keep it
+// (DM_VK_ZSHARE_MAX_MB). Here a sole zero allocation is also adopted in place at the first write (vka_imem_adopt_zero), which makes the depth duplication smaller; the depth
+// cap stays until a run shows none without it
+#define VKZ_CAP (32ull * 1024 * 1024)
+static inline uint64_t vkz_max(int depth, int big_color_ok, int64_t env_mb) {   // env_mb: DM_VK_ZSHARE_MAX_MB for color images (< 0: not set; 0: no limit)
+    if (depth) return VKZ_CAP;
+    if (env_mb >= 0) return (uint64_t)env_mb << 20;
+    return big_color_ok ? 0 : VKZ_CAP;
+}
+static inline int vkz_candidate(uint64_t storage_bytes, uint64_t min_bytes, uint64_t max_bytes, int res, uint32_t samples, int is3d, int compressed, int linear_or_display) {
+    return min_bytes && storage_bytes >= min_bytes && (!max_bytes || storage_bytes <= max_bytes) && !res && samples <= 1 && !is3d && !compressed && !linear_or_display;
 }
 static inline int vkz_find(const vkz_tab *t, const void *key, uint32_t klen) {
     for (int i = 0; i < t->n; i++) if (t->e[i].klen == klen && !memcmp(t->e[i].key, key, klen)) return i;
@@ -39,6 +51,11 @@ static inline int vkz_unref(vkz_tab *t, uint64_t h) {
     return 1;
 }
 static inline void vkz_note_own(vkz_tab *t) { t->owned++; }
+// Transfer a sole image's allocation without freeing/rebinding it.
+static inline uint64_t vkz_take_sole(vkz_tab *t, uint64_t h) {
+    int i = vkz_find_h(t, h); if (i < 0 || t->e[i].refs != 1) return 0;
+    uint64_t size = t->e[i].size; t->e[i] = t->e[--t->n]; t->owned++; return size;
+}
 // The table now: images bound, allocations, their bytes, and the bytes they save (each image beyond an allocation's first would have had its own)
 static inline void vkz_stats(const vkz_tab *t, uint64_t *images, uint64_t *allocs, uint64_t *bytes, uint64_t *saved) {
     uint64_t im = 0, by = 0, sv = 0;

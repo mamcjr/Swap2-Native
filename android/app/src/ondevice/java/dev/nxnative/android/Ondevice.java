@@ -117,18 +117,16 @@ final class Ondevice {
     /** The preparation screen for the job there is (the mini summary's tap) */
     static void openScreen(MainActivity a) {
         if (current == null) return;
-        a.startActivityForResult(new Intent(a, PrepareActivity.class), PREPARE_SCREEN);
+        a.startActivityForResult(new Intent(a, PrepareActivity.class).putExtra(PrepareActivity.EXTRA_JOB, current.file.getPath()), PREPARE_SCREEN);
     }
 
     /** The preparation screen of a game's own job (its card's View preparation, Options' View preparation): that job becomes the one the launcher follows */
     static void openScreen(MainActivity a, PrepareState s) {
         if (s == null || panel == null || panel.a != a) { openScreen(a); return; }
-        if (current == null || !current.file.equals(s.file)) {
-            Job.remember(a, s.file);
-            panel.load();
-            panel.show();
-        }
-        a.startActivityForResult(new Intent(a, PrepareActivity.class), PREPARE_SCREEN);
+        Job.remember(a, s.file);
+        panel.load();
+        panel.show();
+        a.startActivityForResult(new Intent(a, PrepareActivity.class).putExtra(PrepareActivity.EXTRA_JOB, s.file.getPath()), PREPARE_SCREEN);
     }
 
     /**
@@ -257,6 +255,8 @@ final class Ondevice {
 
     static boolean activityResult(MainActivity a, int request, int result, Intent data) {
         if (request == PREPARE_SCREEN) {   // Play on the preparation screen: the game goes into the list and starts
+            if (result == MainActivity.RESULT_OK && data != null && data.hasExtra(PrepareActivity.EXTRA_JOB))
+                Job.remember(a, new File(data.getStringExtra(PrepareActivity.EXTRA_JOB)));
             if (result == MainActivity.RESULT_OK && data != null && data.getBooleanExtra(PrepareActivity.EXTRA_PLAY, false) && panel != null && panel.a == a) {
                 panel.load();
                 panel.play();
@@ -537,8 +537,8 @@ final class Ondevice {
                 return true;
             }
             Job j = Job.of(new File(d.getString("file", "")), d.getString("job", "{}"));
-            if (j != null) job = j;
             jobAlive = d.getBoolean("alive");
+            if (j != null) job = Job.latestSnapshot(j, jobAlive);
             saveFailed = d.getString("saveError") != null;
             show();
             return true;
@@ -646,7 +646,7 @@ final class Ondevice {
             new Thread(() -> {
                 Found f = new Found();
                 try {
-                    String id = Nup.isNup(dump) ? Pack.titleIdOf(dump) : Pack.programId(new File(dump, "base/exefs/main.npdm"));
+                    String id = Pack.titleIdOf(dump);   // (a .nup, or a folder: base/exefs/main.npdm, else its newest update's)
                     File jf = Job.fileOf(DumpCheck.workOf(dump, id));
                     if (jf.isFile()) f.existing = jf;
                 } catch (IOException e) {
@@ -787,7 +787,7 @@ final class Ondevice {
                 job = j;
                 show();
                 a.refresh();
-                if (screen) { quiet(); a.startActivityForResult(new Intent(a, PrepareActivity.class), PREPARE_SCREEN); }
+                if (screen) { quiet(); a.startActivityForResult(new Intent(a, PrepareActivity.class).putExtra(PrepareActivity.EXTRA_JOB, j.file.getPath()), PREPARE_SCREEN); }
                 else a.error(GameState.whyText(a, GameFlow.Why.NO_SPACE, free, need, "", j.name()));
                 return;
             }
@@ -921,7 +921,7 @@ final class Ondevice {
                 boolean play = autoPlay;
                 autoPlay = false;
                 publish(PrepareState.of(a, j, true, false));
-                a.startActivityForResult(new Intent(a, PrepareActivity.class).putExtra(PrepareActivity.EXTRA_AUTOPLAY, play), PREPARE_SCREEN);
+                a.startActivityForResult(new Intent(a, PrepareActivity.class).putExtra(PrepareActivity.EXTRA_JOB, j.file.getPath()).putExtra(PrepareActivity.EXTRA_AUTOPLAY, play), PREPARE_SCREEN);
             }
         }
 

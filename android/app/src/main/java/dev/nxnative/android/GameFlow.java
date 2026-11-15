@@ -9,6 +9,10 @@ import java.util.Locale;
  * No Android classes: dm/tools/tests/test_android_game_flow.py runs it on the JVM (GameFlowJvmTest).
  */
 final class GameFlow {
+    /** A stopped service can retain a snapshot older than a completed shader import. */
+    static boolean preferLiveJob(boolean alive, long liveUpdated, long diskUpdated) {
+        return alive || liveUpdated >= diskUpdated;
+    }
     /** The card's one action */
     enum Action { CHECKING, PLAY, PREPARE, CONTINUE, RETRY, VIEW, FIX }
 

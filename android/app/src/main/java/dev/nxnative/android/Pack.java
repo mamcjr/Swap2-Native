@@ -148,24 +148,13 @@ final class Pack {
     }
 
     /**
-     * Whether a game folder or .nup is a whole dump Prepare can start from (DumpCheck then checks it fully against the profile's builds): base/exefs/main.npdm and a
-     * version to prepare, an update (updates/) or the base game itself (base/exefs/main and base/romfs: a game whose supported build is its base, version 0, such as
-     * Mario Kart World 1.8.0, has no update). A .nup the same: a base package, and an update package or a base with an ExeFS and a RomFS (its records only, not hashed:
-     * quick enough for a card). One version's folder (exefs/, romfs/) is not one: it needs a pack made elsewhere.
+     * Whether a game folder or .nup is a whole dump Prepare can start from (DumpCheck then checks it fully against the profile's builds): some version (the base,
+     * version 0, or an update) with its exefs/main, an exefs/main.npdm and a RomFS, its own or the base's (DumpLayout.preparable). A dump of the update alone that
+     * carries the whole ExeFS and RomFS (a "merged" .nup, or updates/&lt;v&gt;/ with no base/) is one too. One version's folder (exefs/, romfs/) is not one: it
+     * needs a pack made elsewhere.
      */
     static boolean isDump(File dir) {
-        if (Nup.isNup(dir)) {
-            try {
-                Nup n = Nup.peek(dir);
-                Nup.Pkg base = n.base();
-                return base != null && (!n.of(Nup.UPDATE).isEmpty() || base.exefsDir != Nup.NONE && base.romfsDir != Nup.NONE);
-            } catch (IOException e) {
-                return false;
-            }
-        }
-        if (!new File(dir, "base/exefs/main.npdm").isFile()) return false;
-        if (new File(dir, "updates").isDirectory()) return true;
-        return new File(dir, "base/exefs/main").isFile() && romfsIn(new File(dir, "base")) != null;
+        return DumpLayout.preparable(dir);   // (any layout: base, update or both, folder or .nup; an update-only "merged" .nup too)
     }
 
     /**
@@ -240,13 +229,15 @@ final class Pack {
         return (b[o] & 0xffL) | (b[o + 1] & 0xffL) << 8 | (b[o + 2] & 0xffL) << 16 | (b[o + 3] & 0xffL) << 24;
     }
 
-    /** The game folder's main.npdm: a dump (base/exefs) or one version's files (exefs/). null when it is neither */
+    /** The game folder's main.npdm: a dump (base/exefs, else its newest update's: an update-only dump) or one version's files (exefs/). null when it is neither */
     static File npdmOf(File game) {
         for (String p : new String[] {"base/exefs/main.npdm", "exefs/main.npdm"}) {
             File f = new File(game, p);
             if (f.isFile()) return f;
         }
-        return null;
+        long v = DumpLayout.newest(game);
+        File f = v > 0 ? new File(game, "updates/" + v + "/exefs/main.npdm") : null;
+        return f != null && f.isFile() ? f : null;
     }
 
     /**
@@ -331,6 +322,31 @@ final class Pack {
      * NUP.md), for each aoc row: the game's own .nup when it has that addon, else the .nup the row names (relative to the folder holding the game) when it is
      * there, else the game's own
      */
+    /** Makes a symbolic link (GameActivity: Os.symlink, its errno in the message; the JVM tests: Files.createSymbolicLink) */
+    interface Linker { void link(String target, String path) throws IOException; }
+
+    /**
+     * Makes the links of aocLinks in dir, after removing what an earlier run left there. Each target goes through target (a .nup used where it is: fd:&lt;n&gt;/&lt;name&gt;).
+     * Returns one line for each link that could not be made (the game then runs without that DLC): the launcher logs each one as a [RED] line
+     */
+    static List<String> makeAocLinks(File dir, Map<String, String> links, java.util.function.UnaryOperator<String> target, Linker linker) {
+        List<String> failed = new ArrayList<>();
+        File[] old = dir.listFiles();
+        if (old != null) for (File f : old) if (!f.delete()) failed.add("cannot remove " + f + " (left from an earlier run)");
+        for (Map.Entry<String, String> e : links.entrySet()) {
+            String to = target.apply(e.getValue()), at = new File(dir, e.getKey()).getPath();
+            try { linker.link(to, at); } catch (IOException ex) { failed.add("cannot link " + at + " -> " + to + ": " + ex.getMessage()); }
+        }
+        return failed;
+    }
+
+    /** Removes a folder of links (its entries, never what they point to; it holds no subfolders), then the folder; nothing when it is not there */
+    static void removeDir(File dir) {
+        File[] l = dir.listFiles();
+        if (l != null) for (File f : l) f.delete();
+        dir.delete();
+    }
+
     Map<String, String> aocLinks(File game) {
         Map<String, String> out = new LinkedHashMap<>();
         boolean nup = Nup.isNup(game);

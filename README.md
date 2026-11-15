@@ -52,8 +52,8 @@ New to the app? **Getting started** explains file selection and preparation. Ope
 
 Each game is prepared once: its code is rewritten for Android and its shaders are translated for Vulkan. The app does this on the phone ([android/LIBRARY.md](android/LIBRARY.md)):
 
-1. Copy your dump (folder or `.nup`) into `/sdcard/Switch2/Games` on the phone.
-2. In the app, choose that folder as your library. The app recognizes the games by title ID, uses the built-in profile for each and fetches its cover.
+1. Copy your dump (folder or `.nup`) into `/sdcard/Switch2/Games` on the phone, directly or in a folder of its own there. The app makes `Switch2/Games` once All files access is on. Base and update must be in one dump: a `.nup` of the base alone is not combined with a separate update `.nup`. An update `.nup` that holds the whole game works on its own. A `.nup` over 4 GB needs an exFAT memory card; FAT32 cuts it.
+2. Open the app (or return to it): games in `Switch2/Games` appear on their own, and **Refresh** looks again. A dump kept elsewhere is added with **Add game**. The app recognizes the games by title ID, uses the built-in profile for each and fetches its cover. A dump of a version the app does not support is refused when it is added, with the reason (Refresh shows it again).
 3. Tap **Play** on a game. The first time, it prepares the game first: code rewrite, shader split and translation. It runs in the background with a notification and can be paused; keep the phone charging and the app exempt from battery optimization. Nothing is uploaded. Zelda's 42,000 shaders take the longest.
 4. When it is done, **Play** starts the game.
 

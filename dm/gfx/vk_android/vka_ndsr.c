@@ -77,8 +77,8 @@ static void switches(void) {   // read again after a live change (vka_env_gen), 
     if (g == g_sw_gen) return;
     g_sw_gen = g;
     char v[64];
-    g_sw.mode = !vka_env_str("DM_VK_NDSR", v, sizeof v) || !strcmp(v, "net") || !strcmp(v, "0") ? 0 : !strcmp(v, "bilinear") ? 2 : !strcmp(v, "fsr") || !strcmp(v, "1") ? 1 : -1;
-    if (g_sw.mode < 0) { VRED("DM_VK_NDSR=%s: not net, fsr or bilinear; the network runs", v); g_sw.mode = 0; }
+    g_sw.mode = !vka_env_str("DM_VK_NDSR", v, sizeof v) || !strcmp(v, "net") || !strcmp(v, "0") ? 0 : !strcmp(v, "bilinear") ? 2 : !strcmp(v, "nearest") ? 3 : !strcmp(v, "fsr") || !strcmp(v, "1") ? 1 : -1;
+    if (g_sw.mode < 0) { VRED("DM_VK_NDSR=%s: not net, fsr, bilinear or nearest; the network runs", v); g_sw.mode = 0; }
     g_sw.enc = vka_env_str("DM_VK_NDSR_INPUT", v, sizeof v) && !strcmp(v, "sqrt") ? VKA_NDSR_ENC_SQRT : VKA_NDSR_ENC_LINEAR;
     g_sw.map = vka_env_str("DM_VK_NDSR_MAP", v, sizeof v) && !strcmp(v, "push") ? VKA_NDSR_MAP_PUSH : VKA_NDSR_MAP_FULL;
     g_sw.log = vka_env_str("DM_VK_NDSR_LOG", v, sizeof v) && atoi(v) > 0;
@@ -132,7 +132,7 @@ static void log_sizes(const vka_dstate *d, uint64_t key, const vka_res *t, const
     if (i == g_nlog) {
         if (g_nlog == NLOG) return;
         g_log[g_nlog++] = (typeof(g_log[0])){key, iw, ih, ow, oh, enc, map, kernel, pack, 0};
-        VLOG("NDSR network %016llx replaced by %s (input %s, %s mapping, %ux%u -> %ux%u; texture IDs %d -> %d; output VkFormat %d %s)", (unsigned long long)key, kernel ? "bilinear" : "FSR 1 EASU",
+        VLOG("NDSR network %016llx replaced by %s (input %s, %s mapping, %ux%u -> %ux%u; texture IDs %d -> %d; output VkFormat %d %s)", (unsigned long long)key, kernel == VKA_NDSR_KERNEL_NEAREST ? "nearest" : kernel ? "bilinear" : "FSR 1 EASU",
              enc ? "sqrt" : "linear", map ? "push bank" : "full-image", iw, ih, ow, oh, t->tid, o->tid, b ? (int)b->f.vk : 0,
              pack ? "without storage support: packed words through an R32_UINT view" : "stored as floats");
     }
@@ -173,7 +173,7 @@ VkPipeline vka_ndsr_pipeline(const vka_dstate *d, vka_shader *cs, const vka_layo
         refused(cs->key, why); goto out;
     }
     if (pack && !rt) { refused(cs->key, "its output needs the packed store and the dispatch passed no vka_imgrt"); goto out; }
-    int kernel = g_sw.mode == 2 ? VKA_NDSR_KERNEL_BILINEAR : VKA_NDSR_KERNEL_EASU;
+    int kernel = g_sw.mode == 3 ? VKA_NDSR_KERNEL_NEAREST : g_sw.mode == 2 ? VKA_NDSR_KERNEL_BILINEAR : VKA_NDSR_KERNEL_EASU;
     p = make(cs, lay, tb, ib, bb, g_sw.enc, g_sw.map, kernel, pack);
     if (p && pack) { memset(rt, 0, sizeof *rt); rt->b[0] = (uint32_t)ib << 16 | 33u << 8 | 1u; }   // (the output an unsigned R32ui image: vka_draw.c rt_dim, then id_view)
     if (p) log_sizes(d, cs->key, t, o, oi, g_sw.enc, g_sw.map, kernel, pack, cb);
