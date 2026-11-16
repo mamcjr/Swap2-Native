@@ -32,6 +32,12 @@ uint32_t *vka_spv_img_retype(const uint32_t *w, size_t nw, const vka_spv_imgsel 
 // *early 0 no mode added, 1 added and right for every pipeline without alpha to coverage, 2 added and right only with the alpha test off too); NULL with err empty when
 // the module reads no pool, NULL with the reason in err when it cannot take the code (the module is then used as it is: its pool reads report nothing)
 enum { VKA_PFB_VTX_STORES = 1, VKA_PFB_EARLY = 2 };
+// Whether a pixel shader's only effect is its colour outputs: no discard, demote or terminate, no depth, sample mask or stencil export (built-in or execution mode), no
+// write to memory (buffers, images, atomics; a store through a pointer of unknown class counts). 1: always; 2: when the alpha test is off (its one discard is the module's
+// only one, under the SpecId alpha_spec constant: DMSH_VK_SPEC_ALPHA_FUNC); 0: it has another effect, or the module is not a pixel shader or cannot be read. A pipeline
+// whose colour writes are all masked can then leave such a shader out (vka_pso.c "Pixel shaders with nothing to do"): its depth test, depth writes and occlusion counts
+// are the rasterizer's alone
+int vka_spv_fs_inert(const uint32_t *w, size_t nw, uint32_t alpha_spec);
 uint32_t *vka_spv_pool_fb(const uint32_t *w, size_t nw, uint32_t set, uint32_t tex_binding, uint32_t fb_set, uint32_t fb_binding, unsigned flags, uint32_t alpha_spec, size_t *out_nw, int *sites, int *early, char *err, size_t errn);
 
 // A descriptor array at (set, binding) declared with more than len elements gets len (vka_spvpatch.c vka_spv_array_len: a device whose pool table is shorter than the

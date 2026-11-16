@@ -311,6 +311,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         if (readinessDone) return false;
         File files = getExternalFilesDir(null);
         List<String> drv = new ArrayList<>();   // the driver as start() will set it: the launcher's pick, then the user's lines (which win)
+        drv.add("DM_TEMP=" + new File(files, "temp/" + id));   // (start's DM_TEMP: DM_QGL's settings file goes there, written when the check opens the driver)
         GpuDriver.env(this, id, drv);
         drv.addAll(quietEnv(new File(files, "env.txt")));
         drv.addAll(envLines(Prefs.gameEnv(this, id)));

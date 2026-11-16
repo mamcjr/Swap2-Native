@@ -754,6 +754,7 @@ static void map_image(module_t *m, const char *dir) {
 
 static char g_module_dir[1024];   // the folder the modules were loaded from (dm_module_dir)
 const char *dm_module_dir(void) { return g_module_dir; }
+void dm_module_dir_set(const char *dir) { strlcpy(g_module_dir, dir, sizeof g_module_dir); }   // a process that loads no module but reads the pack's files (the pipeline warm, vka_warm.c)
 
 void load_modules(const char *dir, const char **names, int n) {
     strlcpy(g_module_dir, dir, sizeof g_module_dir);

@@ -114,4 +114,14 @@ final class Native {
 
     /** nxhost_vk_selftest(window, frames): blocks for about frames / 60 s. 0 = passed, -1 = not in this host. */
     static native int selftest(Surface surface, int frames);
+
+    /** The pipeline warm (nxhost_vk_warm, WarmActivity's process): the log opened at logPath, env set (the game's), and the game's prewarm list made into its pipeline
+     *  cache with no game. Blocks: call it on a thread of its own. "&lt;rc&gt; &lt;made&gt; &lt;had&gt; &lt;dropped&gt; &lt;total&gt;" (rc 0 done), or null when this host has none */
+    static native String warm(String pack, String[] env, String logPath);
+
+    /** The warm's progress into out: {keys taken so far, the list's length (0 until loaded)}; false when this host has no warm */
+    static native boolean warmProgress(int[] out);
+
+    /** Ends the warm early (Play now): the compiles under way finish, what was made is saved, and Native.warm returns */
+    static native void warmStop();
 }

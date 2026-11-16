@@ -105,6 +105,7 @@
     <string name="s2_touch_auto">Automático</string>
     <string name="s2_touch_bananza">Donkey Kong Bananza</string>
     <string name="s2_touch_classic">Controle clássico</string>
+    <string name="s2_touch_show">Mostrar os controles na tela (somem com um controle conectado; o botão Home dele abre este painel)</string>
     <string name="s2_touch_per_game">Layout, tamanho, opacidade e vibração são salvos para este jogo.</string>
     <string name="s2_touch_dk_hint">Analógico esquerdo: movimento. Direito: câmera. Direcional: formas, habilidades e foto. L+R: Bananza. Ajuste as posições no editor de controles.</string>
     <string name="s2_touch_racing">Mario Kart World — corrida</string>
@@ -783,4 +784,16 @@
     <string name="s2_gfx_memory_alias">Buffer compartilhado</string>
     <string name="s2_gfx_memory_placed">Mapeamento direto</string>
     <string name="s2_gfx_memory_note">Como a memória do jogo chega à GPU. Experimente a outra opção se o jogo fechar sozinho ao carregar uma cena. Vale na próxima abertura.</string>
+    <string name="s2_warm_title">Preparando os gráficos de %1$s</string>
+    <string name="s2_warm_explain">Compilando os pipelines gráficos do jogo para o driver da GPU deste celular, com o jogo fechado, para os primeiros minutos não travarem por eles. Feito uma vez por driver e por atualização de shaders; deixe o celular carregando.</string>
+    <string name="s2_warm_starting">Começando…</string>
+    <string name="s2_warm_progress">%1$d de %2$d pipelines</string>
+    <string name="s2_warm_stopping">Parando: terminando as compilações em curso (%1$d de %2$d)</string>
+    <string name="s2_warm_stopping_now">Parando: terminando as compilações em curso…</string>
+    <string name="s2_warm_done">Pronto: %1$d compilados, %2$d já prontos, de %3$d</string>
+    <string name="s2_warm_failed">Não deu para preparar os gráficos (código %1$s): o jogo os prepara enquanto roda</string>
+    <string name="s2_warm_none">Esta versão não prepara os gráficos antes: o jogo os prepara enquanto roda</string>
+    <string name="s2_warm_play_now">Jogar agora</string>
+    <string name="s2_warm_stop">Parar</string>
+    <string name="s2_warm_close">Fechar</string>
 </resources>

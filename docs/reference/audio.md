@@ -58,6 +58,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (4.4), the first game it was plainly wrong for.
 - **Check:** checked with sound on [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (11.4, +0x1d8), [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (7.3, `MutexType` +0x1d8) and [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (7.3, which is silent for its first minute with either lock).
 
+### The render lock is a host lock held across guest code (`g_render_mu`)
+
+- **Symptom:** none seen here yet. Reported upstream: a movie's sound and picture stop for good partway through, because the renderer's render thread never returns. The output underruns at every callback, the player keeps all of its output buffers, and the video starves behind the audio.
+- **Cause:** `render_once` holds `g_render_mu` across guest code: the [update lock](#the-renderers-update-lock-update_lock), `GenerateCommand` and `CommandListProcessor::Process`. The game's `RequestUpdate` takes the same lock from its own thread to render a catch-up frame, about one render in seven in movie-heavy games. As a plain `pthread_mutex`, a guest thread waiting for it still counted as running, and a thread that had woken it on its core then waited for it to block with no bound: the [host lock held across a same-core handoff](threads.md#a-host-lock-held-across-a-same-core-handoff). The render time and frame count lines were also written under the lock, and `LOG` blocks while the log pipe is full.
+- **Fix:** `render_once` takes `g_render_mu` with `dm_host_lock`. The catch-up update's wait for room in the output queue (`h_ars_Update`) is a [native HLE wait](threads.md#native-hle-waits-release-the-guest-core). The two periodic log lines are written after the lock is released. Whether this was the stop upstream is still open there: DroidPlay Core also added a watch that names the step a stuck render thread is in, which is not ported.
+- **Found on:** no game here. Ported from DroidPlay Core `45d1f7c7` (its issue #480, The World Ends with You: Final Remix on an AYN Thor Pro), whose renderer has the same lock.
+- **Check:** `t_audren_work` and `t_audren_layout` (the lock path builds and renders). They do not reproduce the stop, which needs a guest scheduler and a game's catch-up updates.
+
 ### No `SdkMutexType` in SDK 3
 
 - **Symptom:** `FATAL audren: missing SDK symbol _ZN2nn2os12SdkMutexType4LockEv` right after the renderer's render thread starts.

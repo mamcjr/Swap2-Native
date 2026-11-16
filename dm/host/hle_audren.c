@@ -87,7 +87,7 @@ static void *g_handle[2];                    // AudioRendererHandle (renderer ob
 static _Atomic int g_open;
 static void *g_render_tt;                    // the render thread (ThreadType from dm_guest_thread_spawn): Close joins it before the SDK tears the renderer down
 static int16_t g_frame[FRAME_MAX * 2]; static int g_frame_n;   // the latest frame (stereo int16)
-static _Atomic uint64_t g_frames, g_nonsilent;
+static _Atomic uint64_t g_frames, g_nonsilent, g_note_frames;   // g_note_frames: a frame count capture() has to log, written out by render_once after g_render_mu
 enum { CQ = 4 }; static int16_t g_cq[CQ][FRAME_MAX * 2]; static int g_cq_n[CQ]; static _Atomic uint32_t g_cq_head, g_cq_tail;   // output queue of catch-up frames
 static pthread_mutex_t g_cq_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_cq_cv = PTHREAD_COND_INITIALIZER;   // the render thread signals each frame it takes off the queue (catch-up pacing)
 static void cq_popped(void) { pthread_mutex_lock(&g_cq_mu); pthread_cond_broadcast(&g_cq_cv); pthread_mutex_unlock(&g_cq_mu); }
@@ -370,14 +370,19 @@ static int capture(const uint8_t *cl, size_t len, int16_t *dst) {
                 dst[s] = (int16_t)v; loud |= (uint64_t)v;
             }
             atomic_fetch_add(&g_frames, 1); if (loud) atomic_fetch_add(&g_nonsilent, 1);
-            uint64_t f = atomic_load(&g_frames); if (f == 200 || f % 12000 == 0) LOG("audren: rendered %llu frames, %llu of them not silent", (unsigned long long)f, (unsigned long long)atomic_load(&g_nonsilent));
+            uint64_t f = atomic_load(&g_frames); if (f == 200 || f % 12000 == 0) atomic_store(&g_note_frames, f);   // logged by render_once once g_render_mu is released
             return (int)nout;
         }
         c += size;
     }
     return 0;
 }
-// Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer
+// Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer.
+// g_render_mu is held across guest code (the SDK's update lock, GenerateCommand, CommandListProcessor::Process), and the game's RequestUpdate takes it from its own thread for a
+// catch-up frame, so it is taken with dm_host_lock: a guest thread waiting for it counts as blocked, as on the SDK's own lock, and holds no same-core handoff. A thread waiting
+// on a plain host lock still counted as running, and the thread that woke it on its core then waited for it to block with no bound (dm_yield_to_core_peers): the deadlock
+// Kirby's guide movies and Xenoblade Chronicles 3's decoder had before hle_movie.c took its locks this way (after DroidPlay Core 45d1f7c7, issue #480 there: The World Ends with
+// You: Final Remix's movies froze with the render thread stopped). Its periodic log lines are written after the lock is released: LOG blocks while the log pipe is full
 static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_updates, g_renders, g_catchups;
 // SDK 20's AudioRenderSystem (The Legend of Zelda: Breath of the Wild 1.9.0) has another layout: the member functions for mode / device / command buffer are inlined (sdk+0x22a70c ExecuteAudioRendererRendering:
@@ -439,7 +444,7 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
     }
     int md = gen20 ? *(int32_t *)(sys + 0x4c) : mode(sys), dv = gen20 ? *(int32_t *)(sys + 0x48) : device(sys);
     if (md != 1 || dv != 1) return 0x40299;   // same as the original: manual rendering needs CPU + manual mode
-    pthread_mutex_lock(&g_render_mu);
+    dm_host_lock(&g_render_mu);
     uint64_t t0 = now_ns();
     // Command generation must exclude the game thread's RequestUpdate (AudioRenderSystem::Update, which holds the mutex at mu_off): the original system thread (SendCommandToDsp) generates under the same lock. Processing (the CPU DSP) stays outside the lock, as in the original.
     uint8_t *cl; size_t n;
@@ -453,8 +458,12 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
     if (dst) *nout = capture(cl, n, dst);
     // render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
     static uint64_t sum, mx, cnt; uint64_t d = now_ns() - t0; sum += d; if (d > mx) mx = d;
-    if (++cnt == 2000) { LOG("audren: render time mean %.2f ms / max %.2f ms (5 ms budget per frame, last 2000 frames); catch-up renders so far %llu", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&g_catchups)); sum = mx = cnt = 0; }
+    double tmean = -1, tmax_ms = 0;
+    if (++cnt == 2000) { tmean = sum / 2000 / 1e6; tmax_ms = mx / 1e6; sum = mx = cnt = 0; }
     pthread_mutex_unlock(&g_render_mu);
+    uint64_t f = atomic_exchange(&g_note_frames, 0);
+    if (f) LOG("audren: rendered %llu frames, %llu of them not silent", (unsigned long long)f, (unsigned long long)atomic_load(&g_nonsilent));
+    if (tmean >= 0) LOG("audren: render time mean %.2f ms / max %.2f ms (5 ms budget per frame, last 2000 frames); catch-up renders so far %llu", tmean, tmax_ms, (unsigned long long)atomic_load(&g_catchups));
     return RES_OK;
 }
 // Where the AudioRenderSystem sits inside AudioRendererImpl, read off the SDK's own ExecuteAudioRendererRendering: its prologue adds the offset to `this` (x0) before the first branch.
@@ -504,9 +513,11 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "renderer
         uint32_t t = atomic_load(&g_cq_tail);
         if (t - atomic_load(&g_cq_head) >= CQ) {   // queue full: wait for the render thread to play one (every 5 ms), so catch-up frames keep real time; at most 50 ms (an output that stopped)
             struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 50000000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+            dm_thread_native_wait(1);   // the game's thread waits for the render thread here: a native wait, not a running guest thread
             pthread_mutex_lock(&g_cq_mu);
             while (atomic_load(&g_open) && t - atomic_load(&g_cq_head) >= CQ && !pthread_cond_timedwait(&g_cq_cv, &g_cq_mu, &dl)) {}
             pthread_mutex_unlock(&g_cq_mu);
+            dm_thread_native_wait(0);
         }
         if (t - atomic_load(&g_cq_head) < CQ) { render_once(sys, g_cq[t % CQ], &g_cq_n[t % CQ]); atomic_store(&g_cq_tail, t + 1); }
         else render_once(sys, NULL, NULL);   // still full (the output stopped): render anyway, output discarded

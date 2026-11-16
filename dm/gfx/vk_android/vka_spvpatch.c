@@ -1023,6 +1023,41 @@ uint32_t *vka_spv_pool_fb(const uint32_t *w, size_t nw, uint32_t set, uint32_t t
     *out_nw = o.n;
     return o.w;
 }
+// Whether a pixel shader does nothing but write its colour outputs (vka_spvpatch.h vka_spv_fs_inert): the same reading as pf_pass's early-test kinds, without the pool
+int vka_spv_fs_inert(const uint32_t *w, size_t nw, uint32_t alpha_spec) {
+    if (!w || nw < 5 || w[0] != 0x07230203 || !w[3] || w[3] > (1u << 22)) return 0;
+    uint32_t bound = w[3], model = UINT32_MAX;
+    uint32_t *psc = calloc(bound, 4), *rt = calloc(bound, 4), *bi = calloc(bound, 4), *vsc = calloc(bound, 4);
+    int r = 0, kill = 0, mem = 0, exports = 0, aspec = 0; size_t first_fn = nw;
+    if (!psc || !rt || !bi || !vsc) goto out;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) goto out;
+        if (op == OpEntryPoint && len >= 3) { if (model == UINT32_MAX) model = w[i + 1]; else if (model != w[i + 1]) goto out; }
+        else if (op == OpExecutionMode && len >= 3 && (w[i + 2] == PF_DepthReplacing || (w[i + 2] >= 14 && w[i + 2] <= 16))) exports = 1;   // DepthReplacing, DepthGreater / Less / Unchanged
+        else if (op == OpDecorate && len >= 4 && w[i + 1] < bound) { if (w[i + 2] == DecBuiltIn) bi[w[i + 1]] = w[i + 3] + 1; else if (w[i + 2] == PF_DecSpecId && w[i + 3] == alpha_spec) aspec = 1; }
+        else if ((op == OpTypePointer || op == OpTypeForwardPointer) && len >= 3 && w[i + 1] < bound) psc[w[i + 1]] = w[i + 2] + 1;
+        else if (op == OpVariable && len >= 4 && w[i + 2] < bound) { rt[w[i + 2]] = w[i + 1]; vsc[w[i + 2]] = w[i + 3] + 1; }
+        else if ((op == OpConstant || op == PF_OpSpecConstant || op == PF_OpConstantNull || op == OpUndef) && len >= 3 && w[i + 2] < bound) rt[w[i + 2]] = w[i + 1];
+        if (op == OpFunction && first_fn == nw) first_fn = i;
+        if (first_fn < nw) {   // a function's body: discards, and writes to memory (a pointer of unknown class counts as memory)
+            if (op == OpKill || op == OpTerminateInvocation || op == PF_Demote) kill++;
+            if (op == OpImageWrite) mem = 1;
+            else if (pf_mem_write(op) && len >= 2) {
+                uint32_t p = op == OpStore || op == OpCopyMemory || op == OpCopyMemorySized || op == 228 ? w[i + 1] : len >= 4 ? w[i + 3] : 0;
+                uint32_t sc = p < bound && rt[p] < bound && psc[rt[p]] ? psc[rt[p]] - 1 : SCUniform;
+                if (sc_mem(sc)) mem = 1;
+            }
+            if (!pf_no_result(op) && op != OpLabel && len >= 3 && w[i + 2] < bound) rt[w[i + 2]] = w[i + 1];
+        }
+        i += len;
+    }
+    for (uint32_t id = 1; id < bound; id++) if (bi[id] && vsc[id] == SCOutput + 1 && (bi[id] - 1 == PF_BIFragDepth || bi[id] - 1 == PF_BISampleMask || bi[id] - 1 == PF_BIStencilRef)) exports = 1;
+    r = model != PF_Fragment || first_fn == nw || exports || mem ? 0 : !kill ? 1 : kill == 1 && aspec ? 2 : 0;
+out:
+    free(psc); free(rt); free(bi); free(vsc);
+    return r;
+}
 
 // vka_spv_array_len: a descriptor array declared longer than the device's table. The translator declares the texture pool as an array of 2^20 sampled images (and the
 // sampler and image pools likewise, DMSH_VK_POOL_*_COUNT), which is the table's size on an Adreno. A device whose update-after-bind limits are lower gets a shorter table

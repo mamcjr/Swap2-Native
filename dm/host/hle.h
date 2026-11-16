@@ -21,6 +21,8 @@ uint64_t now_ns(void);
 // A blocking native HLE wait releases the guest core. With the condition mutex
 // held, enter with 1 before waiting and balance with 0 after reacquiring it.
 void dm_thread_native_wait(int entering);
+// Take a host lock that an HLE call holds while it runs guest code: a guest thread that has to wait for it waits as a native HLE wait (hle_thread.c)
+void dm_host_lock(pthread_mutex_t *m);
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 int dm_detclock_enabled(void);
 void dm_guest_clock_advanced(void);

@@ -941,7 +941,8 @@ public final class MainActivity extends Activity {
         if (!addWithPack(dir, id, pack)) return;
         String save = i.getStringExtra("save");
         if (save != null) Prefs.folder(this, "save_" + id, new File(save).getPath());
-        if (i.getBooleanExtra("run", false)) for (Game g : games) if (g.gameDir.equals(dir.getPath())) { launch(g); break; }
+        // --ez run true (adb, android_bench.py): no pipeline warm first unless --ez warm true, so a scripted run starts the game when it asks (Warm)
+        if (i.getBooleanExtra("run", false)) { noWarmOnce = !i.getBooleanExtra("warm", false); for (Game g : games) if (g.gameDir.equals(dir.getPath())) { launch(g); break; } noWarmOnce = false; }
         // test app: --ez diag true [--ei diag_secs <n>] starts the game's automatic diagnosis without its question (AutoDiag)
         if (GameActivity.testApp() && i.getBooleanExtra("diag", false))
             for (Game g : games) if (g.gameDir.equals(Frontend.normal(dir.getPath()))) { AutoDiag.beginNow(this, g, i.getIntExtra("diag_secs", 150)); break; }   // (a card's path is normalised: /sdcard/... names none)
@@ -2273,8 +2274,15 @@ public final class MainActivity extends Activity {
         start(g);
     }
 
+    private boolean noWarmOnce;   // a scripted --ez run true start: no pipeline warm first (onNewIntent's run)
     private void start(Game g) {
         if (playCurtain != null && !playCurtainGone) return;   // the transition of a Play already under way
+        // The pipeline warm first, when the game's last complete one is not for this driver, library, host and system build (Warm.wanted): the game starts at its end
+        if (!noWarmOnce && Warm.wanted(this, g.titleId, new File(g.packDir))) {
+            startActivity(new Intent(this, WarmActivity.class).putExtra("title_id", g.titleId).putExtra("name", g.name).putExtra("game", g.gameDir).putExtra("pack", g.packDir)
+                    .putExtra("play", true));
+            return;
+        }
         LauncherEffects.play(this, LauncherEffects.Cue.LAUNCH);   // once, as the game starts (the pool stops with the launcher's pause)
         Intent i = new Intent(this, GameActivity.class).putExtra("title_id", g.titleId).putExtra("name", g.name).putExtra("game", g.gameDir).putExtra("pack", g.packDir);
         playTransition(g, i);

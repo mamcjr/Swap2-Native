@@ -443,6 +443,25 @@ VkShaderModule vka_shader_gs_module(vka_shader *s) {
     pthread_mutex_unlock(&g_mu);
     return mod;
 }
+// A pixel shader whose only effect is its colour outputs (vka_spvpatch.h vka_spv_fs_inert), read once from its base module's code as the pipelines get it (the override,
+// the mesh fragment rewrite and the one-lane subgroup rewrite applied, as spv_module does): 1 always, 2 with the alpha test off, 0 not or unreadable
+int vka_shader_fs_inert(vka_shader *s) {
+    if (!s || !s->e || s->e->stage != DMSH_VK_STAGE_FS) return 0;
+    int k = __atomic_load_n(&s->fs_inert, __ATOMIC_RELAXED);
+    if (k) return k - 1;
+    const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_BASE);
+    char err[256]; size_t nb = 0; uint32_t *w = m ? spv_override(s->key, m->variant, &nb) : NULL;
+    if (!w && m) w = vka_shlib_spirv(s->lib, m, &nb, err, sizeof err);
+    int r = 0;
+    if (w) {
+        mesh_fragment(s->e, w, &nb);
+        if (s->e->flags & DMSH_VK_F_SUBGROUP) single_lane(s->key, s->e->stage, &w, &nb);
+        r = vka_spv_fs_inert(w, nb / 4, DMSH_VK_SPEC_ALPHA_FUNC);
+        free(w);
+    }
+    __atomic_store_n(&s->fs_inert, r + 1, __ATOMIC_RELAXED);
+    return r;
+}
 // The base vertex module with the inputs of umask / smask retyped (vka_spvpatch.c): made once per pair of masks, kept for the process like the base module
 struct vka_vinmod { struct vka_vinmod *next; uint32_t u, s; VkShaderModule mod; };
 VkShaderModule vka_shader_vin_module(vka_shader *s, uint32_t umask, uint32_t smask) {
@@ -596,6 +615,11 @@ vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key) {
     return s->bad ? NULL : s;
 }
 
+// The game's library, loaded if it is not yet (vka_pso.c vka_pso_warm: the warm has no draw whose shaders would load it); NULL = none usable
+const vka_shlib *vka_shader_game_lib(void) {
+    pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
+    return ok ? &g_lib : NULL;
+}
 // A shader of the game's library by key, the library loaded if it is not yet (the prewarm threads, vka_pso.c); NULL = no library, not in it, or refused
 vka_shader *vka_shader_by_key(uint64_t key) {
     pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);

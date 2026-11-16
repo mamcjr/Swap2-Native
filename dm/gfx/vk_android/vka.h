@@ -390,6 +390,7 @@ typedef struct vka_shader {
     VkShaderModule gs_claim;            // its module with those writes under the per-primitive claim, made when a pipeline first asks
     struct vka_shader *mesh_vertex;     // persistent pulling vertex stage of a compute-emulated mesh shader
     int mesh_count_off;                 // an emulated mesh shader's group output structure: the byte offset of its primitive count (vka_mesh.inc's compaction; -1 unknown)
+    int fs_inert;                       // a pixel shader's vka_spv_fs_inert answer + 1, 0 not read yet (vka_shader_fs_inert)
 } vka_shader;
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; } vka_progsh;   // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped)
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
@@ -398,10 +399,12 @@ void vka_prog_put(uint64_t serial, const vka_progsh *ps);   // a program made by
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key);
 const char *vka_shader_lib_path(void);   // the library file loaded ("" before or without one): this version's, or an older one of the same ABI
 vka_shader *vka_shader_by_key(uint64_t key);   // the game library's shader of key (the library loaded first if needed); NULL = not there or refused
+const vka_shlib *vka_shader_game_lib(void);   // the game's library, loaded if it is not yet; NULL = none usable
 VkShaderModule vka_shader_module(vka_shader *s, int variant);
 uint32_t vka_shader_sg_pin(int stage);              // DMSH_VK_STAGE_*: the subgroup size its subgroup shaders' pipelines require (vka_shader.c sg_plan), 0 = none
 VkShaderModule vka_shader_cs_module(vka_shader *s);  // a compute shader's module: its DMSH_VK_MOD_SHUFFLE_LDS one where the device takes it (vka_shader.c shuffle_plan), else the base
 int vka_shader_cs_variant(vka_shader *s);            // the DMSH_VK_MOD_* variant vka_shader_cs_module gives (DMSH_VK_MOD_SHUFFLE_LDS or DMSH_VK_MOD_BASE)
+int vka_shader_fs_inert(vka_shader *s);   // a pixel shader whose only effect is its colour outputs: 1 always, 2 with the alpha test off, 0 not (vka_spvpatch.h vka_spv_fs_inert), read once
 VkShaderModule vka_shader_gs_module(vka_shader *s);   // a geometry shader's module with its memory writes made once per primitive (vka_spv_gs_claim)
 #define VKA_GS_CLAIM_BINDING (DMSH_VK_STAGE_GS * DMSH_VK_STAGE_BINDINGS + DMSH_VK_STAGE_BINDINGS - 1)   // set 0: the claim words of such a shader (the stage's last binding)
 VkShaderModule vka_shader_fout_module(vka_shader *s, uint32_t umask, uint32_t smask);
@@ -421,6 +424,9 @@ VkPipeline vka_gfx_pipeline(vka_shader *const sh[VKA_NSTAGE], const vka_layout *
 VkPipeline vka_cs_pipeline(vka_shader *cs, const vka_layout *lay);
 VkPipeline vka_cs_pipeline_img(vka_shader *cs, const vka_layout *lay, const vka_imgrt *rt);   // with the images of rt retyped (NULL or all zero: the base module)
 void vka_pso_save(int force);         // the VkPipelineCache and the prewarm list to the app's files (DM_TEMP): due DM_VK_PCACHE_SAVE_S after the last save, on the saver thread; force = now, on the caller's
+int vka_pso_warm(unsigned out[4]);              // the prewarm list made into the pipeline cache with no game (vka_pso.c "Warming with the game closed"): made, had, dropped, total; -1 no library
+void vka_pso_warm_progress(unsigned out[2]);   // keys taken so far, the list's length
+void vka_pso_warm_stop(void);                  // ends the warm after the compiles under way (saved)
 void vka_pso_waits(uint64_t *save_ns, uint64_t *pw_wait_ns);   // cumulative: time saving the cache (saver thread), the frame path's waits for a prewarm thread making the same pipeline
 double vka_gpu_span_ms(uint64_t f);   // frame f's submissions from first part's start to last part's end (vka_exec.c); -1 = not in yet
 

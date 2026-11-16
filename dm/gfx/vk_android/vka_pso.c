@@ -30,6 +30,7 @@ static _Atomic int g_demand_waiters;
 // submission), so a backgrounded app does not keep compiling on the CPU for minutes
 static _Atomic int g_pso_paused;
 void vka_pso_pause(int on) { atomic_store(&g_pso_paused, on != 0); }
+static int g_warm_only;   // the process only warms the pipeline cache (vka_pso_warm, nxhost_vk_warm): no game, so the prewarm takes what the game's share would be
 static void pause_point(void) { while (atomic_load_explicit(&g_pso_paused, memory_order_relaxed)) usleep(100000); }
 // The keys' hash, 8 bytes a step: the draw path hashes a pipeline key (about 1 KB) per draw, and FNV a byte at a time took 1 us of it on the Adreno 840 phone's cores
 static inline uint64_t fnv(const void *p, size_t n, uint64_t h) { return vka_pw_fnv(p, n, h); }
@@ -529,6 +530,23 @@ static void fout_masks(const vka_shader *fs, const vka_gkey *k, uint32_t *um, ui
         if (c && (fs->e->fout_mask >> i & 1) && (fs->e->fout_types >> (2 * i) & 3) == DMSH_VK_TYPE_FLOAT) { if (c == 1) *um |= 1u << i; else *sm |= 1u << i; }
     }
 }
+// ---------- Pixel shaders with nothing to do ----------
+// A draw whose colour writes are all masked (or that has no colour target) and whose pixel shader has no other effect (vka_shader_fs_inert: no discard, no depth, sample
+// mask or stencil export, no memory write) gets a pipeline without the pixel shader: depth-only passes, shadow maps and depth pre-passes, which NVN games draw with a
+// pixel shader bound and the colour masked. Vulkan then tests and writes depth, and counts occlusion samples, from the rasterized depth alone, as it did with the shader;
+// the tiler's binning and fragment work for the shader are saved. Not with alpha to coverage, and not with the alpha test on (a test other than ALWAYS) when its discard
+// is the shader's only one. After Erick's Ocarina fork (f2b70e5, a52a663: the idea; the reading here is pf_pass's early-test rule, vka_spvpatch.c), for every game.
+// DM_VK_FS_ELIDE=0 (read when a pipeline is made; default 1): the pixel shader always, as before
+static _Atomic uint64_t g_fs_elided;
+static int fs_elide(vka_shader *fs, const vka_gkey *k) {
+    if (!fs || k->a2c || !VKA_ENV("DM_VK_FS_ELIDE", 1)) return 0;
+    for (int i = 0; i < k->ncolor && i < 8; i++) if (k->att[i].mask) return 0;
+    int kind = vka_shader_fs_inert(fs);
+    if (kind != 1 && !(kind == 2 && (!k->alpha_func || k->alpha_func == NVN_ALPHA_FUNC_ALWAYS))) return 0;
+    uint64_t n = atomic_fetch_add(&g_fs_elided, 1) + 1;
+    if (n == 1 || !(n & (n - 1))) VLOG("pixel shaders left out: %llu pipelines whose colour writes are masked and whose pixel shader does nothing else (DM_VK_FS_ELIDE=0: kept)", (unsigned long long)n);
+    return 1;
+}
 // 0 = a stage's module is missing (logged by vka_shader_module)
 static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_layout *lay, const vka_gkey *k) {
     memset(P, 0, sizeof *P);
@@ -541,8 +559,9 @@ static int pstate_fill(pstate *P, vka_shader *const sh[VKA_NSTAGE], const vka_la
     P->gl_true = VK_TRUE; P->me = (VkSpecializationMapEntry){DMSH_VK_SPEC_GL_DEPTH, 0, sizeof(VkBool32)}; P->spec = (VkSpecializationInfo){1, &P->me, sizeof P->gl_true, &P->gl_true};
     P->afunc = k->alpha_func; P->ae = (VkSpecializationMapEntry){DMSH_VK_SPEC_ALPHA_FUNC, 0, sizeof(uint32_t)};   // the alpha test's function on an F_ALPHA_TEST pixel shader
     P->aspec = (VkSpecializationInfo){1, &P->ae, sizeof P->afunc, &P->afunc};
+    int no_fs = fs_elide(sh[1], k);
     for (int i = 0; i < nord; i++) {
-        vka_shader *s = sh[order[i]]; if (!s) continue;
+        vka_shader *s = sh[order[i]]; if (!s || (no_fs && order[i] == 1)) continue;
         if (s->e->stage != vka_vk_stage(order[i]) || (mesh && !V.mesh)) {
             VRED("graphics pipeline slot %d has shader stage %u (key %016llx); refusing an invalid Vulkan pipeline", order[i], s->e->stage, (unsigned long long)s->key);
             return 0;
@@ -1438,7 +1457,7 @@ static int warm_limit(void *unused) {
     uint64_t available = mem_avail_mb();
     int reserve = VKA_ENV("DM_VK_PREWARM_MEM_MB", 2048);
     if (atomic_load(&g_demand_waiters) || (reserve > 0 && available && available < (uint64_t)reserve)) return 0;
-    int n = VKA_ENV("DM_VK_PREWARM_CONCURRENCY", V.driver_id == VK_DRIVER_ID_MESA_TURNIP ? 1 : 2);
+    int n = VKA_ENV("DM_VK_PREWARM_CONCURRENCY", V.driver_id == VK_DRIVER_ID_MESA_TURNIP ? 1 : g_warm_only ? 4 : 2);   // (warming alone: as many as the threads)
     return n < 1 ? 1 : n > 4 ? 4 : n;
 }
 static void *pw_main(void *a) {
@@ -1573,13 +1592,42 @@ static int qcom_old(void) {
     return V.driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY && (dv >> 22) == 512 && (dv >> 12 & 0x3ff) < 800;
 }
 static void pw_start(void) {
-    int nt = VKA_ENV("DM_VK_PREWARM", qcom_old() ? 0 : 4);
+    int nt = VKA_ENV("DM_VK_PREWARM", qcom_old() && !g_warm_only ? 0 : 4);
     char set[16];
     if (nt <= 0 || !g_pw_load_n) { if (g_pw_load_n) VLOG("prewarm: off (%s): %u keys not made ahead", vka_env_str("DM_VK_PREWARM", set, sizeof set) == 1 ? "DM_VK_PREWARM=0" : "default on Qualcomm's driver before 512.800; DM_VK_PREWARM=4 on", g_pw_load_n); return; }
     if (nt > 4) nt = 4;
     g_pw_t0 = now_ns(); g_pw_threads = 0;
     for (int i = 0; i < nt; i++) { pthread_t th; if (!pthread_create(&th, NULL, pw_main, NULL)) { pthread_detach(th); g_pw_threads++; } }
     VLOG("prewarm: %u pipeline keys of earlier runs made ahead on %d background threads (DM_VK_PREWARM=0 off)", g_pw_load_n, g_pw_threads);
+}
+// ---------- Warming with the game closed ----------
+// The prewarm list made into the pipeline cache before the game runs (nxhost_vk_warm, vka_warm.c), in a process of its own that the launcher starts after Prepare, after
+// a GPU driver change, or when asked (android WarmActivity). The same records, threads and gate as the in-game prewarm (pw_main), without a game to share the phone with:
+// its compiles run at nice 10 under nothing, DM_VK_PREWARM_CONCURRENCY defaults to four, and the cache is saved at the end. The idea is SCSKiller's (fill the driver's
+// cache with the game closed; docs/ANALISE-SCSKILLER-2026-11-16.md); the work is this file's prewarm. The game's own prewarm then finds the keys already there ("already
+// there" in its line) and its frames wait for no compile of a key the list had. out: made, already in the cache, dropped, the list's length. Returns 0, or -1 without a
+// shader library (nothing to compile from)
+static _Atomic uint32_t g_warm_total;
+int vka_pso_warm(unsigned out[4]) {
+    g_warm_only = 1;
+    const vka_shlib *L = vka_shader_game_lib();
+    if (!L) { VRED("pipeline warm: no shader library for this game: nothing compiled"); return -1; }
+    const vka_shlib *z = NULL; atomic_compare_exchange_strong(&g_pc_shlib, &z, L);   // (the cache file's stamp: pc_open's job when a draw's shaders come first)
+    uint64_t t0 = now_ns();
+    static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, pc_open_once);   // reads the cache, loads the list, starts the threads (pw_start)
+    atomic_store(&g_warm_total, g_pw_load_n);
+    while (g_pw_threads && atomic_load(&g_pw_done) < (uint32_t)g_pw_threads) { usleep(200000); vka_pso_save(0); }   // (saved now and then on the saver thread: a warm killed midway keeps most of it)
+    vka_pso_save(1);
+    out[0] = atomic_load(&g_pw_made); out[1] = atomic_load(&g_pw_had); out[2] = atomic_load(&g_pw_bad); out[3] = g_pw_load_n;
+    VLOG("pipeline warm: %u of %u keys made, %u already in the cache, %u dropped, in %.1f s on %d threads; cache saved", out[0], out[3], out[1], out[2], (now_ns() - t0) / 1e9, g_pw_threads);
+    return 0;
+}
+// The warm stopped early (the launcher's Play now): each thread ends after the compile it is in, and vka_pso_warm saves what was made (the next warm or the game's prewarm
+// finds those keys there)
+void vka_pso_warm_stop(void) { atomic_store(&g_pw_next_mesh, 0x40000000u); atomic_store(&g_pw_next, 0x40000000u); VLOG("pipeline warm: stopped by the launcher"); }
+// The warm's progress for the launcher: keys taken so far (made, had or dropped) and the list's length (0 until it is loaded)
+void vka_pso_warm_progress(unsigned out[2]) {
+    out[0] = atomic_load(&g_pw_made) + atomic_load(&g_pw_had) + atomic_load(&g_pw_bad); out[1] = atomic_load(&g_warm_total);
 }
 // ---------- Graphics pipelines: the lookup ----------
 // The entry of a key, made by this thread when no one has it (made = 1). A key another thread is making (busy): the frame path waits for it (the time goes to the [longframe]

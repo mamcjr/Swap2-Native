@@ -89,6 +89,8 @@ void dm_guest_thread_join(void *tt) {
     joins++;
 }
 uint64_t now_ns(void) { return 0; }
+void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }   // without the guest scheduler: a plain lock
+void dm_thread_native_wait(int entering) { (void)entering; }
 void *dm_pcmout_open(int ch) { (void)ch; return NULL; }
 void dm_pcmout_close(void *k) { (void)k; }
 void dm_pcmout_start(void *k) { (void)k; }

@@ -90,6 +90,8 @@ public final class ReadinessJvmTest {
         check(Readiness.status("playable") == null && Readiness.status("") == null && Readiness.status("bring-up").status == Readiness.Status.WARNING, "status");
         String[] de = Readiness.driverEnv(List.of("DM_SAVE=/x", "DM_VK_DRIVER=/d/turnip", "DM_VK_HOOKDIR=/h", "DM_VK_DRIVER=system"));
         check(de.length == 3 && de[0].equals("DM_VK_DRIVER=/d/turnip") && de[2].equals("DM_VK_DRIVER=system"), "driverEnv keeps the order (the last wins)");
+        de = Readiness.driverEnv(List.of("DM_TEMP=/t", "DM_SAVE=/x", "DM_QGL=rendermode=1", "DM_LSFG=0"));
+        check(de.length == 2 && de[0].equals("DM_TEMP=/t") && de[1].equals("DM_QGL=rendermode=1"), "driverEnv keeps what the driver loader reads (DM_QGL and its DM_TEMP)");
 
         // The report: header, GPU, the checks, every fact
         String rep = Readiness.report("head", f, Readiness.evaluate(f, game));

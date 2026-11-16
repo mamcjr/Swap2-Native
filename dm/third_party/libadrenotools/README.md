@@ -4,11 +4,16 @@
 (`eden-emulator/libadrenotools` at `8ba23b42d7`), with [liblinkernsbypass](https://github.com/bylaws/liblinkernsbypass)
 (`aa3975893d`, BSD 2-Clause, `lib/linkernsbypass/LICENSE`) in `lib/linkernsbypass/`.
 
-Only the files the Android host needs to load a custom Vulkan driver (`ADRENOTOOLS_DRIVER_CUSTOM`) are here, unmodified:
-`src/driver.cpp`, `include/adrenotools/{driver,priv}.h`, the hook libraries' sources `src/hook/{hook_impl.cpp,hook_impl.h,hook_impl_params.h,main_hook.c}`
-and the kgsl UAPI header `src/hook/kgsl.h` (Linux UAPI, `GPL-2.0 WITH Linux-syscall-note`, as its SPDX line says). Left out: the BCn enabler, the file-redirect and
-GSL-allocation hooks, the tools.
+Only the files the Android host needs to load a custom Vulkan driver (`ADRENOTOOLS_DRIVER_CUSTOM`) and to give Qualcomm's driver its settings file
+(`ADRENOTOOLS_DRIVER_FILE_REDIRECT`) are here: `src/driver.cpp`, `include/adrenotools/{driver,priv}.h`, the hook libraries' sources
+`src/hook/{hook_impl.cpp,hook_impl.h,hook_impl_params.h,main_hook.c,file_redirect_hook.c}` and the kgsl UAPI header `src/hook/kgsl.h` (Linux UAPI,
+`GPL-2.0 WITH Linux-syscall-note`, as its SPDX line says). Left out: the BCn enabler, the GSL-allocation hook, the tools.
 
-`android/host/CMakeLists.txt` builds `libnxadreno.so` (driver.cpp + linkernsbypass) and the two hook libraries `libhook_impl.so` and `libmain_hook.so`. The host
-(`dm/gfx/vk_android/vka_driver.c`) opens `libnxadreno.so` only when `DM_VK_DRIVER` names a driver, so the system driver path loads none of this code
+Changed here: `hook_fopen` in `src/hook/hook_impl.cpp` redirects only `qgl_config.txt` (`/data/vendor/gpu` and `/data/misc/gpu`), and only when the redirected copy
+opens; upstream redirected every path but `/proc` and `/sys`. `main_hook.c` has the Binder stub its comment describes. `src/hook/file_redirect_hook.c` is upstream's
+`fopen` interposer (`dm/gfx/vk_android/vka_driver.c` `DM_QGL`).
+
+`android/host/CMakeLists.txt` builds `libnxadreno.so` (driver.cpp + linkernsbypass) and the hook libraries `libhook_impl.so`, `libmain_hook.so` and
+`libfile_redirect_hook.so`. The host (`dm/gfx/vk_android/vka_driver.c`) opens `libnxadreno.so` only when `DM_VK_DRIVER` names a driver or `DM_QGL` is set, so the
+system driver path without them loads none of this code
 (linkernsbypass's constructor changes the protection of `dlopen`'s page).

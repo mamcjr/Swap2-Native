@@ -146,6 +146,13 @@ target_include_directories(main_hook PRIVATE ${ADT}/include)
 target_compile_options(main_hook PRIVATE -O2 -w)
 target_link_options(main_hook PRIVATE -Wl,-z,global)
 target_link_libraries(main_hook PRIVATE hook_impl)
+# libfile_redirect_hook.so: its fopen answers the driver's when the host asks adrenotools for ADRENOTOOLS_DRIVER_FILE_REDIRECT, which it does only with DM_QGL
+# (vka_driver.c: Qualcomm's qgl_config.txt from the app's own files; hook_impl.cpp redirects that file alone)
+add_library(file_redirect_hook SHARED ${ADT}/src/hook/file_redirect_hook.c)
+target_include_directories(file_redirect_hook PRIVATE ${ADT}/include)
+target_compile_options(file_redirect_hook PRIVATE -O2 -w)
+target_link_options(file_redirect_hook PRIVATE -Wl,-z,global)
+target_link_libraries(file_redirect_hook PRIVATE hook_impl)
 
 # nxreplay: the frame replayer, an executable for adb shell (pushed beside libnxhost.so, run with LD_LIBRARY_PATH; android/TESTING.md "Frame capture and replay"). Gradle does not
 # build it (the APK does not carry it): cmake --build <build> --target nxreplay

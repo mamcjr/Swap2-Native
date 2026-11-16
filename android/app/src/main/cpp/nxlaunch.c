@@ -359,13 +359,14 @@ JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_fpsCapStatus(JNIEnv *
 }
 
 // ---- The readiness check (Readiness.java): the Vulkan facts of the driver the game would run on (nxhost_vk_readiness), before the host starts. Of env (KEY=VALUE, the
-// game's environment as start would get it) only the driver's keys are set here, the last of each winning as in start; null when this host has no such entry point ----
+// game's environment as start would get it) only the driver loader's keys are set here (DM_VK_DRIVER, DM_VK_HOOKDIR, DM_QGL and the DM_TEMP its settings file goes in: the driver is
+// opened once per process, here), the last of each winning as in start; null when this host has no such entry point ----
 #pragma weak nxhost_vk_readiness
 JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_readiness(JNIEnv *env, jclass cls, jobjectArray envs) {
     (void)cls; if (!nxhost_vk_readiness) return NULL;
     for (jsize i = 0, n = envs ? (*env)->GetArrayLength(env, envs) : 0; i < n; i++) {
         char *kv = jstr(env, (jstring)(*env)->GetObjectArrayElement(env, envs, i)); char *eq = strchr(kv, '=');
-        if (eq && (!strncmp(kv, "DM_VK_DRIVER=", 13) || !strncmp(kv, "DM_VK_HOOKDIR=", 14))) { *eq = 0; setenv(kv, eq + 1, 1); }
+        if (eq && (!strncmp(kv, "DM_VK_DRIVER=", 13) || !strncmp(kv, "DM_VK_HOOKDIR=", 14) || !strncmp(kv, "DM_QGL=", 7) || !strncmp(kv, "DM_TEMP=", 8))) { *eq = 0; setenv(kv, eq + 1, 1); }
         free(kv);
     }
     size_t cap = 16384; char *buf = calloc(1, cap);
@@ -390,3 +391,35 @@ JNIEXPORT jint JNICALL Java_dev_nxnative_android_Native_selftest(JNIEnv *env, jc
     if (w) ANativeWindow_release(w);   // the replay holds its own reference
     return r;
 }
+
+// ---- The pipeline warm (WarmActivity, in a process of its own): no host start, the log, the game's environment and nxhost_vk_warm (vk_android.h). Blocks until done: call
+// it on a thread of its own. Returns "<rc> <made> <had> <dropped> <total>", or null when this host has no warm ----
+#pragma weak nxhost_vk_warm
+#pragma weak nxhost_vk_warm_progress
+#pragma weak nxhost_vk_warm_stop
+JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_warm(JNIEnv *env, jclass cls, jstring pack, jobjectArray envs, jstring log) {
+    (void)cls; if (!nxhost_vk_warm) return NULL;
+    char *lp = jstr(env, log); int lr = log_open(lp); free(lp);
+    if (lr) return NULL;
+    for (jsize i = 0, n = envs ? (*env)->GetArrayLength(env, envs) : 0; i < n; i++) {
+        char *kv = jstr(env, (jstring)(*env)->GetObjectArrayElement(env, envs, i)); char *eq = strchr(kv, '=');
+        if (!strncmp(kv, "NX_BUILD_TAG=", 13)) fprintf(stderr, "[nxlaunch] build %s\n", kv + 13);
+        else if (eq) { *eq = 0; setenv(kv, eq + 1, 1); fprintf(stderr, "[nxlaunch] env %s=%s\n", kv, eq + 1); }
+        free(kv);
+    }
+    char *pk = jstr(env, pack); unsigned out[4] = {0, 0, 0, 0};
+    fprintf(stderr, "[nxlaunch] pipeline warm: nxhost_vk_warm(%s)\n", pk);
+    int rc = nxhost_vk_warm(pk, out, 4); free(pk);
+    char buf[96]; snprintf(buf, sizeof buf, "%d %u %u %u %u", rc, out[0], out[1], out[2], out[3]);
+    fprintf(stderr, "[nxlaunch] pipeline warm returned %s\n", buf);
+    return (*env)->NewStringUTF(env, buf);
+}
+// {keys taken so far, the list's length}; false when this host has no warm
+JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_warmProgress(JNIEnv *env, jclass cls, jintArray out) {
+    (void)cls; if (!nxhost_vk_warm_progress || !out || (*env)->GetArrayLength(env, out) < 2) return JNI_FALSE;
+    unsigned d = 0, t = 0; nxhost_vk_warm_progress(&d, &t);
+    jint v[2] = {(jint)d, (jint)t}; (*env)->SetIntArrayRegion(env, out, 0, 2, v);
+    return JNI_TRUE;
+}
+// Ends the warm early (Play now): the cache keeps what was made
+JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_warmStop(JNIEnv *env, jclass cls) { (void)env; (void)cls; if (nxhost_vk_warm_stop) nxhost_vk_warm_stop(); }

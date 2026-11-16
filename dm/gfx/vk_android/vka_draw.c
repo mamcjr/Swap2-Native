@@ -162,7 +162,17 @@ static struct {
     uint32_t cnl[8], dnl; VkExtent2D cext[8], dext;      // each attachment's layers and level size (clears in the pass must cover what they would outside it)
     int swrite;                                          // a draw of the pass wrote memory (storage buffers or images, raw global stores, a geometry shader's claim)
     int bar_pending;                                     // a game barrier came inside the pass and was taken there (vka_rp_game_barrier): the draws after it are checked (bar_hazard)
+    int dnone;                                           // its depth attachment ends with storeOp NONE ("Depth the pass only reads"): a draw that writes depth, or a depth clear, ends it first
 } R;
+// ---------- Depth the pass only reads ----------
+// A pass that loads its depth and draws with depth writes off (a colour pass over a finished depth pre-pass, decals, transparents, many post-processing passes) stored the
+// unchanged depth back at its end anyway: storeOp STORE, on a tiler a write of the whole depth attachment from tile memory to RAM. Such a pass now ends its depth
+// attachment with storeOp NONE (Vulkan 1.3, which the replay requires): the contents stay as they were in memory, with nothing written. The choice is made when the pass
+// begins, from its first draw: a depth-only format (no stencil aspect, whose writes are another matter), loaded (no clear at its begin or waiting for it), depth writes
+// off. NONE leaves the contents undefined if the pass writes depth after all, so a later draw of the pass with depth writes on ends it first (the next pass begins with
+// STORE), and so does a depth clear inside it (vka_rp_clear: done outside). After Erick's Ocarina fork (b9cd4d6, which keeps it to Ocarina's 1280x720 passes), for every
+// game. DM_VK_DEPTH_NONE=0 (live, default 1): every pass stores its depth, as before; the replay statistics line counts the passes and the splits
+static uint64_t g_dnone_passes, g_dnone_splits;
 // Clears waiting for the pass of their targets (vka_rp_clear), in order: the next draw over the same targets opens its pass with them (loadOp CLEAR, or vkCmdClearAttachments),
 // anything else does them outside a pass first (pc_flush), as before
 enum { NPC = 16 };
@@ -290,6 +300,7 @@ static void rt_range(const vka_img *im, const view_t *v, int has_v, uint32_t *lv
 }
 // Opens the pass over the bound targets: 0 = it cannot (no target can be an attachment), logged
 static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
+    if (R.on && R.dnone && d->ds.dt && d->ds.dw) { g_dnone_splits++; vka_rp_end(); }   // a depth write in a pass whose depth is not stored ("Depth the pass only reads")
     if (R.on) { if (!g_pass_keep || rt_same(rt, has_rt, &R.rt, R.has_rt)) return 1; vka_rp_end(); }   // a new SET_RT of other targets ends the pass at its first draw (exec does not)
     if (PC.n && !rt_same(rt, has_rt, &PC.rt, 1)) pc_flush();                             // clears of other targets: done before
     VkRenderingAttachmentInfo ca[8], da = {0}, sa; uint32_t w = UINT32_MAX, h = UINT32_MAX, layers = UINT32_MAX, samples = 0;
@@ -364,6 +375,10 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
     if (sp) sp = &sa;
     #undef INAREA
     #undef WHOLE
+    if (dp && !sp && da.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD && !(d->ds.dt && d->ds.dw) && !vka_nan_on() && VKA_ENV("DM_VK_DEPTH_NONE", 1)) {   // "Depth the pass only reads"
+        int clear = 0; for (int k = 0; k < nlate; k++) if (late[k]->ci < 0) clear = 1;
+        if (!clear) { da.storeOp = VK_ATTACHMENT_STORE_OP_NONE; R.dnone = 1; g_dnone_passes++; }
+    }
     vka_tex_feedback(fb_im, fb_lv, nfb);
     VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = R.area, .layerCount = layers, .colorAttachmentCount = (uint32_t)n, .pColorAttachments = ca,
                           .pDepthAttachment = dp, .pStencilAttachment = sp};
@@ -416,6 +431,11 @@ void vka_rp_bar_stats(char *b, size_t n, double frames) {
         snprintf(b + o, n - o, "%spass ends per frame: %.1f attachment-scoped (%.1f with a kept game barrier), %.1f full (DM_VK_RP_SCOPE); full barriers saved after a pass-ending game barrier %.1f (DM_VK_BAR_DEDUP); task/mesh fallback batch barriers widened to full for guest writes %.1f",
                  o ? "; " : "", (g_rp_scoped - s0) / frames, (g_rp_scoped_kept - sk0) / frames, (g_rp_full - f0) / frames, (g_bar_dedup - dd0) / frames, (g_mesh_guest_bar - mg0) / frames);
     i0 = g_bar_in; k0 = g_bar_kept; l0 = g_bar_late; s0 = g_rp_scoped; f0 = g_rp_full; sk0 = g_rp_scoped_kept; dd0 = g_bar_dedup; mg0 = g_mesh_guest_bar;
+    static uint64_t dn0, ds0;   // "Depth the pass only reads"
+    if (frames > 0 && (g_dnone_passes != dn0 || g_dnone_splits != ds0) && (o = strlen(b)) + 40 < n)
+        snprintf(b + o, n - o, "%spasses with their depth not stored per frame: %.1f, %.1f ended early by a depth write or clear (DM_VK_DEPTH_NONE)", o ? "; " : "",
+                 (g_dnone_passes - dn0) / frames, (g_dnone_splits - ds0) / frames);
+    dn0 = g_dnone_passes; ds0 = g_dnone_splits;
     if (frames > 0) {   // which recording sites ended the passes (vka.h vka_rp_end)
         o = strlen(b);
         if (o + 40 < n) { size_t h = (size_t)snprintf(b + o, n - o, "%spass ends by site per frame: ", o ? "; " : ""); size_t r = rps_stats(b + o + h, n - o - h, frames); if (!r) b[o] = 0; }
@@ -445,6 +465,7 @@ int vka_rp_clear(const p_set_rt *rt, int has_rt, const vka_dstate *d, const vka_
         return 1;
     }
     int ci = c->ci; uint32_t nl = c->nl; VkRect2D rc = c->rc;
+    if (ci < 0 && R.dnone) { g_dnone_splits++; return 0; }   // its depth is not stored ("Depth the pass only reads"): the clear is done outside, after the pass ends
     if (ci >= 0 ? ci >= 8 || !R.cf[ci] || R.cnl[ci] != nl || nl != R.layers : ((c->asp & VK_IMAGE_ASPECT_DEPTH_BIT) && !R.df) || ((c->asp & VK_IMAGE_ASPECT_STENCIL_BIT) && !R.sf) || R.dnl != nl || nl != R.layers) return 0;
     if ((uint32_t)rc.offset.x + rc.extent.width > R.area.extent.width || (uint32_t)rc.offset.y + rc.extent.height > R.area.extent.height) return 0;
     VkClearAttachment ca = {c->asp, ci >= 0 ? (uint32_t)ci : 0, c->in}; VkClearRect cr = {rc, 0, nl};

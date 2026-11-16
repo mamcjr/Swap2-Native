@@ -164,16 +164,19 @@ __attribute__((visibility("default"))) void *hook_android_load_sphal_library(con
     return nullptr;
 }
 
+// Swap2-Native change: only Qualcomm's driver settings file (qgl_config.txt, at either of the two paths the driver reads) is redirected, and only when the redirected
+// copy opens; every other file the driver opens is its own, as without the hook (upstream redirected every path but /proc and /sys). dm/gfx/vk_android/vka_driver.c DM_QGL
 __attribute__((visibility("default"))) FILE *hook_fopen(const char *filename, const char *mode) {
-    if (!strncmp("/proc", filename, 5) || !strncmp("/sys", filename, 4)) {
-        LOGI("hook_fopen: passthrough: %s", filename);
-        return fopen(filename, mode);
+    if (hook_params && filename && mode && !hook_params->fileRedirectDir.empty() &&
+        (!strcmp(filename, "/data/vendor/gpu/qgl_config.txt") || !strcmp(filename, "/data/misc/gpu/qgl_config.txt"))) {
+        auto replacement{hook_params->fileRedirectDir + filename};
+        if (FILE *f = fopen(replacement.c_str(), mode)) {
+            LOGI("hook_fopen: %s -> %s", filename, replacement.c_str());
+            return f;
+        }
+        LOGI("hook_fopen: %s not there: %s itself", replacement.c_str(), filename);
     }
-
-    auto replacement{hook_params->fileRedirectDir + filename};
-    LOGI("hook_fopen: %s -> %s", filename, replacement.c_str());
-
-    return fopen(replacement.c_str(), mode);
+    return fopen(filename, mode);
 }
 
 static constexpr uintptr_t GslMemDescImportedPrivMagic{0xdeadb33f};

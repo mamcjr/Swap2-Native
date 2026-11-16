@@ -170,10 +170,11 @@ final class Readiness {
         return new Check("Status on Android", Status.INFO, status, null);
     }
 
-    /** Of a game's environment (KEY=VALUE, in start's order), the lines that pick its GPU driver: what the readiness facts must be read on */
+    /** Of a game's environment (KEY=VALUE, in start's order), the lines that pick its GPU driver and what its loader reads (vka_driver.c): what the readiness facts must be read on */
     static String[] driverEnv(List<String> env) {
         List<String> out = new ArrayList<>();
-        for (String kv : env) if (kv.startsWith("DM_VK_DRIVER=") || kv.startsWith("DM_VK_HOOKDIR=")) out.add(kv);
+        // (the check opens the driver once for the process, so whatever the driver loader reads must be here: DM_QGL writes its settings file under DM_TEMP)
+        for (String kv : env) if (kv.startsWith("DM_VK_DRIVER=") || kv.startsWith("DM_VK_HOOKDIR=") || kv.startsWith("DM_QGL=") || kv.startsWith("DM_TEMP=")) out.add(kv);
         return out.toArray(new String[0]);
     }
 

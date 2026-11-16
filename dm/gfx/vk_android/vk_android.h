@@ -27,3 +27,11 @@ __attribute__((visibility("default"))) void nxhost_picture_place(float x, float 
 // (DM_VK_DRIVER, read at the first call in the process: set it before). Its own instance, no device; callable before nxhost_main. 0 = facts written, 1 = an "error=" line
 // says why the facts stop there, -1 = no buffer
 __attribute__((visibility("default"))) int nxhost_vk_readiness(char *buf, int n);
+// The pipeline warm (vka_warm.c): the pack's profile read, the Vulkan device brought up and the game's prewarm list made into its pipeline cache, with no game (set the
+// game's environment first: DM_TEMP names the cache, DM_VK_DRIVER the driver). Blocks until done; out: made, already in the cache, dropped, the list's length (n of them).
+// 0 = done, 1 = no Vulkan device, 2 = no pack or profile, 3 = no shader library. Its own process: the device stays up until the process ends
+__attribute__((visibility("default"))) int nxhost_vk_warm(const char *pack, unsigned *out, int n);
+// Its progress, from another thread: keys taken so far and the list's length (0 until it is loaded)
+__attribute__((visibility("default"))) void nxhost_vk_warm_progress(unsigned *done, unsigned *total);
+// Ends a warm under way early: its threads finish the compiles they are in, and nxhost_vk_warm saves what was made and returns
+__attribute__((visibility("default"))) void nxhost_vk_warm_stop(void);

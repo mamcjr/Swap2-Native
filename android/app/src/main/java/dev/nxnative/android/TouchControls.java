@@ -27,7 +27,8 @@ import java.util.Arrays;
  * drives, a control (its buttons and sticks go to the game as the handheld controller, dm_input_set) or the game's touchscreen, so a touch on a control never reaches the
  * touchscreen. The view reads back what each control holds to draw it and to give a haptic tick on each press.
  * The small button at the top centre shows or hides the controls; holding it opens the settings (opacity, size, vibration). They hide by themselves while a gamepad is
- * connected and come back when the last one goes.
+ * connected and come back when the last one goes. With a gamepad nothing of them stays on the picture, the show / hide button included: the gamepad's Home button opens
+ * the in-game panel (GameActivity), whose "Show the on-screen controls" box brings them back (discussion #8: the button only covered the picture).
  * Classic and Zelda draw a sprite skin (TouchProfile.Skin): Classic the standard skin v2 (drawable-nodpi/s2_standard_controls_v2.png), Zelda the 40th anniversary
  * skin (drawable-nodpi/s2_zelda40_controls.png), each with its measured rectangles and, in landscape, its own geometry (TouchProfile.placeSkin), and a gear that
  * opens the same settings and never reaches the game. Bananza and Racing keep their own artwork.
@@ -624,7 +625,9 @@ final class TouchControls extends View {
         for (int i = 0; i < n; i++) grab = Math.min(grab, (float) Math.hypot(cx[i] - x, cy[i] - y) - r[i] - gap);
         return Math.max(art, grab);
     }
-    private boolean onToggle(float x, float y) { float dx = x - tx, dy = y - ty, g = toggleGrab; return available && dx * dx + dy * dy <= g * g; }
+    /** The show / hide button: not while a gamepad is connected (its Home button opens the in-game panel, whose box shows the controls again) */
+    private boolean toggleShown() { return available && !gamepad; }
+    private boolean onToggle(float x, float y) { float dx = x - tx, dy = y - ty, g = toggleGrab; return toggleShown() && dx * dx + dy * dy <= g * g; }
     /** A sprite skin's gear: shown with the controls, it opens the controls' settings and sends nothing to the game */
     private boolean gearShown() { return skinBitmap() != null && active() && !editing; }
 
@@ -721,6 +724,7 @@ final class TouchControls extends View {
         fading = false;
         if (editing) { drawControls(c); drawEditor(c, dp); finishFrame(); return; }
         boolean on = active();
+        if (!toggleShown()) return;   // a gamepad: nothing over the picture
         if (skinBitmap() != null) {
             // The skin's show / hide sprite, faint and struck through while the controls are hidden
             drawSprite(c, skin.visibility, tx, ty, tr, tr, on ? Math.max(opacity, .55f) : .45f, 0, 2);
@@ -1020,6 +1024,12 @@ final class TouchControls extends View {
 
     /** The on-screen controls' rows of the in-game panel: opacity, size, the haptic tick, the log over the game, and Reset */
     void controlRows(Context ctx, LinearLayout box) {
+        // Shown or hidden, as the show / hide button does: the way back with a gamepad connected, when that button is not on the picture
+        CheckBox showBox = new CheckBox(ctx);
+        showBox.setText(dev.nxnative.android.R.string.s2_touch_show);
+        showBox.setChecked(active());
+        showBox.setOnCheckedChangeListener((b, v) -> { if (v != active()) toggle(); });
+        box.addView(showBox);
         TextView profileTitle = new TextView(ctx);
         profileTitle.setText(dev.nxnative.android.R.string.s2_touch_profile);
         box.addView(profileTitle);
