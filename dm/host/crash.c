@@ -118,6 +118,9 @@ static int (*g_trap_hook)(ucontext_t *uc);
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { g_trap_hook = fn; }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
+// The files the game read last, from hle_fs.c's own definition. A weak empty one here, not a weak reference tested for NULL: Apple's static linker refuses a weak reference no
+// object defines (the unit tests that link crash.c without hle_fs.c, t_altstack), where an ELF link leaves it 0
+__attribute__((weak)) void fs_recent_dump(void) {}
 // Called once, on the crashing thread, before anything is printed: the graphics side writes down what it was compiling (vka_pso.c deadly_note), so the next run can leave
 // a pipeline that kills the driver out. Signal handler context: open / write only
 static void (*g_fatal_hook)(int sig);
@@ -194,7 +197,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         }
         fputc('\n', stderr); }
     if (g_dump_hook) g_dump_hook();
-    { void fs_recent_dump(void) __attribute__((weak)); if (fs_recent_dump) fs_recent_dump(); }   // the files the game read last (hle_fs.c)
+    fs_recent_dump();   // the files the game read last (hle_fs.c; the empty weak one below where hle_fs.c is not linked)
 #if PLAT_ANDROID
     // Hand the signal on to the handler that was there before ours (debuggerd's, behind ART's libsigchain), so the phone also writes a tombstone and logs a native backtrace with
     // libnxhost's symbols. A fault returns and runs the instruction again into that handler; abort and the others are raised again. SIGALRM (the watchdogs) ends here

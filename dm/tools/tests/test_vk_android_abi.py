@@ -69,7 +69,7 @@ class Abi(unittest.TestCase):
         and not yet committed gives a version no clone reproduces (vk_android_mesh.py, 2026-11-12: d13a6ee0d6a7 with CRLF, 96979a7c89ff as committed)"""
         import dmsh_chain
         files = re.search(r'^VK_FILES = \[([^\]]*)\]', (TOOLS / 'vk_android_build.py').read_text(encoding='utf-8'), re.M)
-        self.assertIsNotNone(files, 'vk_android_build.py: no VK_FILES list')
+        assert files is not None, 'vk_android_build.py: no VK_FILES list'
         files = re.findall(r"'([^']+)'", files.group(1)) + list(dmsh_chain.FILES)
         self.assertIn('tools/vk_android_mesh.py', files)
         crlf = [f for f in files if b'\r' in (TOOLS.parent / f).read_bytes()]

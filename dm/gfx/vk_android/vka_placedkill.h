@@ -48,7 +48,7 @@ static inline vkpk_result vkpk_decide(const char *last, const char *mine, const 
     if (prev_exit) sscanf(prev_exit, "%d,%d,%lld,%d", &reason, &status, &ts, &importance);
     // The exit the launcher reports is the newest game process's: it is the run the "last" record names only when it ended after that run started
     if (prev_same && prev_placed && prev_start > 0 && ts >= prev_start && reason >= 0) {
-        int foreground = importance < 0 || importance <= 200;   // (100 foreground, 200 visible; a launcher that does not say counts)
+        int foreground = importance <= 200;   // (100 foreground, 200 visible; a launcher that does not say, -1, counts)
         if (reason == 2 && status == 9 && foreground) { kills++; r.counted = 1; }
         else { kills = 0; r.counted = -1; }
     }

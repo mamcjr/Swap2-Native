@@ -25,6 +25,7 @@ static void add(int sb, uint64_t so, int db, uint64_t dof, uint64_t k) {
     if (ubq_must_flush(g_r, g_n, BMAX, g_src == sb && g_dst == db, dof, k)) flush();
     if (!g_n) { g_src = sb; g_dst = db; }
     CHECK(g_n < BMAX, "batch overrun");
+    if (g_n >= BMAX) return;   // (counted as a failure above; not written past the batch)
     g_r[g_n++] = (ubq_region){so, dof, k};
 }
 

@@ -4,7 +4,7 @@ Built on 2026-11-09 from the current working tree, including Argon's checkpoint 
 
 ## Artifact
 
-- APK: [swap2-native-0.1.1-bn025-test-2026-11-09.apk](../android/app/out/swap2-native-0.1.1-bn025-test-2026-11-09.apk)
+- APK: swap2-native-0.1.1-bn025-test-2026-11-09.apk
 - Package: `com.swap2native.test`; version `0.1.1-bn025-test`, code `3`.
 - Test signing certificate SHA-256: `811d1eb6b92c294693b161d51a92460b472e26e6611be7b41bbc81e131c9601f`.
 - Size: 41,381,774 bytes.

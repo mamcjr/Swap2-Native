@@ -2,7 +2,7 @@
 
 ## Implemented scope
 
-First host/launcher batch following the [source comparison](ANALISE-LICHII130-ANKANATIVE022-2026-11-09.md), not a wholesale renderer import.
+First host/launcher batch following the source comparison (`ANALISE-LICHII130-ANKANATIVE022-2026-11-09.md`, kept local), not a wholesale renderer import.
 
 - Public launcher diagnostic commands default off, with an explicit setting under Settings > About. Initial launch and onNewIntent use the gate. Frontend launch requests remain separate; mixed requests are blocked. EN/PT strings explain the setting and confirmation. Referrer strings are not trusted as authorization.
 - A zero-shared image that solely owns its allocation adopts that same allocation on first write, without a new VkImage/allocation or handle replacement. Shared/dedicated accounting changes under the allocator mutex; genuinely shared allocations retain copy-on-write behavior.
@@ -33,7 +33,7 @@ These checks establish policy behavior, not a fixed FPS gain or resolution of al
 
 ## Signing and installation
 
-- APK [swap2-native-0.1.4-beta.apk](../android/app/out/swap2-native-0.1.4-beta.apk), 41,266,702 bytes, SHA-256 `b99e7a8b6459c3cd4d1bf5d2c3707b1a82613e0cd608211f4016cab726edbeb1`.
+- APK swap2-native-0.1.4-beta.apk, 41,266,702 bytes, SHA-256 `b99e7a8b6459c3cd4d1bf5d2c3707b1a82613e0cd608211f4016cab726edbeb1`.
 - Original release certificate `9d6f1e98632da3def8699c908acf8a1387257a35ef58c46c25d7388f34c7c0f1` verified. Installed with `adb install -r`, public package `com.swap2native`, version code 5. First-install time remains 2026-11-08 14:11:23; saves directory remains 2,128 KiB.
 - Prepared Zelda main/SDK binaries and the shader library retain their sizes/dates (`output/analysis/zelda-pack-after-014.txt`, unchanged against the previous snapshot). Installed alias 8 GiB and memory enforcement remain active.
 - On-device public-command test: a nonexistent driver ZIP request is rejected before installation, log `Diagnostic launcher command ignored: ADB control is off`. Evidence `output/analysis/014-launcher-command-test.txt`. Frontend game launch remains functional.

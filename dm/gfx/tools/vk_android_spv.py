@@ -84,9 +84,13 @@ class Module:
     @property
     def model(self): return EXEC_MODELS.get(self.entry[1]) if self.entry else None
 
+    def entry_point(self):   # the OpEntryPoint instruction
+        if self.entry is None: raise ValueError('module has no OpEntryPoint')
+        return self.entry
+
     def interface(self):
-        _, k = string_at(self.entry, 3)
-        return self.entry[k:]
+        e = self.entry_point(); _, k = string_at(e, 3)
+        return e[k:]
 
     def op(self, ident): return self.types[ident][0] & 0xffff if ident in self.types else None
 
@@ -193,7 +197,7 @@ class Module:
                 if x[0] & 0xffff == OP_MEMBER_DECORATE and x[1] == t and x[3] == DEC_BUILTIN and x[4] == builtin: return vid, x[2]
         return None, None
 
-    def entry_function(self): return self.entry[2]
+    def entry_function(self): return self.entry_point()[2]
 
     def function_range(self, fid):   # (index of OpFunction, index of OpFunctionEnd)
         a = next(k for k, x in enumerate(self.ins) if x[0] & 0xffff == OP_FUNCTION and x[2] == fid)
@@ -1204,6 +1208,12 @@ def value_operands(x):
     return None
 
 
+def _known_operands(x):   # value_operands of an instruction the caller has already found it knows
+    pos = value_operands(x)
+    if pos is None: raise ValueError(f'opcode {x[0] & 0xffff}: value_operands does not know it')
+    return pos
+
+
 def raw_helpers(m):
     """The GlobalToStorage raw helpers of a module: its non-entry functions that make a physical pointer (OpConvertUToPtr) → [function id]"""
     if CAP_PHYSICAL_STORAGE_BUFFER not in m.caps: return []
@@ -1328,7 +1338,7 @@ def _promote_body(m, body):
         if op == OP_STORE and len(x) == 3 and x[1] in good: continue
         if op == OP_LOAD and len(x) == 4 and x[3] in good: continue
         if remap:
-            for p in value_operands(x):
+            for p in _known_operands(x):
                 if x[p] in remap: x[p] = remap[x[p]]
         out.append(x)
     return out, good
@@ -1386,7 +1396,7 @@ def value_params(m, f):
             if x[2] in cand: x[1] = m.types[x[1]][3]
         elif op == OP_LOAD and len(x) == 4 and x[3] in cand: remap[x[2]] = x[3]; continue
         elif remap:
-            for p in value_operands(x):
+            for p in _known_operands(x):
                 if x[p] in remap: x[p] = remap[x[p]]
         out.append(x)
     m.ins[a:e + 1] = out
@@ -1425,8 +1435,9 @@ def loop_pool_search(m, f):
     def step_of(s, prev):   # (index of its IAdd, the step) when s = Select(c, prev + step, prev)
         if s[0] & 0xffff != OP_SELECT or len(s) != 6 or s[5] != prev or s[4] not in at: return None
         t = body[at[s[4]]]
-        if t[0] & 0xffff != OP_IADD or t[3] != prev or cint(t[4]) is None: return None
-        return at[s[4]], cint(t[4])
+        if t[0] & 0xffff != OP_IADD or t[3] != prev: return None
+        c = cint(t[4])
+        return None if c is None else (at[s[4]], c)
     chain = None
     for k, s in enumerate(body):
         if s[0] & 0xffff != OP_SELECT or len(s) != 6 or cint(s[5]) != 0: continue
@@ -1435,7 +1446,8 @@ def loop_pool_search(m, f):
         ch = [(st[0], k, st[1])]
         while True:
             nxt = next((j for j in range(ch[-1][1] + 1, len(body)) if body[j][0] & 0xffff == OP_SELECT and len(body[j]) == 6 and body[j][5] == body[ch[-1][1]][2]), None)
-            st = step_of(body[nxt], body[ch[-1][1]][2]) if nxt is not None else None
+            if nxt is None: break
+            st = step_of(body[nxt], body[ch[-1][1]][2])
             if st is None: break
             ch.append((st[0], nxt, st[1]))
         if len(ch) >= 2: chain = ch; break
@@ -1553,7 +1565,7 @@ def _raw_load_helper(m, f):
         elif op == OP_BRANCH_CONDITIONAL and branch is None and len(x) == 4: branch = x
         elif op == OP_RETURN_VALUE: rets.append((labels[-1], x[1]))
         else: return None
-    if len(labels) != 3 or None in (table, cu, load, merge, branch) or last != OP_RETURN_VALUE: return None
+    if len(labels) != 3 or table is None or cu is None or load is None or merge is None or branch is None or last != OP_RETURN_VALUE: return None
     if branch[2:] != labels[1:] or merge[1] != labels[2] or [r[0] for r in rets] != labels[1:]: return None
     lo, hi = N('p', 0), N('p', 1)
     C = lambda v: N('c', v)
@@ -1633,13 +1645,14 @@ def cache_raw_loads(m, helpers):
         if not any(x[0] & 0xffff == OP_FUNCTION_CALL and x[3] in helpers for x in body): continue
         defs = {x[2]: x for x in body if len(x) > 2 and (x[0] & 0xffff) not in NO_RESULT_OPS and x[0] & 0xffff != OP_LABEL}
         V = _Numbers()
-        def addr(lo, hi):
+        def addr(lo, hi, V=V, defs=defs):   # (bound now: called below, in this iteration)
             """(B, H, c): the call's address is (H:B) + c, c a 32-bit constant, when its low word is B + c and its high word H + (B + c < B ? 1 : 0), as the
             translator writes an address with an offset; else the two words as they are and c = 0. B and H are value numbers (equal numbers hold equal bits)"""
             vl, vh = V(lo), V(hi)
             sl, sh = V.adds.get(vl), V.adds.get(vh)
-            if sl and sh and (c32(sl[0]) is None) != (c32(sl[1]) is None):
-                b, c = (sl[1], c32(sl[0])) if c32(sl[0]) is not None else (sl[0], c32(sl[1]))
+            k0, k1 = (c32(sl[0]), c32(sl[1])) if sl else (None, None)
+            b, c = (sl[1], k0) if sl and k0 is not None and k1 is None else (sl[0], k1) if sl and k1 is not None and k0 is None else (None, None)
+            if sh and c is not None:   # (exactly one of the low word's addends a constant)
                 for h, s in ((sh[0], sh[1]), (sh[1], sh[0])):
                     s = defs.get(s)
                     if s is None or s[0] & 0xffff != OP_SELECT or c32(s[4]) != 1 or c32(s[5]) != 0: continue
@@ -1663,7 +1676,7 @@ def cache_raw_loads(m, helpers):
     if sum(len(c) for _, c in runs) < GMEM_CACHE_MIN_CALLS: return 0, {}
     # declarations (they move the functions: positions are taken again below)
     u32 = m.add_type(OP_TYPE_INT, 32, 0)
-    T = dict(bool=m.add_type(OP_TYPE_BOOL), u32=u32, v2=m.add_type(OP_TYPE_VECTOR, u32, 2), v4=m.add_type(OP_TYPE_VECTOR, u32, 4), u64=m.add_type(OP_TYPE_INT, 64, 0),
+    T: dict = dict(bool=m.add_type(OP_TYPE_BOOL), u32=u32, v2=m.add_type(OP_TYPE_VECTOR, u32, 2), v4=m.add_type(OP_TYPE_VECTOR, u32, 4), u64=m.add_type(OP_TYPE_INT, 64, 0),
              pfu=m.add_type(OP_TYPE_POINTER, SC_FUNCTION, u32), U={v: m.add_const(u32, v) for v in (0, 1, 4, 8, 12, 0xffffffff)}, z4=None)
     U = T['U']
     if any(len(c) > 1 for _, c in runs): T['z4'] = m.new_id(); m._insert_decl([3 << 16 | OP_CONSTANT_NULL, T['v4'], T['z4']])
@@ -1823,7 +1836,7 @@ def raw_global_memory(m, tables=None):
     hs = raw_helpers(m)
     if not hs: return None
     w = Module(m.data())
-    st = {'helpers': len(hs), 'by_value': sum(value_params(w, f) for f in hs)}
+    st: dict = {'helpers': len(hs), 'by_value': sum(value_params(w, f) for f in hs)}
     st['promoted'], st['promote_skipped'] = promote_locals(w)
     shapes = {f: h for f in hs for h in [_raw_load_helper(w, f)] if h and (tables is None or h['table'] in tables)}
     st['load_helpers'] = len(shapes)
@@ -1969,6 +1982,7 @@ def defer_mesh_plane_stores(m):
         if x[0] & 0xffff == OP_FUNCTION_CALL and x[3] == store: x[3] = defer; n += 1
     for f in fns: m.ins += f
     run = body_call(defer)
+    if run is None: raise ValueError('defer_mesh_plane_stores: main no longer calls the deferred store')   # (it called the store just above)
     m.ins[run + 2:run + 2] = [[4 << 16 | OP_FUNCTION_CALL, void, m.new_id(), flush], barrier]
     m.ins[run - 1:run - 1] = [[4 << 16 | OP_FUNCTION_CALL, void, m.new_id(), init]]
     at = next(k for k, x in enumerate(m.ins) if x[0] & 0xffff == OP_NAME and x[1] == store)

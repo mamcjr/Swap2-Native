@@ -20,7 +20,7 @@ def spirv_val(data):
 
 def main():
     lib, out = sys.argv[1], sys.argv[2]; check = '--check' in sys.argv
-    try: import zstandard as zstd
+    try: import zstandard as zstd   # pyright: ignore[reportMissingImports]  # optional: only for a library's zstd entries
     except ImportError: zstd = None
     L = delta.Library(lib); os.makedirs(out, exist_ok=True)
     n = same = changed = bad = 0

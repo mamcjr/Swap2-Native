@@ -3,10 +3,12 @@ scripts/pack_android.py dump_modules takes the modules of the build row a dump m
 import importlib.util
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('pack_android', REPO / 'scripts/pack_android.py')
+assert spec and spec.loader   # a path that exists: narrows the Optional for the type checker
 pa = importlib.util.module_from_spec(spec); spec.loader.exec_module(pa)
 
 A, B, C, D = ('%032x' % n for n in (1, 2, 3, 4))   # build IDs
@@ -14,6 +16,7 @@ A, B, C, D = ('%032x' % n for n in (1, 2, 3, 4))   # build IDs
 
 class Profile:   # what dump_modules asks of a game profile
     dir = Path('.')
+    id = ''   # (the title ID: split_shaders asks for it)
     def __init__(self, modules, builds): self._m, self._b = modules, builds
     def words(self, key): return self._m.split()
     def builds(self): return self._b
@@ -70,10 +73,8 @@ class SplitAbsent(unittest.TestCase):
             return type('R', (), {'returncode': 0})()
         args = type('A', (), {'shader_python': None})()
         pkg = root / 'pkg'
-        old = pa.subprocess.run, pa.shader_python, pa.child_env
-        pa.subprocess.run, pa.shader_python, pa.child_env = fake_run, lambda *a, **k: 'python', lambda **k: {}
-        try: pa.split_shaders(args, g, root / 'v', pkg, (root / 'romfs', root / 'exefs'))
-        finally: pa.subprocess.run, pa.shader_python, pa.child_env = old
+        with mock.patch.object(pa.subprocess, 'run', fake_run), mock.patch.object(pa, 'shader_python', lambda *a, **k: 'python'),                 mock.patch.object(pa, 'child_env', lambda **k: {}):
+            pa.split_shaders(args, g, root / 'v', pkg, (root / 'romfs', root / 'exefs'))
         return pkg
 
     def test_optional_keys_are_listed(self):

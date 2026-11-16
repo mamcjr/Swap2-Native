@@ -214,7 +214,7 @@ def parse_manifest(text):
     manifest_problems finds any"""
     bad = manifest_problems(text)
     if bad: raise ValueError('; '.join(bad[:3]))
-    out = {'from': {}, 'stamp': {}, 'hashes': {}}
+    out: dict = {'from': {}, 'stamp': {}, 'hashes': {}}   # (and the _ROW strings)
     for l in text.split('\n'):
         c = l.split('\t')
         if c[0] in _ROW: out[c[0]] = c[1]

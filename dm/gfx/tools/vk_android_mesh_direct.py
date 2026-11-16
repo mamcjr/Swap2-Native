@@ -14,7 +14,7 @@
 # On the phone: DM_VK_SPV_OVERRIDE=<the folder pushed there> (vka_shader.c spv_override).
 import os, subprocess, sys, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
-import vk_android_delta as delta, vk_android_spv as spv, vk_android_mesh as vmesh
+import vk_android_delta as delta, vk_android_mesh as vmesh
 VK = delta.VK
 VAL = os.environ.get('SPIRV_VAL', 'spirv-val')
 
@@ -26,7 +26,7 @@ def valid(data):
 
 
 if __name__ == '__main__':
-    import zstandard as zstd
+    import zstandard as zstd   # pyright: ignore[reportMissingImports]  # optional: only this agent tool needs it (the header's usage line)
     lib, out = sys.argv[1], sys.argv[2]; only = set(sys.argv[3:])
     os.makedirs(out, exist_ok=True)
     L = delta.Library(lib)

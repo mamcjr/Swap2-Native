@@ -568,7 +568,7 @@ def finish(key, w, job, c1):
     if stage == 'vs':   # inputs used only as integer bits: translated again with uint inputs (dmsh_build.py int_inputs), as the vertex input format's class must match
         extra = {l: t for l, t in spv.integer_only_inputs(m).items() if l not in job['attr']}
         if extra:
-            job = dict(job, attr={**job['attr'], **extra})
+            job = dict(job); job['attr'] = {**job['attr'], **extra}   # (a copy: the caller's job keeps its inputs)
             rx = translate([job], w, 'int_' + key)
             if rx.returncode or not os.path.exists(sp): return 'translation failed', ('integer-input retranslation: ' + rx.stderr.strip())[:160], None
             res = json.load(open(os.path.join(w, key + '.res.json'))); m = spv.Module(open(sp, 'rb').read())

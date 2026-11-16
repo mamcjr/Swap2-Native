@@ -2,7 +2,7 @@
 
 ## Scope
 
-Adapted from BananaNative `7ea6a966e4be51d5e2ac0be08543ff44c036e447`, retaining the local 0.1.3 transfer lifetime fixes and 0.1.4 memory/compiler improvements. The [comparison](ANALISE-BANANANATIVE-0.2.8-2026-11-10.md) is the pre-implementation audit.
+Adapted from BananaNative `7ea6a966e4be51d5e2ac0be08543ff44c036e447`, retaining the local 0.1.3 transfer lifetime fixes and 0.1.4 memory/compiler improvements. The comparison (`ANALISE-BANANANATIVE-0.2.8-2026-11-10.md`, kept local) is the pre-implementation audit.
 
 - NVN queue and command-buffer event/sync waits now record real dependencies. The replay parks a consumer's logical queue and lets other queues produce its inputs; sync state is snapshotted at submission. Split/out-of-order work uses per-slot fences and carries completion effects to a covering timeline signal. Present waits for its frame outside the Vulkan queue lock. This targets Zelda lighting order; no universal lighting/FPS claim.
 - Images named by generation-valid texture-pool slots remain resident even if shader-side bindless reads are absent from CPU draw tracking. Copied NVN texture objects cannot finalize an original object's image while it remains alive. Descriptor construction takes a temporary hold across unlocked upgrades. Existing transfer marking, retirement accounting and dead-pool CPU-image rejection remain.

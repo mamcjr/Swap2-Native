@@ -24,7 +24,7 @@ Built-in policy assets migrate existing pack memory metadata at launch, gated by
 
 ## Signing and device outcome
 
-- APK: [swap2-native-0.1.3-beta.apk](../android/app/out/swap2-native-0.1.3-beta.apk), 41,250,318 bytes.
+- APK: swap2-native-0.1.3-beta.apk, 41,250,318 bytes.
 - SHA-256 `c7615fcfc48cab01b434556974d6e0946dc40d4997622718d94b27018d9cbe16`.
 - Original release certificate SHA-256 `9d6f1e98632da3def8699c908acf8a1387257a35ef58c46c25d7388f34c7c0f1` verified. Installed with `adb install -r` on POCO serial 98d66058, package `com.swap2native`, version 0.1.3-beta/code 4. First-install time remains 2026-11-08 14:11:23; data path unchanged.
 - Zelda was launched through the normal launcher path. Its actual installed runtime profile now has `MEM_MAP_LIMIT=1`, `MEM_ALIAS=8589934592`, `MEM_RESERVE=18924699648`, `APP_POOL=9663676416`. The game log confirms an 8 GiB alias region. No manual metadata edit was used: the APK's launch-time migration ran.

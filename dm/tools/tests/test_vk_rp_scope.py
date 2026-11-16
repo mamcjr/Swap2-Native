@@ -71,7 +71,8 @@ class PassEnd(unittest.TestCase):
         self.assertIn('vka_n_attachment_bar - ab0', src('vka_exec.c'))
 
     def test_live_switches(self):
-        live = re.search(r'g_live\[\] = \{(.*?)\};', src('vka_ctl.c'), re.S).group(1)
+        m = re.search(r'g_live\[\] = \{(.*?)\};', src('vka_ctl.c'), re.S); assert m, 'no g_live[] table'
+        live = m.group(1)
         for k in ('DM_VK_RP_SCOPE', 'DM_VK_RP_SCOPE_NARROW', 'DM_VK_BAR_DEDUP', 'DM_VK_MESH_GUEST_BAR'):
             self.assertIn('"%s"' % k, live)
         tsv = (ROOT / 'docs/env_switches.tsv').read_text(encoding='utf-8')

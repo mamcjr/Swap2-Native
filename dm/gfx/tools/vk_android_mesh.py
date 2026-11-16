@@ -258,7 +258,7 @@ def lower(data):
     actual_wg = b.input(v3, 26, force=True)
     lid = b.input(b.u, 29)  # LocalInvocationIndex; handles non-1D local sizes too.
     info = b.words(INFO); payload = b.words(PAYLOAD); offsets = b.words(OFFSETS)
-    group_var = out_var = None; group_type = stride = 0
+    out_var = None; group_type = stride = 0
     members = {v: k for k, v in enumerate(out_types)}
     count_member = len(out_types); count_fn = None
     if not task:
@@ -352,7 +352,7 @@ def lower(data):
             b.emit(224, b.c(2), b.c(2), b.c(0x108))
             for k in range((payload_words + threads - 1) // threads):
                 w = b.add(li, b.c(k * threads))
-                def cp():
+                def cp(w=w):
                     p = b.val(65, m.add_type(32, 4, b.u), payload_var, w)
                     v = b.load(b.u, p)
                     b.emit(62, b.word(payload, b.add(b.mul(gx, stride_words), w)), v)
@@ -577,7 +577,7 @@ def _direct_stores(m):
         x = body[k]
         if x[0] & 0xffff == OP['IEQ'] and const(m, x[4]) is not None and k + 3 < len(body) and body[k + 1][0] & 0xffff == OP['SMERGE'] \
                 and body[k + 2][0] & 0xffff == OP['BRC'] and body[k + 2][1] == x[2]:
-            M = body[k + 1][1]; T_ = body[k + 2][2]
+            M = body[k + 1][1]
             end = next(j for j in range(k + 3, len(body)) if body[j][0] & 0xffff == OP['LABEL'] and body[j][1] == M)
             blk = body[k + 3:end]
             chains.setdefault(x[3], []).append((k, end, const(m, x[4]), blk))
@@ -594,12 +594,13 @@ def _direct_stores(m):
     replaced = 0
     for plane_var, blocks in chains.items():
         # each block: an AccessChain into the output (base, 0, group, member, index, consts...), maybe a zw store
-        table = {}; idx_var = None; wg_load_var = None; zw = {}
+        table = {}; idx_var = None; wg_load_var = None; zw = {}; gstride = 0
         for (_, _, p, blk) in blocks:
             for y in blk:
                 if y[0] & 0xffff == OP['AC'] and m.vars.get(y[3], (0, 0))[1] == 12 and len(y) >= 8:
                     out_var = y[3]
                     member = const(m, y[6]); idx_var = y[7]; rest = [const(m, z) for z in y[8:]]
+                    if member is None: raise ValueError('mesh_plane_store: output member index is not a constant')
                     blockty = m.pointee(m.vars[out_var][0])[1]; rt = m.types[blockty][2]; group_ty = m.types[rt][2]
                     gstride = m.decos[rt][6][0]
                     mty = m.types[group_ty][2 + member]
@@ -607,7 +608,7 @@ def _direct_stores(m):
                 if y[0] & 0xffff == OP['LOAD'] and y[1] == v3: wg_load_var = y[3]
                 if y[0] & 0xffff == OP['AC'] and zw_var is not None and y[3] == zw_var: zw[p] = 1
         if idx_var is None or not table: continue
-        n = max(max(table), max(zw) if zw else 0) + 1
+        n = max(*table, *(zw or (0,))) + 1
         offs = [table.get(p, (NONE, 0))[0] for p in range(n)]; strides = [table.get(p, (0, 0))[1] for p in range(n)]
         arr = m.add_type(28, u, C(n)); pp = m.add_type(32, SC_PRIVATE, arr)
         tv = {}
@@ -621,7 +622,7 @@ def _direct_stores(m):
         off = b.load(u, b.val(65, m.add_type(32, SC_PRIVATE, u), tv['off'], pc))
         st = b.load(u, b.val(65, m.add_type(32, SC_PRIVATE, u), tv['str'], pc))
         ok = b.val(167, bty, inr, b.val(171, bty, off, C(NONE)))   # LogicalAnd, INotEqual
-        def put():
+        def put(wg_load_var=wg_load_var, gstride=gstride, off=off, idx_var=idx_var, st=st):   # (bound now: called below, in this iteration)
             g = b.val(OP['CEXT'], u, b.load(v3, wg_load_var), 0)
             byte = b.add(b.add(b.mul(g, C(gstride)), off), b.mul(idx_var, st))
             w = b.val(194, u, byte, C(2))   # ShiftRightLogical
@@ -630,7 +631,7 @@ def _direct_stores(m):
         if zw:
             zp = sorted(zw)
             isz = b.val(166, bty, b.val(170, bty, plane_var, C(zp[0])), b.val(170, bty, plane_var, C(zp[-1])))   # LogicalOr of IEquals
-            def putz():
+            def putz(plane_var=plane_var, zp=zp, idx_var=idx_var):
                 hi = b.val(169, u, b.val(170, bty, plane_var, C(zp[-1])), C(1), C(0)) if len(zp) > 1 else C(0)
                 p_ = b.val(65, m.add_type(32, SC_WORKGROUP, u), zw_var, b.add(b.mul(idx_var, C(2)), hi))
                 b.emit(OP['STORE'], p_, value_p)

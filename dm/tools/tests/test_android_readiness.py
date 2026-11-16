@@ -43,7 +43,11 @@ def probe_facts():
     m = re.search(r'k_exts\[\] = \{(.*?)\};', src, re.S); assert m, 'no k_exts[] table'
     ext = m.group(1)
     names = dict(re.findall(r'#define (VK_\w+_EXTENSION_NAME)\s+"(\w+)"', VK_HEADER.read_text(encoding='utf-8')))   # the macros' strings, as the driver lists them
-    for macro in re.findall(r'\b(VK_\w+_EXTENSION_NAME)\b', ext): keys.add('ext.' + names[macro])
+    def name(macro):   # a platform extension's macro is in its platform header, which the repository does not carry (vulkan_android.h: the NDK's): the registry's own spelling
+        if macro in names: return names[macro]
+        vendor, rest = macro[len('VK_'):-len('_EXTENSION_NAME')].split('_', 1)
+        return f'VK_{vendor}_{rest.lower()}'
+    for macro in re.findall(r'\b(VK_\w+_EXTENSION_NAME)\b', ext): keys.add('ext.' + name(macro))
     keys |= {'ext.' + m for m in re.findall(r'"(VK_[A-Za-z0-9_]+)"', ext)}
     return keys | {'ram_gib', 'android.sdk'}
 

@@ -281,4 +281,4 @@
 - **Cause:** `MainActivity.fromIntent` dispatches test extras through Ondevice/GpuDriver/PackUi before restricting their use. An exported activity can be invoked by another installed app, not only adb. The matching AnkaNative entry point was corrected in 0.2.2.
 - **Fix:** 0.1.4-beta gates diagnostic extras behind a deliberate default-off setting in public builds, covering launch and onNewIntent, while preserving frontend requests. Never trust caller-supplied referrer/package extras as authorization.
 - **Check:** JVM tests cover all diagnostic extras, opt-in, frontend separation and mixed requests. [Release/device validation](../BUILD-0.1.4-beta-NATIVE-2026-11-09.md) records the on-device checks separately.
-- **Found on:** Swap2-Native's shared launcher, during the [AnkaNative/Lichii comparison](../ANALISE-LICHII130-ANKANATIVE022-2026-11-09.md).
+- **Found on:** Swap2-Native's shared launcher, during the AnkaNative/Lichii comparison (`ANALISE-LICHII130-ANKANATIVE022-2026-11-09.md`, kept local).

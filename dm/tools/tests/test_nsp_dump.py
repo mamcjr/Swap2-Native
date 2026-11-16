@@ -62,7 +62,7 @@ class Scan(Base):
         self.assertEqual(pack_dump.scan(self.dump)[1], {VER: self.dump / f'updates/{VER}'})
         self.assertTrue(nsp.dump_folder(self.dump))
         shutil.rmtree(self.dump / f'updates/{VER}/romfs')
-        with self.assertRaisesRegex(pack_dump.Error, 'base/romfs'): pack_dump.scan(self.dump)
+        with self.assertRaisesRegex(pack_dump.Error, r'romfs \(in base/ or an update\)'): pack_dump.scan(self.dump)
         with self.assertRaisesRegex(pack_dump.Error, 'romfs'): pack_dump.pack_version(self.dump / 'base', TID, self.dump / 'out', say=lambda s: None)
 
     def test_refuses(self):
@@ -70,7 +70,7 @@ class Scan(Base):
         with self.assertRaisesRegex(pack_dump.Error, 'is not a DLC of'): pack_dump.scan(self.dump)
         d = self.dump.parent / 'patch'; version(d / 'base', tid=TID + 0x800)
         with self.assertRaisesRegex(pack_dump.Error, 'not a base title ID'): pack_dump.scan(d)
-        with self.assertRaisesRegex(pack_dump.Error, 'no base/exefs'): pack_dump.scan(self.dump.parent)
+        with self.assertRaisesRegex(pack_dump.Error, 'no exefs/main.npdm'): pack_dump.scan(self.dump.parent)
 
     def test_packages_win_over_the_layout(self):
         self.assertTrue(nsp.dump_folder(self.dump))

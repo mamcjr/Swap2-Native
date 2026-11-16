@@ -26,4 +26,4 @@ Certificate SHA-256: `9d6f1e98632da3def8699c908acf8a1387257a35ef58c46c25d7388f34
 
 Post-install launcher check: four registered games remain; first installation time is unchanged. Zelda reports changed mods and Play starts the existing code-rewrite flow before launching. The new shader library is already present; the imported Pokopia library was not replaced or removed. Live game validation waits for that code step to complete.
 
-See the [door investigation](ANALISE-ZELDA-DOOR-2026-11-10.md) for diagnostic history, exact artifacts and pending live acceptance. The BananaNative candidate matrix distinguishes implemented diagnostics from scheduler, texture-feedback and UI work that is still separate.
+See the door investigation (`ANALISE-ZELDA-DOOR-2026-11-10.md`, kept local) for diagnostic history, exact artifacts and pending live acceptance. The BananaNative candidate matrix distinguishes implemented diagnostics from scheduler, texture-feedback and UI work that is still separate.

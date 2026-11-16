@@ -88,7 +88,7 @@ class Defer(unittest.TestCase):
         self.draw = text('vka_draw.c')
 
     def test_flush_after_full_barrier(self):
-        f = body(self.draw, 'void vka_rp_end(void) {')
+        f = body(self.draw, 'void vka_rp_end_at(const char *file, int line) {')   # vka_rp_end() is a macro naming its caller's place (vka.h; the pass counts, rps_count)
         ordered(self, f, 'vk.vkCmdEndRendering(g_cb);', 'vka_barrier(g_cb);', 'vka_ub_flush_pass(g_cb);', 'R.on = 0;')
 
     def test_no_second_barrier_in_flush(self):

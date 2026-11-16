@@ -94,7 +94,8 @@ class Barriers(unittest.TestCase):
 
     def test_live_switches(self):
         c = src('vka_ctl.c')
-        live = re.search(r'g_live\[\] = \{(.*?)\};', c, re.S).group(1)
+        m = re.search(r'g_live\[\] = \{(.*?)\};', c, re.S); assert m, 'no g_live[] table'
+        live = m.group(1)
         for k in ('"DM_VK_DISPATCH_ORDER"', '"DM_VK_BAR_NARROW"'):
             self.assertIn(k, live)
 

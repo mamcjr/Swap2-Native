@@ -135,7 +135,7 @@ class Read(Fixture):
         self.assertEqual(nup.split('/a/b.NUP:c/x.Nup:base'), ('/a/b.NUP:c/x.Nup', 'base'))
         self.assertIsNone(nup.split('/a/b.nuptial:base'))
         self.assertTrue(nup.has_ext('G.NUP') and nup.has_ext('g.nup') and not nup.has_ext('.nup') and not nup.has_ext('g.nup.part'))
-        upper = self.nup.with_name(self.nup.stem + '.NUP')
+        upper = self.nup.with_name('Upper.NUP')   # another name, not the stem with .NUP: on a case-insensitive file system (a Mac's) that is the same file
         shutil.copyfile(self.nup, upper)
         try:
             self.assertEqual(nup.default_romfs(upper), f'{upper}:update/{VER}/romfs')

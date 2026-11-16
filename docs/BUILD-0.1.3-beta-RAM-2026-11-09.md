@@ -4,7 +4,7 @@ Historical build report: the APK path below now contains the later [application-
 
 ## Installed release
 
-- APK: [swap2-native-0.1.3-beta.apk](../android/app/out/swap2-native-0.1.3-beta.apk).
+- APK: swap2-native-0.1.3-beta.apk.
 - Package `com.swap2native`, version `0.1.3-beta`, code 4, not debuggable.
 - SHA-256: `b0a8d026028e8ac68dd2a0285c2165cb0d5eb84730582bfbbda8fb7913abde87` (additional completed-image retirement fix).
 - 41,233,586 bytes; original release certificate SHA-256 `9d6f1e98632da3def8699c908acf8a1387257a35ef58c46c25d7388f34c7c0f1` verified before installation.
@@ -32,6 +32,6 @@ Historical build report: the APK path below now contains the later [application-
 
 Final APK installed and launcher opened with four library entries. DK preparation completed successfully on the device at 17:32 on 2026-11-09. The persisted job reports `state=done`, an empty error and every stage done. All 22,850 shaders were retained; final packing explicitly recognized the existing library as current. Missing main/SDK outputs were rebuilt in 91.1/26.8 seconds, and the 428.1 MiB pack was finalized under the main application's private pack directory. No game launch was performed as part of this completion check. The foreground had subsequently moved to Android's file picker, so it was left undisturbed.
 
-The first 0.1.3-beta image (SHA-256 `f04d2dbeaeb60a357ff11b1eece0c24e60786d5c0d8074a4da5e06b87db6d218`) still ended in Zelda LOW_MEMORY. A follow-up removes unnecessary future-fence waiting only for already-complete pressure-prune candidates. The updated ARM64 ownership test passes and on-device playback confirms 308 MiB reclaimed with zero pending bytes. However, a sampled Zelda process still reached approximately 7.5 GiB total PSS including 5.2 GiB swap PSS, with severe paging and low frame rate. The full memory problem is not resolved by this additional fix. See [the RAM investigation](ANALISE-ZELDA-RAM-2026-11-09.md). No shader-table/driver mesh-support fix was included implicitly.
+The first 0.1.3-beta image (SHA-256 `f04d2dbeaeb60a357ff11b1eece0c24e60786d5c0d8074a4da5e06b87db6d218`) still ended in Zelda LOW_MEMORY. A follow-up removes unnecessary future-fence waiting only for already-complete pressure-prune candidates. The updated ARM64 ownership test passes and on-device playback confirms 308 MiB reclaimed with zero pending bytes. However, a sampled Zelda process still reached approximately 7.5 GiB total PSS including 5.2 GiB swap PSS, with severe paging and low frame rate. The full memory problem is not resolved by this additional fix. See the RAM investigation (`ANALISE-ZELDA-RAM-2026-11-09.md`, kept local). No shader-table/driver mesh-support fix was included implicitly.
 
 The follow-up run ended LOW_MEMORY at 17:45:31.873. [BananaNative comparison and next validation](COMPARISON-BANANANATIVE-MEMORY-2026-11-09.md) identify further missing semantics, especially the disabled installed application-pool mapping limit. No additional game launch or driver change followed that termination.

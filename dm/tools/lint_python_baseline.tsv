@@ -73,7 +73,6 @@ pyright	dm/gfx/tools/vk_android_spv.py	reportArgumentType	1	Argument of type "No
 pyright	dm/gfx/tools/vk_android_spv.py	reportArgumentType	1	Argument of type "tuple[Unknown | None, ...]" cannot be assigned to parameter "value" of type "None" in function "__setitem__" "tuple[Unknown | None, ...]" is not assignable to "None"
 pyright	dm/gfx/tools/vk_android_spv.py	reportCallIssue	1	No overloads for "__setitem__" match the provided arguments
 pyright	dm/gfx/tools/vk_android_spv.py	reportOperatorIssue	1	Operator "*" not supported for types "Literal[4]" and "Unknown | None" Operator "*" not supported for types "Literal[4]" and "None"
-pyright	dm/gfx/tools/vk_android_spv.py	reportOptionalSubscript	2	Object of type "None" is not subscriptable
 pyright	dm/gfx/tools/vk_shaders.py	reportArgumentType	1	Argument of type "list[str]" cannot be assigned to parameter "iterable" of type "Iterable[LiteralString]" in function "join" "list[str]" is not assignable to "Iterable[LiteralString]" Type parameter "_T_co@Iterable" is covariant, but "str" is not a subtype of "LiteralString" "str" is not assignable to "LiteralString"
 pyright	dm/gfx/tools/vk_shaders.py	reportCallIssue	1	No overloads for "join" match the provided arguments
 pyright	dm/gfx/tools/vk_shaders.py	reportOptionalMemberAccess	2	"group" is not a known attribute of "None"

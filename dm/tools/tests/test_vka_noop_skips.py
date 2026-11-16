@@ -50,7 +50,7 @@ class ZeroDraw(unittest.TestCase):
     def test_check(self):
         f = self.f
         m = re.search(r'\n\s*if \(([^\n]*VKA_ENV\("DM_VK_ZERO_DRAW", 1\)[^\n]*)\) \{\n([^}]*)\}\n', f)
-        self.assertIsNotNone(m, 'a return behind DM_VK_ZERO_DRAW')
+        assert m is not None, 'a return behind DM_VK_ZERO_DRAW'
         c, body = m.group(1), m.group(2)
         self.assertIn('draw_log(d, NULL, dw, di);', body, 'the draw keeps its DM_VK_DRAW_LOG index')
         self.assertIn('return;', body)

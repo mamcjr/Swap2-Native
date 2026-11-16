@@ -320,7 +320,9 @@ class RequireAll(unittest.TestCase):
         """Mario Kart World's manifest has no "-" rows: the 1.8.0 library of DMSH_VK_CHAIN d274c85fc9f9 (11,601 shaders, every one built) has no entry for
         compute 078997bf631992c5, the one shader the manifest of the earlier chain (6607c8d19abc, 11,604 shaders) marked "-" because it builds nowhere"""
         m = delta.parse_manifest((REPO / 'dm/games/0400C3F00006E000/vk_delta.tsv').read_text())
-        self.assertIn(f'DMSH_VK_CHAIN "{m["version"]}"', (REPO / 'dm/gfx/nvn/dmsh_chain_vk.h').read_text(), 'the manifest is of the current chain')
+        # Not checked against the current chain: a profile's manifest stays of the chain its library was last built with until it is built again (Mario Kart World's is
+        # d274c85fc9f9 while the tree is at e3d2789e93f6, docs/BUILD-0.1.8.7-beta-2026-11-15.md); the app updates from whatever library a player has
+        self.assertRegex(m['version'], r'^[0-9a-f]{12}$')
         self.assertEqual(sorted(k for k, h in m['hashes'].items() if h == '-'), [])
 
 

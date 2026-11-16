@@ -26,7 +26,7 @@ The previous application-pool enforcement, 8 GiB alias layout, migration and all
 
 ## Release
 
-- APK [swap2-native-0.1.3-beta.apk](../android/app/out/swap2-native-0.1.3-beta.apk), 41,250,318 bytes, SHA-256 `fd4b2487543384aafef3dd7b097d3788ed308cbdfef9b14fe447a0bdb4fc1c0c`.
+- APK swap2-native-0.1.3-beta.apk, 41,250,318 bytes, SHA-256 `fd4b2487543384aafef3dd7b097d3788ed308cbdfef9b14fe447a0bdb4fc1c0c`.
 - Original release certificate SHA-256 `9d6f1e98632da3def8699c908acf8a1387257a35ef58c46c25d7388f34c7c0f1` verified. Installed successfully with `adb install -r` on POCO serial 98d66058, main package `com.swap2native`, version 0.1.3-beta/code 4.
 - Data path and first-install time (2026-11-08 14:11:23) unchanged. Main/SDK code files and the shader library retain their sizes/dates (`output/analysis/zelda-pack-after-transfer-fix.txt` versus the pre-policy snapshot: no differences). Installed memory policy remains enabled with an 8 GiB alias region.
 - Launcher opened for the user's gameplay test. No matched long gameplay stability pass is claimed for this APK. No uninstall, data clearing, Git commit or GitHub publication.

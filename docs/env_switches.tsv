@@ -11,6 +11,8 @@ DM_AUDIO_DUMP	diagnostic	`=<file>` writes every PCM block the game appends as is
 DM_AUDIO_IN	switch	`0` lists no virtual input device (Switch 2 SDKs), so a game finds no microphone and skips its capture; by default the host lists one silent microphone and serves its input streams (`hle_audio.c`)
 DM_AUDIO_MUTE	switch	`=1` runs the real Core Audio output path (callback pacing, background take-over) with the output silenced, for lifecycle tests on the Mac without noise
 DM_AUDREN_TRACE	diagnostic	When set, the CPU audio renderer logs every update with the number of frames rendered since the previous one
+DM_AV1_DAV1D	diagnostic	`1` decodes AV1 movies with dav1d on the CPU even where a hardware AV1 decoder exists (VideoToolbox on Apple, MediaCodec on Android); by default the hardware decoder is used when there is one (`hle_movie_av1.c` `hw_av1`)
+DM_AV1_MC_FAIL	diagnostic	`=<n>` (Android, off) the hardware AV1 decoder is taken as failed at the n-th packet of each stream, to check the way back to dav1d on a phone whose decoder works (`hle_movie_av1.c`)
 DM_BOOTPROF	diagnostic	When set, logs boot timing: the loader's breakdown (mapping, relocation, probes), Metal library loading, pipeline creation, texture uploads and the first present
 DM_BUILD_COMMIT	path	The commit the build was made from, which the host logs at start-up; the Android launcher sets it from the commit Gradle stamped into the APK (the Apple apps read `DMCommit` from Info.plist instead)
 DM_BUNDLE_ID	switch	Overrides the iOS app's bundle ID in `build_ipa.sh` (default `org.nxnative.<title ID in lowercase>`)
@@ -23,19 +25,22 @@ DM_COPY_GAME_RESOURCES	switch	`NO` skips the Xcode build phase that copies the g
 DM_COPY_ROMFS	switch	`NO` keeps the game files out of the app, in the Xcode build phase (`stage_resources.sh`) and in the unsigned IPA of `build_ipa.sh` (on by default): `main.m` takes the validated `Documents/romfs.img` copied by `scripts/push_romfs.sh`, then a `Documents/romfs` folder; the build writes the image's identity as `romfs.id` into the app, and `main.m` uses only a matching image (`--romfs separate` of the NSP script sets this)
 DM_CORE_MASK	switch	`=<mask>` (hex or decimal, cores 0-7) the process's core mask instead of the NPDM's (the profile's `core_mask`, the pack's `CORE_MASK` row): what `GetInfo(CoreMask)` answers; `0x7` gives the three cores the host answered before, for an A/B (`hle_thread.c` `proc_cores_init`; docs/reference/threads.md, "The process's cores")
 DM_CTL	diagnostic	`=<file>` (Mac): the host polls the file every 100 ms and runs each appended line: button presses, `shot`, `passdump`, `texdump`, `env KEY=VALUE`, `peek`, `memdump`, `drag` and more
+DM_DAV1D_FRAME_DELAY	diagnostic	`=<n>` dav1d's `max_frame_delay` for AV1 movies instead of 0 (automatic frame multithreading across the CPU cores; `hle_movie_av1.c`)
+DM_DAV1D_THREADS	diagnostic	`=<n>` dav1d's thread count for AV1 movies instead of 8 on a device with 8 or more cores, else 4 (`hle_movie_av1.c`)
 DM_DBG	diagnostic	When set, prints the guest's `svcOutputDebugString` text to stderr as `[guest]` lines
 DM_DBG_AU_FRAMES	diagnostic	`=<frames>` asks the Mac's Core Audio output for that many frames per callback instead of about 5 ms (1024 reproduces the iOS default that caused crackling)
 DM_DETCLOCK	switch	`=<step ns>`: from the first present on, the guest clock advances a fixed step per present instead of following the wall clock, and the random source becomes a fixed-seed stream (replay and test runs)
 DM_DETCLOCK_PACE	switch	`=1` with `DM_DETCLOCK`: each frame takes at least one clock step of wall time, so background loading keeps up with the fixed clock (used by the screenshot gate)
-DM_DIRTY_BLOCK_AT	diagnostic	
+DM_DIRTY_BLOCK_AT	diagnostic	`=<n>` (read once, default 8192) the dirty-page tracker switches to protecting in blocks (`DM_DIRTY_BLOCK_KB`) once this many separate regions have been protected for the first time; `0` uses blocks from the start (`nvn_dirty.c`)
+DM_DIRTY_BLOCK_KB	diagnostic	`=<KiB>` (read once; default 64 on Android, 0 elsewhere) the dirty-page tracker changes protections in aligned blocks of this size, a power of two larger than a page (else page by page), so kernel-driver GPU maps split only on block boundaries and stay under the process's map limit (`nvn_dirty.c`)
 DM_DIRTY_FAULT_RUN_KB	switch	`<KiB>` (read once with the first dirty range, default 1024): a write fault into protected texture storage releases the run of protected pages around the page, up to this much each way, in one mprotect (placed GPU memory's maps never merge again once split); `0` = the page alone, as before. From Banana Native 6624426f
-DM_DIRTY_BLOCK_KB	diagnostic	
 DM_DISPLAY_NAME	switch	Overrides the iOS app's name in `build_ipa.sh` (default the game name in the base NSP's control data)
 DM_DYNAMIC_RESOLUTION	player	`1` lets NieR:Automata 1.0.3's own dynamic resolution scale between 70 and 100 %, `0` (default) keeps full resolution; only on the builds whose patches.py names the DYNAMIC_RESOLUTION capability (`hle_fpslock.c` `k_nier_dr`). The launcher's Dynamic resolution
 DM_ENTITLEMENTS	path	`=<plist>` gives a prepared Xcode project another entitlements file instead of the Increased Memory Limit one, and the ad-hoc signature of the unsigned IPA's executable carries them; empty means no entitlements
 DM_ENV_FILE	path	`=<file>` makes `build_ipa.sh` bake its `KEY=VALUE` lines into the app as `dm/env.txt`, applied at boot; `Documents/env.txt` overrides them
 DM_ENV_FILE_KEYS	switch	Set by the iOS app and the Mac launcher at launch to the space-separated names an env file set; the settings screen keeps those values and shows them greyed out
 DM_ENV_LAUNCH_KEYS	switch	Set at launch by the Mac launcher (the launcher settings already in the environment) and the iOS app (every DM_* variable already in it) to the space-separated names; the settings screen keeps those values and shows them greyed out
+DM_EXEFS_MODS	switch	Set by `scripts/pack_android.py` for `patch_nso.py`: the comma-separated labels of the exefs mods applied to the module being rewritten; when a mod changed a frame-step site, the module gets no frame step instead of the rewrite stopping (`patch_nso.py`)
 DM_FASTBOOT	switch	`1` (test runs) sets the game profile's `fastboot_env` switches that are not set already: for Donkey Kong Bananza, A every 12 presented frames from the first one, `DM_MARK_DRAWS=3000` and `DM_MARK_KEYS_STOP=1`, so a run reaches the first level as fast as the game allows and logs when (android/TESTING.md, Fast test runs)
 DM_FD_LOG	diagnostic	`=<seconds>` logs, every that many seconds, the number and kinds of file descriptors the process has open
 DM_FIXED_TIME	switch	`=<seconds>`: the user clock always returns that time and the host time zone is pinned to UTC, for deterministic comparison
@@ -95,9 +100,9 @@ DM_MEASURE_LOCK	path	`=<file>`: `scripts/regress.py`'s default `--lock`, the mea
 DM_MEMSTAT	diagnostic	`=<tsv>` writes one line per second of memory accounting: footprint, Metal allocation and resident and charged memory by region class (guest, code, malloc, gpu, …)
 DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second writes every VM region of 1 MiB or more to `<tsv>.regions`
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
-DM_MEM_FILEBACK	diagnostic	
-DM_MEM_FILEBACK_KINDS	diagnostic	
-DM_MEM_FILEBACK_MB	diagnostic	
+DM_MEM_FILEBACK	switch	`0` (Android, read once, default 1) no file-backed pools: memory pools of the `DM_MEM_FILEBACK_KINDS` kinds stay private anonymous memory instead of a shared map of an unlinked file in the app's cache folder, which the kernel can drop and read back under memory pressure (`vka_mem.c`, from Anka Native)
+DM_MEM_FILEBACK_KINDS	player	(Android, read once, default `shader`) the pool kinds `DM_MEM_FILEBACK` backs with a file: `shader` (shader-code pools, off while `DM_VK_PLACE_SHADER_POOLS=1`), `texture` (other pools of `DM_MEM_FILEBACK_MB` or more); the launcher's per-game RAM saver (uses storage) sets `shader,texture` (`vka_mem.c`)
+DM_MEM_FILEBACK_MB	switch	`=<MiB>` (Android, default 64) the smallest pool the texture kind of `DM_MEM_FILEBACK_KINDS` backs with a file (`vka_mem.c` `dm_gfx_pool_fileback`)
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
 DM_MODS_DIR	path	`=<folder>` the mods folder `pack_android.py` reads when `--mods` is not given: `<folder>/<title ID>/<mod>/exefs/<build ID>.ips` or `.pchtxt` (and Atmosphere's `exefs_patches/<mod>/`), applied to each module before the rewrite (`exefs_patches.py`; android/README.md "Mods (exefs patches)"); the phone's `PackService` sets `<Switch2>/Mods` (an older `<Switch2>/mods` while it is there)
@@ -115,7 +120,7 @@ DM_NICK	switch	The account nickname the game sees (default `Player`)
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NUP_CACHE_MB	diagnostic	`=<MB>` sizes the cache of closed, decompressed `.nup` files (nup_image.c; default 128, `0` keeps nothing after close)
 DM_NUP_DISK_MB	diagnostic	`=<MB>` (default 64; `0` none) a compressed `.nup` file of at least this size is decompressed into an unlinked temporary file and mapped, instead of whole into memory (nup_image.h)
-DM_NUP_FD	diagnostic	
+DM_NUP_FD	path	`=<fd>:<path>` set by the phone's packer (`PackService`, `PickedNup.java`): `nup.py` reads the .nup at that path through the open descriptor instead of opening the path (android/NUP.md, "A .nup used where it is")
 DM_NVN_ALLOCPROF	diagnostic	`=1` charges Metal allocation growth to each replayed op type and function, and logs command allocator sizes and each new texture (serial, size, format, storage)
 DM_NVN_API	switch	`=<major>.<minor>` overrides the NVN API version `nvnDeviceGetInteger` reports (by default decided by the SDK version or the profile's `device_api`: 55.15 for SDK 11 and later, 53.313 before)
 DM_NVN_BARRIER	switch	How draw passes are ordered: `full` (default) waits for all earlier GPU work, `game` only for the previous pass's fragment stage unless the game set a barrier, `ab` alternates with the `DM_AB` phases
@@ -317,7 +322,6 @@ DM_SPIN_LIST	diagnostic	`=1` makes `patch_nso.py` print every guest poll loop it
 DM_SPIN_POLL	switch	`=<µs>`: how long a spin-gate wait polls before it sleeps with the yield back-off (default 2000; `0` yields on every pass)
 DM_SPLIT_RESUME	path	`=<dir>` (the phone's split: `PackService`) `shader_split.py` keeps each RomFS file's scan results there and a rerun takes those whose inputs, tools and profile digest still match, so a stopped split resumes per file; unset: no kept results (the Mac's split)
 DM_SPLIT_SPILL	path	`=<dir>` set by `shader_split.py` itself for its pool's workers: the folder each scan writes its shaders' code to (the code spill), beside the kept results when `DM_SPLIT_RESUME` is set, else a temporary folder beside the package that is removed at the end; not a user setting
-DM_THP	diagnostic	`0` (Android, restart) turns transparent huge pages off for the game's process before the guest's memory is mapped (`prctl(PR_SET_THP_DISABLE)`, nxlaunch.c): a diagnostic for a phone whose kernel backs the game with them (the automatic diagnosis's `no-huge-pages` run)
 DM_SVC	diagnostic	`=1` logs memory SVCs (`SetHeapSize`, `MapMemory`, `Map`/`UnmapPhysicalMemory`) with their addresses and sizes
 DM_SYMCHECK	diagnostic	`=1` checks every hashed module symbol lookup against a linear search and logs a red line for each mismatch
 DM_TBUF_ALIGN	diagnostic	`=<bytes>` uses that value as the linear-texture alignment for buffer textures when it is larger than the device's `minimumLinearTextureAlignmentForPixelFormat`: a Mac can then reproduce a phone's larger alignment (a 64-byte one fails the buffers a device with 64 bytes cannot view), to check `tbuf_as_2d`'s aligned-row copy
@@ -356,19 +360,23 @@ DM_VK_ADPF_PIPELINE	switch	`0` (Android, restart, default 1) the ADPF session is
 DM_VK_ADPF_SPAN	diagnostic	`=<p>` (Android, live; unset: 100 when ADPF is the GPU clock floor, `DM_VK_GPU_FLOOR_ADPF`, else 0): ADPF reports each frame's span (recording start to the GPU end of its last submission) against p % of the game's shortest period (`DM_VK_GPU_FLOOR_PERIOD`) instead of the period against the period; `0` the old reports
 DM_VK_AFF_ALL	diagnostic	`=<mask>` (Android, live, 0 = untouched) sets the CPU affinity of every thread of the process to that CPU bit mask when the value changes (`sched_setaffinity`); logs the thread count
 DM_VK_AFF_REPLAY	diagnostic	`=<mask>` (Android, live, 0 = untouched) sets the replay worker thread's CPU affinity to that CPU bit mask when the value changes
-DM_VK_ASYNC_DISCARD	diagnostic	
+DM_VK_AHB_ALIAS	diagnostic	`0` (Android, restart, on) no hardware buffer alias of guest memory on a driver without placed maps (`vka_ahb_alias.h`): the GPU then sees no memory pool there
+DM_VK_ALIAS	diagnostic	`fd` / `ahb` (Android, restart) leave placed maps unused and run on the exported alias or the hardware buffer alias, to test those paths on a phone that has placed maps; `placed`: placed maps again after the host switched to the alias by itself, the count of `DM_VK_PLACED_KILLS` cleared; `prefer` (the launcher's default, its Graphics setting GPU memory sharing): an alias when the driver has one, the exported one first, placed maps when it has none
+DM_VK_ASYNC_DISCARD	diagnostic	`1` (Android, default 0) with asynchronous pipelines (`DM_VK_PSO_ASYNC`), a draw whose pipeline is still being made is dropped instead of waited for (a visual-quality trade-off: persistent lighting and shadow targets may miss it), and `DM_VK_PSO_FRAME_APART` defaults to 0 (`vka_pso.c`)
 DM_VK_BAR_DEDUP	switch	`0` (Android, live, default 1) records the game's full barrier after a draw pass that the barrier ended, as before, instead of letting the pass's own full barrier stand for it (docs/reference/rendering.md, "Pass-end barriers scoped to the pass's writes on the Vulkan replay")
 DM_VK_BAR_KEEP	switch	`0` (Android, live, default 1 since 2026-11-13) ends the open draw pass at every game barrier, as before, instead of taking the barrier inside the pass while no draw of the pass wrote memory (a later draw that writes memory, reads the texture pool directly, has bindings not walked, or samples an attachment of the pass or what may share its memory ends it; docs/reference/rendering.md, "Game barriers ending the draw pass on the Vulkan replay"; the phone A/B is open)
 DM_VK_BAR_NARROW	switch	`0` (Android, live, default 1) records every game barrier outside a draw pass as a full barrier at once, as before, instead of a compute-to-compute barrier where only dispatches follow it (vka_gbar.c; `docs/reference/rendering.md` "A full barrier between the game's compute dispatches")
+DM_VK_BC_DECODE	diagnostic	`1` (Android, restart) BC textures are decoded on the CPU into uncompressed images on a GPU that has BC too, as on one without (`vka_bcdec.h`), to run that path on an Adreno
 DM_VK_BIGIMG_MB	diagnostic	`=<MiB>` (Android, default 64) logs a `large image:` line (texture serial, size, format, flags, pool) for each image whose memory is at least that size, the first 32; for those images also their first GPU write (frame and site), the other textures found over their storage, and a `ctl: large images the GPU has not written` line with the stats (the largest 8, with the draws that sampled them and what lies over their storage)
+DM_VK_BUILDING	diagnostic	`0` (Android, on) no record of the pipelines being made that survives a kill from outside (`<cache file>.building`, `vka_pso.c` `bb_open`): the next start then knows nothing of them
 DM_VK_CAPTURE	path	`=<dir>` (Mac) writes every SPIR-V module the game creates to `<dir>/<key>.spv`; the NSP script's Vulkan shader capture stage sets it
 DM_VK_CHUNK	switch	`=<n>` (Android, live: the next submission, default 600; `0` one part) a long submission goes to the queue in parts: after n draws of the part in progress it is ended and submitted at the next pass boundary, so the GPU starts while the rest is recorded
 DM_VK_CHUNK_PASS	switch	`=<n>` (Android, live, default 600; `0` off) a part is also ended and submitted inside an open pass after n draws, when the pass can be split there ([rendering.md](reference/rendering.md#gpu-end-held-back-by-recording-and-a-clocked-down-gpu-on-the-vulkan-replay))
 DM_VK_COHERE	diagnostic	`1` / `2` (Android, live: once per value) after the GPU is idle, compares every placed segment's GPU view with the CPU's bytes and logs the pages that differ
 DM_VK_CS_SHARED_OVER	diagnostic	`1` (Android, live, off) makes compute programs whose shared memory exceeds the device's `maxComputeSharedMemorySize` anyway (by default they are not made and their dispatches are skipped); an A/B
-DM_VK_DEADLY	diagnostic	
-DM_VK_DEADLY_MS	diagnostic	
-DM_VK_DEVICE_FAULT	diagnostic	
+DM_VK_DEADLY	diagnostic	`0` (Android, default 1) compiles the pipelines listed in `<cache file>.deadly` anyway; by default a shader whose compile was running when the process died in an earlier run is not compiled on that driver and its draws and dispatches are skipped (`vka_pso.c` `deadly_load`)
+DM_VK_DEADLY_MS	diagnostic	`=<ms>` (Android, default 2000) how long a pipeline compile must have run when the process dies (or is killed from outside) for its shader to join the `DM_VK_DEADLY` list (`vka_pso.c`)
+DM_VK_DEVICE_FAULT	diagnostic	`0` (Android) does not enable `VK_EXT_device_fault` on a device that has it; by default it is enabled so a lost device can report the fault (`vka_dev.c`)
 DM_VK_DISPATCH_LOG	diagnostic	`1` (Android, live: the next frame) logs one line per dispatch (its index in the frame, shader key, groups, workgroup size, shared memory, flags)
 DM_VK_DISPATCH_ORDER	switch	`1` (Android, live, default 0) records the host's full barrier after every dispatch at once, as before, instead of leaving it pending until the next GPU work that is not a dispatch (vka_draw.c "Dispatch order"; `docs/reference/rendering.md` "A full barrier after every dispatch")
 DM_VK_DISPATCH_SKIP	diagnostic	`=<from>[,<to>]` (Android, live: read once a frame) dispatches from..to of each frame (by `DM_VK_DISPATCH_LOG`'s index; default to the end) are recorded without their `vkCmdDispatch`, to find the one that writes a wrong picture
@@ -379,15 +387,16 @@ DM_VK_DRAW_LOG	diagnostic	`=<n>` (Android, live: the next frame; `nxreplay` too)
 DM_VK_DRAW_LOG_UBO	diagnostic	`=<n>` (Android, live: read at use) with `DM_VK_DRAW_LOG` / `DM_VK_DISPATCH_LOG=2`, each bound buffer's first n floats as the CPU sees them when recorded
 DM_VK_DRIVER	path	`=<folder>` or `=<file>.so` (Android, restart) a custom Vulkan driver (a folder with a `meta.json` naming its library, loaded through libadrenotools from the app's private files); unset or `system`: the system driver; the launcher's GPU driver setting sets it, a line in `env.txt` wins
 DM_VK_DRV_MEMO	switch	(Android, live, on) a driver segment (c0, c2, the push bank) or the gmem table whose bytes equal the last draw's binds the same scratch span again instead of a fresh fill per draw; `0` fills one per draw
-DM_VK_DS_FIRST_HERE	diagnostic	
+DM_VK_DS_FIRST_HERE	switch	`0` (Android, live, default 1) a depth or stencil image's first clear goes through the upload batch, as before, instead of into the submission being recorded when no pass is open (a workaround for a Turnip device loss with LRZ; `vka_tex.c` `ds_here`)
 DM_VK_DYN_FILTER	diagnostic	`0` / `2` (Android, live: the next submission, default 1) `1` skips dynamic state and pipeline binds equal to the last ones; `0` sets them at every draw; `2` sets them again at each pass (to bisect)
-DM_VK_EAGER_TEX	diagnostic	
+DM_VK_EAGER_TEX	diagnostic	`1` / `0` (Android, restart) every registered texture's image is made and kept while its pool lives, or not, whether or not the texture pool reads are reported (`DM_VK_POOL_FB`); unset: eager only when they are not (`vka_tex.c`)
 DM_VK_ENC	switch	`0` (Android, live: the next submission, default 1) the replay makes its `vkCmd*` calls itself instead of through the command encoder thread (`vka_enc.c`, `vk-enc`); also off while `DM_VK_GPUPROF` times a frame or `DM_VK_NANSCAN` is on
 DM_VK_ENC_BATCH	switch	`=<bytes>` (Android, live, 4096; at most 1 MB) the replay feeds the command encoder thread in batches of that many bytes instead of waking it for each call; `0` each call
-DM_VK_EVENT_LOG	diagnostic	
-DM_VK_EVENT_CPU_DEFER	switch	
-DM_VK_EVENT_PARK_MS	diagnostic	
-DM_VK_EVENT_WAIT	diagnostic	
+DM_VK_EVENT_CPU_DEFER	switch	`0` (Android, default 1) a GPU wait parked across NVN queues is released at once when the CPU waits on it, as before, instead of only once the worker's queue holds no more jobs (its producer may still be in it; Ocarina of Time's white flashes on Link; `vka_worker.c` `cpu_defer`)
+DM_VK_EVENT_LOG	diagnostic	`=<n>` (Android, restart) logs the first n parks and releases of GPU waits across NVN queues, with the wait, the value it saw and the submission replayed last (`vka_worker.c`)
+DM_VK_EVENT_PARK_MS	diagnostic	`=<ms>` (Android, default 200) a queue parked on a GPU wait across NVN queues for longer than this is released with its wait passed and a `[RED]` line (`vka_worker.c`, `vka_qsched.h`)
+DM_VK_EVENT_WAIT	diagnostic	`0` (Android, default 1) every GPU wait across NVN queues passes at once instead of parking its queue until the producer is replayed (`vka_worker.c`)
+DM_VK_FD_ALIAS	diagnostic	`0` (Android) no CPU alias of exported Vulkan memory (OPAQUE_FD) for guest memory on a driver without placed maps; by default it is probed and used when the probe passes (`vka_fd_alias.h`, `vka_dev.c`)
 DM_VK_FG	switch	not read as a switch: a prefix in the Vulkan replayer's list of the live run's settings it does not take from a capture (`vka_replay.c`), which covers `DM_VK_FG_REFRESH_CAP`
 DM_VK_FG_REFRESH_CAP	switch	(Android, live, 1) frame generation makes no more images per game frame than the panel's refreshes in the game's period (display timing): on a 60 Hz panel a 60 fps game gets none instead of being held at 30 fps by FIFO; `0` generates the multiplier's count whatever the panel runs at (a driver whose display timing reports a refresh the panel does not run at)
 DM_VK_FOUT_RETYPE	switch	`=0` (Android): a pixel shader's float output into a UINT / SINT attachment is not retyped (`vka_spv_fout_retype`); that target is not written, the earlier behaviour; default on
@@ -419,36 +428,50 @@ DM_VK_HANG_S	switch	`=<s>` (Android, live, default 6; at least 0.5) the seconds 
 DM_VK_HOOKDIR	path	`=<folder>` (Android, restart) where libadrenotools' hook libraries are for `DM_VK_DRIVER`; default the folder `libnxhost.so` was loaded from (inside the APK)
 DM_VK_IMGMEM	switch	(Android, live: images made from then on, on) images under 4 MiB that the driver does not want dedicated share 64 MiB blocks of their memory type (vka_imgmem.c, exact 256-byte units, first fit; the ctl stats' `image memory:` line); `0` gives every image its own VkDeviceMemory as before (Mario Kart World ran out of allocations that way)
 DM_VK_IMGSTAT	diagnostic	`=<w>x<h>` (Android, live: once per value) level 0, layer 0 of every live image of that size read back after the GPU is idle and summed up
-DM_VK_IMG_LIMIT_MB	diagnostic	
-DM_VK_IMG_PSI	diagnostic	
+DM_VK_IMG_LIMIT_MB	diagnostic	`=<MiB>` (Android, 0 = measured) a fixed image cache limit in place of the one measured from MemAvailable, the heap budget and memory pressure (`vka_tex.c` `img_limit_update`, `vka_texlimit.h`)
+DM_VK_IMG_PSI	diagnostic	`0` (Android, default 1) the image cache limit leaves out memory pressure (`/proc/pressure/memory` some avg10) and follows the RAM and heap budget rules only (`vka_tex.c`)
 DM_VK_IMG_RETYPE	switch	`=0` (Android, live) a compute shader's formatted storage image (float, format Unknown) bound to a UINT / SINT texture is not retyped (`vka_spv_img_retype`); that binding reads as unbound, the earlier behaviour; default on ([shaders.md](reference/shaders.md#formatted-storage-images-bound-to-integer-textures-on-the-vulkan-replay))
 DM_VK_IMG_UPGRADE	switch	`0` (Android, live: the next binding, on) a texture bound as a shader image without NVN's IMAGE flag is no longer remade with storage use, and an image registration no longer counts as image intent
 DM_VK_LC_GLOBAL	switch	(Android, restart, on) the recording thread's address lookup cache lives in a global the first recording thread owns, not in TLS (a dlopen'ed library's `__thread` access goes through the TLS resolver: 8 % of the replay thread); `0` TLS for every thread
 DM_VK_LINLOG	diagnostic	`1` (Android) logs linear textures as they are made and written back
 DM_VK_LOG	diagnostic	`=1` logs Vulkan object creation in the Vulkan-on-Metal layer
-DM_VK_MAPS	diagnostic	
-DM_VK_MAPS_BUDGET	diagnostic	
+DM_VK_MAPS	diagnostic	`0` (Android, default 1) no `vk-maps` thread counting the process's memory maps: no maps budget for the dirty tracker and no compaction (`vka_mem.c`)
+DM_VK_MAPS_BUDGET	diagnostic	`=<percent>` (Android, default 75) the share of the system's map limit (vm.max_map_count) at which the maps thread starts compacting, down to 55 % (`vka_mem.c`, `vka_mapbudget.h`)
 DM_VK_MAPS_CACHE	diagnostic	(Android, on) placing and giving back memory pools take the page protections from a snapshot of /proc/self/maps, read again only for a range whose 256 KiB blocks changed since (this library's mmap / munmap / mprotect / mremap mark them; a pool swap marks its range only when it may not have put the protections back); answers from the snapshot are checked against the text (the first 16, then every 64th). `0` reads the text each time (1-5 ms a pool on the phone)
-DM_VK_MAPS_COMPACT	diagnostic	
-DM_VK_MAPS_COMPACT_N	diagnostic	
-DM_VK_MAPS_HIST	diagnostic	
-DM_VK_MAPS_PERIOD_S	diagnostic	
-DM_VK_MAPS_RELEASE	diagnostic	
+DM_VK_MAPS_COMPACT	diagnostic	`0` (Android, default 1) no compaction of placed memory's pieces when the memory maps pass `DM_VK_MAPS_BUDGET` (at most one round every 20 s; `vka_mem.c`)
+DM_VK_MAPS_COMPACT_N	diagnostic	`=<n>` (Android, default 8, 1 to 256) the most segments one compaction round of the memory maps takes (`vka_mem.c`)
+DM_VK_MAPS_HIST	diagnostic	`=<percent>` (Android, default 40; 0 off) when the memory maps reach this share of the limit, logs the largest groups of maps outside the guest block by name, permissions and size (`vka_mem.c` `maps_hist_log`)
+DM_VK_MAPS_PERIOD_S	diagnostic	`=<s>` (Android, default 5, at least 1) how often the `vk-maps` thread counts the memory maps (`vka_mem.c`)
+DM_VK_MAPS_RELEASE	diagnostic	`0` (Android, default 1) when placed memory's pieces cannot cover the maps over the target and the guest block holds over 2000 anonymous maps, the dirty tracker's protections are not all released (by default they are, so the maps merge; their textures upload again; `vka_mem.c`, upstream v0.3.1)
 DM_VK_MEMLOG	diagnostic	`=<MiB>` (Android, default 512, `0` off): a `memory:` log line each time the replay's placed pools, images and scratch memory have taken that much more (allocations counted, frees not) since the last line
-DM_VK_MEM_CENSUS_S	diagnostic	
+DM_VK_MEM_CENSUS_S	diagnostic	`=<s>` (Android, default 10; 0 off) a `vk-memstats` thread logs `memory census` lines that often, or sooner when the resident set moved 256 MiB: RSS, PSS by kind, MemAvailable, the renderer's images, pools and staging, the compiler queue, the allocator (`vka_ctl.c`)
 DM_VK_MEM_LOCK_WHOLE	diagnostic	`1` (Android, restart): a memory pool placement holds the segment table's write lock for its whole duration, as before 2026-11-03 (the replay and the game's NVN calls wait for it: DKB's 300-500 ms loading hitches); for A/B only
 DM_VK_MESH	switch	`0` (Android, restart, on) leaves VK_EXT_mesh_shader off: NVN2 task and mesh shaders are refused and their draws (nvnCommandBufferDrawMeshTasks and DrawMeshTasksIndirect) skipped, as on a device without the task and mesh stages
+DM_VK_MESH_BARRIERS	diagnostic	`0` (Android, default 1) the task/mesh fallback's buffer barriers use all-commands stages and every controller step gets one, instead of the compute, indirect, vertex and transfer stages with the leading barrier skipped after a pass that ended with a full barrier (`vka_mesh.inc`)
+DM_VK_MESH_BATCH_FIT	diagnostic	`0` (Android, live, default 1) the task/mesh fallback batches a direct draw without a task shader over all 65535 groups, as before, instead of its count, and a direct count of 0 still runs (`vka_mesh.inc`)
 DM_VK_MESH_COMPACT	diagnostic	`1` (Android, live, default 0) the task/mesh fallback draws each batch as one draw per group with primitives (a compute reads the groups' counts, `selftest/mesh_compact.comp`, then `vkCmdDrawIndirectCount`) instead of one draw over every possible corner. Slower on the Adreno 830 (Ocarina of Time by the scarecrow: 15.2 against 17.1 fps, GPU 59.5 against 52 ms); kept for a GPU whose draws are cheaper
+DM_VK_MESH_DIAG_LIMIT	diagnostic	`=<n>` (Android, 0 = off) only the first n emulated task/mesh draws of each frame are drawn, the rest dropped; replay bisection only, the picture is incomplete (`vka_mesh.inc`)
 DM_VK_MESH_DIAG_STAGE	diagnostic	(Android; incomplete picture, for measuring only) `1` runs only the task/mesh fallback's controller (the pass still broken, no task/mesh compute, no pulling draw); `2` also the compute, without the pulling draw; `3` drops the emulated draw before it ends the pass; `-1` stops after the controller's first phase. Ocarina of Time by the scarecrow (2026-11-15): full 48.2 ms of GPU, `=1` 31.4, `=3` 29.5
 DM_VK_MESH_FUSE	switch	`0` (Android, live, default 1) the task/mesh fallback runs its controller's three phases (the count, the groups, the first batch's records) as three one-thread dispatches with a barrier after each, as before; with 1 a draw without a task shader runs them in one dispatch (phase 3 of `selftest/mesh_control.comp`). The replay's statistics line `task/mesh fallback per frame` counts the draws by kind, their batches and the dispatches
 DM_VK_MESH_GUEST_BAR	diagnostic	`0` (Android, live, default 1) records only the fallback's own buffer barrier after a task/mesh fallback compute batch that writes guest memory, as before, instead of a full barrier in its place (bisection only: with `DM_VK_RP_SCOPE` on those writes are then never published; docs/reference/rendering.md, "Pass-end barriers scoped to the pass's writes on the Vulkan replay")
-DM_VK_MESH_IND	diagnostic	
+DM_VK_MESH_IND	diagnostic	`0` (Android, default 1) with native mesh shading, no look-ahead before a render pass that converts the indirect mesh draw records it meets into `{count, 1, 1}` (`vka_exec.c` `mdx_before_draw`)
 DM_VK_MESH_IND_DIRECT	switch	`0` (Android, live, default 1) the task/mesh fallback copies every indirect draw's 8-byte record into scratch between two full barriers, as before; with 1 a record at an offset the storage-buffer alignment allows is bound where it is (no copy, one full barrier fewer): Ocarina of Time's Kokiri Forest has 37 such draws a frame
-DM_VK_MESH_SELFTEST	diagnostic	
+DM_VK_MESH_LEARN	diagnostic	`0` (Android, default 1) the task/mesh fallback covers 65535 groups for draws whose count it does not know, instead of the count learned from earlier reports of the same shader pair (`vka_mesh.inc`)
+DM_VK_MESH_LOG	diagnostic	`1` (Android, off) logs the task/mesh fallback's payload block resizes and each completed emulated draw's tasks, generated mesh groups and flags (`vka_mesh.inc`)
+DM_VK_MESH_PAYLOAD_FIT	diagnostic	`0` (Android, default 1) the task/mesh fallback's payload buffer is sized for 65535 tasks instead of the draw's count (`vka_mesh.inc`)
+DM_VK_MESH_PAYLOAD_IDLE	diagnostic	`=<frames>` (Android, default 1200; 0 never) the task/mesh fallback's payload block shrinks back to its minimum after this many frames without a draw needing over a quarter of it (`vka_mesh.inc`)
+DM_VK_MESH_REPORT_COPY	diagnostic	`0` (Android, default 1) the task/mesh fallback's report is read late from the scratch span, the old behaviour, instead of copied into a report slot (the scratch block may be reused first: the field crash in `mesh_report`; `vka_mesh.inc`)
+DM_VK_MESH_SELFTEST	test	When set, the Vulkan selftest (`NXHOST_VK_SELFTEST`) also runs the task/mesh emulation test, which needs `DM_VK_MESH=0` (`vka_selftest.c`, `vka_mesh_selftest.inc`)
+DM_VK_MESH_TEST_REPEATS	test	`=<n>` (default 1, at most 32) how many times `DM_VK_MESH_SELFTEST` runs its five tests (`vka_mesh_selftest.inc`)
+DM_VK_MESH_TRACE_GLOBAL	diagnostic	`1` (Android, off) the task/mesh fallback's report is copied after the batches and logs the raw misses of global memory reads with the first guest address (`vka_mesh.inc`)
+DM_VK_MESH_TRACE_MS	diagnostic	`1` (Android, off) the task/mesh fallback's mesh shaders count their unresolved reads; logged per mesh shader with the first guest address, with a host barrier after each emulated draw (`vka_mesh.inc`)
 DM_VK_NANSCAN	diagnostic	`1` / `2` (Android, restart, needs push descriptors) after every render pass scans the float colour attachments for NaN / infinite texels and logs the passes with any (frame, attachment, shaders); `2` also splits passes to find the draw (`DM_VK_NANSCAN_STEP`, `_DRAWS`, `_SERIAL`); not for play
+DM_VK_NANSCAN_BIG	diagnostic	`=<value>` with `DM_VK_NANSCAN`, a finite texel whose magnitude passes it counts with the infinite ones (blown-out HDR values; `vka_nanscan.c`)
 DM_VK_NANSCAN_DRAWS	diagnostic	`=<from>-<to>` (Android, restart) with `DM_VK_NANSCAN=2`, split only the game's passes whose index is in that range (default all)
 DM_VK_NANSCAN_DUMP	diagnostic	`=<format>x<width>` (Android, live: read at use) with `DM_VK_NANSCAN`, writes level 0 of ASTC textures of that format (hex) and width to `DM_TEMP` (`nan-<serial>-<format>-<w>x<h>.blk`, at most 64); set at all, also dumps the ASTC textures a NaN pass's draws sample
 DM_VK_NANSCAN_FS	diagnostic	`=<key>` (Android, restart) with `DM_VK_NANSCAN`, a fragment shader key (hex) whose draw, once a frame, has its inputs scanned for NaN / infinite texels
+DM_VK_NANSCAN_LINES	diagnostic	`=<n>` (Android, default 200) the most `NaN scan:` lines `DM_VK_NANSCAN` logs (`vka_nanscan.c`)
+DM_VK_NANSCAN_MINW	diagnostic	`=<pixels>` (Android, default 0) `DM_VK_NANSCAN` skips targets narrower than this (small ones that hold large values by design fill the log; `vka_nanscan.c`)
 DM_VK_NANSCAN_SERIAL	diagnostic	`=<serial>` (Android, restart) with `DM_VK_NANSCAN=2`, split only passes into the image of that texture serial (default any)
 DM_VK_NANSCAN_STEP	diagnostic	`=<n>` (Android, restart, default 64) with `DM_VK_NANSCAN=2`, the pass is ended and scanned after every n draws
 DM_VK_NDSR	switch	`net` (Android, live; the default) | `fsr` | `bilinear`: agl's NDSR upscaler network runs, or our own FSR 1 EASU (or the bilinear A/B kernel) runs in its dispatch slot (vka_ndsr.c; a workaround with a quality loss, opt-in)
@@ -456,73 +479,69 @@ DM_VK_NDSR_INPUT	switch	`linear` (Android, live; the default) | `sqrt`: with `DM
 DM_VK_NDSR_LOG	diagnostic	`1` (Android, live) with `DM_VK_NDSR`, logs the network's push bank once per input and output size
 DM_VK_NDSR_MAP	diagnostic	`full` (Android, live; the default) | `push`: with `DM_VK_NDSR`, the whole input onto the whole output, or the mapping of agl's push bank (experimental)
 DM_VK_OCCLUSION	switch	`0` (Android, read once: at the first samples-passed reset or report, on) every samples-passed report writes 1 instead of the count of the Vulkan occlusion queries begun after the game's samples-passed reset (the constant before 2026-11-07; the A/B switch)
+DM_VK_OQ_BATCH	switch	`0` (Android, read once with the occlusion query pool, default 1) reads and resets each samples-passed report's queries on their own, as before, instead of reading a completed submission's queries in a few wide reads and resetting them once after its last report (results identical, except after a failed wide read, where a query read again on its own gives its count instead of 1; the A/B switch; docs/reference/rendering.md, "Render-condition lookups and occlusion readbacks by list on the Vulkan replay")
 DM_VK_OQ_PRECISE	diagnostic	`0` (Android, read once with the occlusion query pool, default 1) begins the occlusion queries without VK_QUERY_CONTROL_PRECISE_BIT (a result is then only zero or not zero). An A/B of what precise counting costs: none measured on the Adreno 830 (Ocarina of Time by the scarecrow, 2026-11-15: 17.2 against 17.0 fps)
 DM_VK_OQ_REUSE	switch	`<n>` (Android, read once with the first samples-passed reset, default 1: every report counted every frame; off by default since 2026-11-15 19:00, when 3 drew Ocarina of Time's light effects over Link) counts a visible object's samples-passed report only every n frames once it has a count (a hidden one every frame: DM_VK_OQ_REUSE_ZERO); in between its draws begin no occlusion query and the report writes the object's last count. The object is named by its first draw's content (shaders, counts, index and vertex buffer, its vertex stage's uniform bytes), since the game's report addresses move every frame; a key not seen before, or twice in one of the last 8 frames, is counted every frame. Visibility up to n - 1 frames late on top of the replay's delay. For games that query every object every frame on a tiler (Ocarina of Time: ~2,300 reports a frame)
-DM_VK_OQ_REUSE_ZERO	diagnostic	`1` (Android, with DM_VK_OQ_REUSE above 1) repeats an object's last count also when it was 0. By default a hidden object is counted every frame, so a repeated answer is never "hidden" for an object that came into view; with zeros repeated, ~2 % of the repeated answers were hidden while visible with the camera turning (Ocarina of Time by the scarecrow, 2026-11-15)
 DM_VK_OQ_REUSE_CHECK	diagnostic	`1` (Android, with DM_VK_OQ_REUSE above 1) counts the reused reports all the same and writes the repeated count, so the occlusion statistics line says per frame how many reused reports answered hidden while the real count was visible (an object drawn late) and visible while it was hidden. Costs what the reuse saves; for checking a reuse period
+DM_VK_OQ_REUSE_ZERO	diagnostic	`1` (Android, with DM_VK_OQ_REUSE above 1) repeats an object's last count also when it was 0. By default a hidden object is counted every frame, so a repeated answer is never "hidden" for an object that came into view; with zeros repeated, ~2 % of the repeated answers were hidden while visible with the camera turning (Ocarina of Time by the scarecrow, 2026-11-15)
+DM_VK_OQ_SPLIT_PASS	switch	`1` (Android, default 0) on Qualcomm's driver the render pass is ended after an occlusion report whose query was active in it, so the next query begins in a new pass (891.x miscounts consecutive queries in one pass: Ocarina of Time's vanished cave walls); `2` on any driver (`vka_exec.c`, upstream 881cf986)
 DM_VK_OQ_TRACE	diagnostic	`<n>` (Android) logs the first DM_VK_OQ_TRACE_N (default 48) counted samples-passed reports of 4 frames in a row, every n frames with counted reports: place in the frame, report address, queries, count and the first draw's content keys. For finding what identifies an object's report across frames
 DM_VK_OQ_TRACE_N	diagnostic	`<n>` (Android, with DM_VK_OQ_TRACE) how many reports of each traced frame are logged (default 48)
-DM_VK_OQ_SPLIT_PASS	switch	
-DM_VK_OQ_BATCH	switch	`0` (Android, read once with the occlusion query pool, default 1) reads and resets each samples-passed report's queries on their own, as before, instead of reading a completed submission's queries in a few wide reads and resetting them once after its last report (results identical, except after a failed wide read, where a query read again on its own gives its count instead of 1; the A/B switch; docs/reference/rendering.md, "Render-condition lookups and occlusion readbacks by list on the Vulkan replay")
 DM_VK_PASS_CLEARS	switch	`0` (Android, live: the next submission, 1) clears of the bound targets are made outside the render pass instead of inside the pass over them (each such clear then ends the pass)
 DM_VK_PASS_KEEP	switch	`0` (Android, live: the next submission, 1) a render target change ends the open pass at once instead of only when the next draw's targets differ
 DM_VK_PCACHE	path	`=<file>` (Android, restart) the Vulkan pipeline cache file; `0` no file; default `$DM_TEMP/vk_pipelines-fp0.bin` (`vk_pipelines-<driver>-fp0.bin` with a custom driver; `-fp0` is the cache's generation, `VKA_PCACHE_GEN`: a default file of an earlier one is removed at start; `-fp0-pfb.bin` while the texture pool reads are reported, `DM_VK_POOL_FB`: three-set pipeline layouts, `VKA_PCACHE_PFB`, the two-set file left for `DM_VK_POOL_FB=0`), `nxreplay`'s own `vk_pipelines-fp0[-pfb].bin` beside it; a file named here is used as it is (one written before 2026-11-07 holds pipelines compiled with the game's FPCR: delete it); none with `DM_VK_GUEST_FPCR=1`; the replayer does not take it from a capture
-DM_VK_PCACHE_KEEP	diagnostic	
-DM_VK_PCACHE_MIN_S	diagnostic	
-DM_VK_PCACHE_QUIET_S	diagnostic	
+DM_VK_PCACHE_KEEP	diagnostic	`=<percent>` (Android, restart, default 50; 0 = never) a pipeline cache file stamped with another shader library is read when its shaders unchanged in this library outnumber the stale ones by this percentage; otherwise the run starts empty (`vka_pso.c` `vka_pck_decide`)
+DM_VK_PCACHE_MIN_S	diagnostic	`=<s>` (Android, default 120) the shortest time between two pipeline cache saves, raising `DM_VK_PCACHE_SAVE_S` when it is lower (`vka_pso.c` `vka_pso_save`)
+DM_VK_PCACHE_QUIET_S	diagnostic	`=<s>` (Android, default 10; 0 off) a pipeline cache save waits until no pipeline was compiled for this long, at most four save periods (`vka_pso.c` `vka_pso_save`)
 DM_VK_PCACHE_SAVE_S	switch	`=<s>` (Android, live, 20; at least 1) the pipeline cache file is saved at most every s seconds while new pipelines are made (the save at the end of the run and at suspend is forced)
-DM_VK_PCACHE_STAMP	diagnostic	
-DM_VK_PFB_SPV_DIR	test	
-DM_VK_BC_DECODE	diagnostic	`1` (Android, restart) BC textures are decoded on the CPU into uncompressed images on a GPU that has BC too, as on one without (`vka_bcdec.h`), to run that path on an Adreno
-DM_VK_BUILDING	diagnostic	`0` (Android, on) no record of the pipelines being made that survives a kill from outside (`<cache file>.building`, `vka_pso.c` `bb_open`): the next start then knows nothing of them
-DM_VK_AHB_ALIAS	diagnostic	`0` (Android, restart, on) no hardware buffer alias of guest memory on a driver without placed maps (`vka_ahb_alias.h`): the GPU then sees no memory pool there
-DM_VK_ALIAS	diagnostic	`fd` / `ahb` (Android, restart) leave placed maps unused and run on the exported alias or the hardware buffer alias, to test those paths on a phone that has placed maps; `placed`: placed maps again after the host switched to the alias by itself, the count of `DM_VK_PLACED_KILLS` cleared; `prefer` (the launcher's default, its Graphics setting GPU memory sharing): an alias when the driver has one, the exported one first, placed maps when it has none
-DM_VK_POOL_SLOTS	diagnostic	`<n>` (Android, restart) the texture pool's table no longer than n, as on a device with lower update-after-bind limits (a Mali-G720: 499680); the modules' pool arrays are fitted to it
-DM_VK_PLACED_KILLS	switch	`=<n>` (Android, restart, default 2) the runs of a game in a row, on one driver, ended killed by signal 9 in the foreground on placed guest memory after which the host takes the exported alias in place of placed maps (`vka_placedkill.h`); `0`: never, and the run is not counted (docs/reference/memory.md, "A game killed from outside on placed guest memory")
+DM_VK_PCACHE_STAMP	diagnostic	`0` (Android, restart, default 1) no `<cache file>.lib` stamp: the pipeline cache file is read whatever shader library made it, as before (`vka_pso.c`)
+DM_VK_PFB_SPV_DIR	test	`=<folder of .spv modules>` the SPIR-V patch test rewrites each module there that reads the texture pool for the pool read reports and validates it (`t_android_spvpatch.c`)
 DM_VK_PIPE_STATS	diagnostic	`1` (Android, restart only) enables VK_KHR_pipeline_executable_properties where the driver has it and logs the driver's statistics of each compute pipeline it makes (instructions, registers, spills, shared memory, ALU occupancy: `pipeline stats:` lines, vka_pso.c pipe_stats). A pipeline asked for its statistics may be compiled again rather than taken from the cache, so the first run stutters
 DM_VK_PLACED	diagnostic	`0` (Android, restart, on) memory pools stay anonymous memory instead of placed Vulkan memory, so the GPU sees none (draws then default off, `DM_VK_DRAW`)
-DM_VK_PLACED_PROBE	diagnostic	
+DM_VK_PLACED_KILLS	switch	`=<n>` (Android, restart, default 2) the runs of a game in a row, on one driver, ended killed by signal 9 in the foreground on placed guest memory after which the host takes the exported alias in place of placed maps (`vka_placedkill.h`); `0`: never, and the run is not counted (docs/reference/memory.md, "A game killed from outside on placed guest memory")
+DM_VK_PLACED_PROBE	diagnostic	`0` (Android) no try of one placed map on a driver that has `vkMapMemory2` but does not advertise placed maps (Qualcomm 512.863 on the Adreno 740); by default placed maps are used when it lands (`vka_dev.c`, `vka_readiness.c`)
 DM_VK_PLACE_GRANULE_MB	diagnostic	`=<MB>` (Android, read once, 16) the part size of a memory pool placed by parts (`DM_VK_PLACE_PART_MB`): only the parts the GPU is given an address in become placed memory ([memory.md](reference/memory.md))
 DM_VK_PLACE_LAZY	switch	`0` (Android, read once, on) every memory pool is placed when it is made, instead of when the GPU is first given an address in it ([memory.md](reference/memory.md))
 DM_VK_PLACE_NOW_MB	diagnostic	`=<n>` (Android, live: once per value) places now every pool of at most n MiB not placed yet
 DM_VK_PLACE_PART_MB	diagnostic	`=<MB>` (Android, read once, 1024; `0` whole pools, as before) memory pools of at least this size are placed by parts of `DM_VK_PLACE_GRANULE_MB` instead of whole ([memory.md](reference/memory.md))
-DM_VK_PLACE_SHADER_POOLS	diagnostic	
+DM_VK_PLACE_SHADER_POOLS	diagnostic	`1` / `0` (default 0 on Android, 1 elsewhere) shader-code pools are placed for the program addresses the game takes, as before, or only for a command or texture that hands the GPU data in them (`hle_nvn.c`; `0` lets `DM_MEM_FILEBACK` back them with a file)
 DM_VK_PNG_ALPHA	diagnostic	`1` (Android, `nxreplay`, captures) keeps the alpha of RGBA8 / BGRA8 pictures written as PNG (otherwise opaque)
-DM_VK_POOL_FB	diagnostic	
-DM_VK_POOL_FB_BLIND_EAGER	diagnostic	
-DM_VK_POOL_FB_DEAD	diagnostic	
-DM_VK_POOL_FB_EARLY	diagnostic	
+DM_VK_POOL_FB	switch	`0` (Android, restart, default 1) the GPU does not report the texture IDs shaders read through the texture pool (a bitmap in a descriptor set): every registered texture's image is made and kept while its pool lives, as before; also picks the replayer's pipeline cache file name (`vka_tex.c`, `vka_replay.c`)
+DM_VK_POOL_FB_BLIND_EAGER	diagnostic	`0` (Android, live, default 1) keeps the texture pool read reports alone when a library module's pool reads cannot be reported, instead of making every registered texture's image again (a texture only that module reads then reads 0; `vka_tex.c` `vka_tex_pfb_blind`)
+DM_VK_POOL_FB_DEAD	diagnostic	`=<n>` (Android, live, default 600; 0 never) after n readbacks of submissions that read the texture pool without one texture ID in them, the driver is taken as not writing the bitmap and every registered texture's image is made and kept again (`vka_tex.c`)
+DM_VK_POOL_FB_EARLY	diagnostic	`0` (Android, restart, default 1) the shaders rewritten for the texture pool read reports do not ask for early fragment tests (`vka_tex.c` `vka_tex_pfb_flags`)
 DM_VK_POOL_LOG	diagnostic	`1` (Android, live: once) lists the memory pools not (wholly) placed yet
+DM_VK_POOL_SLOTS	diagnostic	`<n>` (Android, restart) the texture pool's table no longer than n, as on a device with lower update-after-bind limits (a Mali-G720: 499680); the modules' pool arrays are fitted to it
 DM_VK_POOL_SLOT_DEDUP	switch	`0` (Android, live, default 1) writes every dirty texture pool slot again, as before, instead of skipping a slot that already holds the same view with no image view destroyed since (docs/reference/rendering.md, "Texture pool slots written again unchanged on the Vulkan replay")
 DM_VK_PREFAULT	diagnostic	`0` (Android, restart, on) placed maps are not faulted in after placing; a diagnostic to measure whether the driver needs it
-DM_VK_PRESENT_NEAREST	diagnostic	
-DM_VK_PRESENT_PREWAIT	diagnostic	
+DM_VK_PRESENT_NEAREST	player	`1` (Android, live, 0) the picture is scaled to the window with nearest filtering instead of linear, in the blit and the rotated copy; the launcher's scaling mode Nearest neighbor sets it (`vka_present.c`, `GraphicsMode.java`)
+DM_VK_PRESENT_PREWAIT	diagnostic	`0` (Android, default 1) the present does not wait for the frame's timeline value before taking the queue lock, as before (Turnip on KGSL could block inside vkQueueSubmit with the lock held; `vka_present.c`); for A/B runs
 DM_VK_PRETRANSFORM	switch	`0` (Android, live: makes a new swapchain, 1) no pre-rotation: the compositor rotates the picture instead of it being drawn in the panel's own orientation
 DM_VK_PREWARM	switch	`=<n>` (Android, restart, 2; at most 4) threads that make the prewarm list's pipelines (`vk_pipelines.keys`, the keys of earlier runs) in the background at nice 10 when the first pipeline is made; `0` off. The replay tool sets it to 0
-DM_VK_PREWARM_CONCURRENCY	diagnostic	
+DM_VK_PREWARM_CONCURRENCY	diagnostic	`=<n>` (Android, 1 to 4; default 1 on Turnip, 2 elsewhere) how many prewarm pipeline builds run at once (`vka_pso.c` `warm_limit`)
 DM_VK_PREWARM_FILE	path	`=<file>` (Android, restart) the prewarm list's path; default `<DM_VK_PCACHE file>.keys`, else `$DM_TEMP/vk_pipelines.keys`, into which `$DM_TEMP/vk_pipelines.import.keys` (another phone's list, put there by Import shaders…: `android/SHADERS.md` "Shader zips") is merged at load and removed once saved; with this or `DM_VK_PCACHE` set no import file is read
-DM_VK_PREWARM_HEAVY_MS	diagnostic	
+DM_VK_PREWARM_HEAVY_MS	diagnostic	`=<ms>` (Android, default 1000; 0 off) a compile that runs this long marks its shader as long (remembered in the `.heavy` list), and while any build has run this long the background compiles wait (`vka_pso.c`)
 DM_VK_PREWARM_KEEP	switch	`=<n>` (Android, live: the next write, 16384; `0` no limit) the prewarm list keeps at most the newest n records when written; the oldest loaded keys (ones no recent run needed) go first
 DM_VK_PREWARM_MAX	switch	`=<n>` (Android, restart, 8192) the prewarm threads make at most n pipelines of the list
-DM_VK_PREWARM_MEM_MB	diagnostic	
-DM_VK_PREWARM_OVERLAP	diagnostic	
-DM_VK_PREWARM_SEED	diagnostic	
+DM_VK_PREWARM_MEM_MB	diagnostic	`=<MiB>` (Android, default 2048; 0 off) prewarming pauses while MemAvailable is below this (`vka_pso.c`)
+DM_VK_PREWARM_OVERLAP	diagnostic	`1` (Android, default 0) pipeline compiles are not gated: frame, asynchronous and prewarm builds run at once without the `DM_VK_PSO_SLOTS` limit (`vka_pso.c` `gate_enter`)
+DM_VK_PREWARM_SEED	diagnostic	`0` (Android, default 1) the profile's seed list (`vk_prewarm.bin`) is not added to this device's prewarm list (`vka_pso.c`)
 DM_VK_PREWARM_WHY	diagnostic	`=<n>` (Android, 64; `0` none): for the first n pipelines the frame path makes, a log line saying why the prewarm list did not have them (no record with their shaders, or the fields in which the nearest record differs)
 DM_VK_PROF	diagnostic	`1` (Android, live: the next submission, off) times the draw recording path's steps (resolve, layout, pipeline, sets, vertex buffers, draw; set writes and pushes) per draw and adds them to the replay statistics line
-DM_VK_PRUNE_DRY	diagnostic	
-DM_VK_PRUNE_RETIRED	diagnostic	
+DM_VK_PRUNE_DRY	diagnostic	`0` (Android, live, default 1) every 16 MiB of image growth scans the cache for eviction again, as before, even after a scan of the same frame found nothing to evict (`vka_tex.c`)
+DM_VK_PRUNE_RETIRED	diagnostic	`1` (Android, live, default 0) the image cache prune counts retired images still waiting for their fence, as before 2026-11-12 (`vka_tex.c`)
 DM_VK_PSO_ASYNC	switch	`=<n>` (Android, restart, 0; at most 4) threads that make the graphics pipelines the frame path misses (a cache-only try still runs on the frame path), their draws skipped until made, so a new pipeline costs no frame wait but its draws are missing meanwhile; `0` off: the frame waits for it. Compute and mesh pipelines stay on the frame path. A stopgap (upstream Banana Native PR #12)
-DM_VK_PSO_FAIR_MS	diagnostic	
-DM_VK_PSO_FRAME_APART	diagnostic	
-DM_VK_PSO_ORDER	diagnostic	
-DM_VK_PSO_SLOTS	diagnostic	
+DM_VK_PSO_FAIR_MS	diagnostic	`=<ms>` (Android, default 2000; 0 never) with `DM_VK_PSO_ORDER`, the oldest asynchronous pipeline job takes its turn once it has waited this long and the cheapest picks have had at least as much compile time (`vka_pso.c`, `vka_psogate.h`)
+DM_VK_PSO_FRAME_APART	diagnostic	`0` (Android, restart; default 1 unless `DM_VK_ASYNC_DISCARD=1`) the frame's pipeline compiles share the background compiles' slots as upstream does, instead of not waiting for the speculative ones (`vka_pso.c` `gate_apart`)
+DM_VK_PSO_ORDER	diagnostic	`0` (Android, default 1) asynchronous pipeline jobs are taken in arrival order instead of least predicted cost first with the oldest in turn (`DM_VK_PSO_FAIR_MS`; `vka_pso.c`)
+DM_VK_PSO_SLOTS	diagnostic	`=<n>` (Android; default 1 on Turnip, 4 elsewhere) the most background pipeline compiles at once; fewer run when MemAvailable or the memory maps are short (`vka_pso.c`, `vka_psogate.h`)
 DM_VK_PUSH_DEDUP	switch	`0` (Android, live, 1) a push descriptor update equal to the last one of its bind point is pushed again instead of skipped
 DM_VK_PUSH_DELTA	diagnostic	`1` (Android, live, off) push descriptor updates write only the descriptors that changed since the last push of the same set; off until phone-checked (a driver that mishandles incremental pushes shows wrong textures)
 DM_VK_RC_LOG	diagnostic	`=<n>` (Android, live: once per value; `nxreplay` too) logs the next n conditional render evaluations: the report addresses, whether each is known, the values and the decision
 DM_VK_READWATCH	diagnostic	`=<KiB>` (Android, live: once per value; -1 any size) makes the storage of every GPU-written image (at most that size) inaccessible and logs the CPU's first accesses to each
-DM_VK_REPLAY_RAW_NEED	diagnostic	
+DM_VK_REPLAY_RAW_NEED	diagnostic	`=<addr>[,<addr>...]` the Vulkan replayer places the pool holding each guest address explicitly, for legacy captures whose raw pointers inside buffers name no command operand (`vka_replay.c`)
 DM_VK_RETRACK	diagnostic	`1` / `2` (Android, live: once per value) uploads again every tracked image (2: and every image filled once) from its storage, 32 a submission
-DM_VK_ROBUST_DIAG	diagnostic	
+DM_VK_ROBUST_DIAG	diagnostic	`1` (Android, default 0) enables `robustBufferAccess` when the device has it, an A/B for descriptor-range violations; never set by a game profile (`vka_dev.c`)
 DM_VK_ROWS	switch	`0` (Android, live: the next re-upload, 1) a tracked linear 2D texture whose storage the CPU wrote is re-uploaded whole instead of only the rows between the written bytes
 DM_VK_RP_SCOPE	switch	`0` (Android, live, default 1) ends every draw pass with a full barrier, as before, instead of one scoped to the attachment writes when no draw of the pass wrote memory (docs/reference/rendering.md, "Pass-end barriers scoped to the pass's writes on the Vulkan replay")
 DM_VK_RP_SCOPE_NARROW	switch	`0` (Android, live, default 1) takes the attachment-scoped pass end for other work in vka_gbar.c, so the first game barrier after it is recorded full instead of merged or narrowed (an A/B only: off, the scoped ends cost barriers between dispatches) (docs/reference/rendering.md, "Pass-end barriers scoped to the pass's writes on the Vulkan replay")
@@ -530,8 +549,8 @@ DM_VK_SHARED_SPILL_MB	switch	`=<MiB>` (Android, default 16): the shared memory s
 DM_VK_SHLIB	path	`=<file>` (Android, restart) the Vulkan shader library to load; default `<module dir>/shaders/<Vulkan chain dir>/<library file>`; the replayer does not take it from a capture; `t_android_shlib` reads it for its real-library test
 DM_VK_SHLIB_ALL	test	set: `t_android_shlib` checks every entry of the real library (`DM_VK_SHLIB`) instead of a sample (every 97th plus geometry, compute, task, mesh)
 DM_VK_SHLIB_CHECK	diagnostic	`1` (Android, restart) when the shader library loads, builds every shader module and compute pipeline of it and logs a `shader library check:` line (made, refused, without a layout, failed)
-DM_VK_SHLIB_CHECK_KEY	diagnostic	
-DM_VK_SHPOOL_LOG	diagnostic	
+DM_VK_SHLIB_CHECK_KEY	diagnostic	`=<key>` (hex) the shader library check (`DM_VK_SHLIB_CHECK`, the selftest's `DM_VK_SHLIB`) makes only that shader (`vka_shader.c` `vka_shlib_check_all`)
+DM_VK_SHPOOL_LOG	diagnostic	`1` logs every use of a shader-code pool once per pool and kind (`hle_nvn.c`)
 DM_VK_SHUFFLE_LDS	switch	`0` / `1` (Android, restart; default 1 on Turnip when its shared memory is at least `DMSH_VK_SHARED_MAX`, 0 elsewhere) compute shaders take their `DMSH_VK_MOD_SHUFFLE_LDS` module (32-bit subgroup shuffles through workgroup memory), also under an image retype, where the library has one; `0` the shuffle instruction ([shaders.md](reference/shaders.md#ampere-hmma-and-warp-shuffles-of-agls-upscaler-on-adreno))
 DM_VK_SKIP_LOG	diagnostic	`1` (Android, live: read at use) logs each skipped draw or dispatch with the line of `vka_draw.c` that skipped it
 DM_VK_SPARSE_DENSE_MB	switch	`=<MiB>` (Android, live: images made from now on, default 128; `0` no cap): a sampled sparse-pool texture with no sparse residency image (its format has none, as no block-compressed format on the Adreno 840) is a dense image from the finest level whose levels take at most this much; its finer levels are left out (`vka_tex.c` `dense_floor`)
@@ -540,10 +559,10 @@ DM_VK_SPARSE_RES	switch	`=0` (Android, on when the device has sparse residency f
 DM_VK_SPARSE_RES_MB	switch	`=<MiB>` (Android, default 32): the size from which a sampled sparse-pool texture's image (from its base level) is a sparse residency image; smaller ones stay dense
 DM_VK_SPV_DIR	test	`=<dir>` `t_android_spvpatch` runs the vertex input retype rewrite on every `.spv` module there, and the storage image retype on each one's float storage images of format Unknown, and checks them
 DM_VK_SPV_OVERRIDE	diagnostic	`=<folder>` (Android, restart) shader modules from `<folder>/<key>_<variant>.spv` replace the library's
-DM_VK_STATIC_SPLIT	diagnostic	
+DM_VK_STATIC_SPLIT	diagnostic	`0` (Android, default 1) a static buffer request over 4 MiB replaces the shared 4 MiB block, as before (the next small request opens a fresh one), instead of getting a block of its own (`vka_shader.c` `vka_static`)
 DM_VK_STATS	diagnostic	`0` (Android, live, 1) no `replay up to frame` statistics lines every 300 frames; the replayer sets it to 0
 DM_VK_STORAGE_FIRST_USE	switch	`=0` (Android, Switch 2 games): an uncompressed texture first used as a sampled texture ID is not taken from its storage (cleared instead, the earlier behaviour); default on (`vka_tex.c` `nvn2_sampled_content`)
-DM_VK_STRETCH	diagnostic	
+DM_VK_STRETCH	player	`1` (Android, live, 0) the picture is stretched to the whole window instead of scaled to fit with bars; the launcher's Stretch to screen sets it (`vka_present.c`, `GameGraphics.java`)
 DM_VK_SUBGROUP_GS	switch	`0` / `1` (Android, restart) `0`: the geometry stage runs one-lane subgroups; `1`: as the device reports; default 0 on Turnip (which computes subgroup operations wrong there), 1 on other drivers
 DM_VK_SUBGROUP_PIN	switch	`=<stage mask>` (Android, restart, default 1 = every stage that can) the stages (`VkShaderStageFlags`) whose subgroup size is pinned to the shader library's; `0` none
 DM_VK_SUBMIT_WAIT	diagnostic	`1` / `2` (Android, live: read at use) the game's submit returns once the worker has recorded it (1) or once the GPU has run it (2)
@@ -555,7 +574,7 @@ DM_VK_TEXSTAT_FS	diagnostic	`=<key>` (Android, live: once per value; `nxreplay` 
 DM_VK_TEXSTAT_ZB	diagnostic	`=<n>` (Android, live: once per value) every block-compressed texture sampled in the next frame, its all-zero blocks counted (an all-zero ASTC block decodes as NaN on the Adreno)
 DM_VK_TEX_MEMO	switch	`0` (Android, live, 1) the recording thread looks every texture and sampler ID up again instead of reusing its memo of the last view for that ID
 DM_VK_TEX_TRACK	diagnostic	`0` (Android, live: textures made from then on, 1) textures whose storage the CPU may write are filled once instead of tracked and re-uploaded when their pages change
-DM_VK_TL_POLL	diagnostic	
+DM_VK_TL_POLL	diagnostic	`1` (Android, live, default 0) a host wait for the timeline reads the counter every 0.25 ms instead of blocking in vkWaitSemaphores (does a blocking wait hold submissions back? Turnip v32 on KGSL; `vka_dev.c` `vka_tl_wait`)
 DM_VK_TS_CARRY	switch	`0` (Android, live, default 1) a timestamp report whose submission's effects are carried to a later signal takes the completion time, as before 2026-11-13, instead of its slot's saved segment time (upstream Banana Native v0.3.14; [the entry](reference/frame-rate.md#timestamp-reports-carried-to-a-later-signal-read-the-completion-time-on-the-vulkan-replay))
 DM_VK_TS_LOG	diagnostic	`=<n>` (Android, read once, off) logs what the game reads from the timestamp reports of the next n submissions that have them: `ts log:` lines with the completion time, each report's time against it, its slot and use, and `completion` for one with no segment time
 DM_VK_UBWC	switch	`0` (Android, live: images made from then on, 1) every colour image is MUTABLE_FORMAT without a format list, as before (any view format; no UBWC compression on Adreno)
@@ -564,7 +583,7 @@ DM_VK_UB_CPU_OVERLAY	switch	`0` (Android, live, default 1) with `DM_VK_UB_DEFER`
 DM_VK_UB_DEFER	switch	`1` (Android, live, default 0) keeps an inline uniform update that arrives inside an open render pass until the pass ends instead of ending the pass; the pass's later draws read a shadow of the new bytes, and a draw that could read them any other way ends the pass first (docs/reference/rendering.md, "Inline uniform updates on the Vulkan replay"; default on after the phone A/B)
 DM_VK_UB_DEFER_IDX	switch	`0` (Android, live, default 1) with `DM_VK_UB_DEFER`, any indexed or indirect draw ends the pass over kept updates (Erick's rule) instead of only one whose index, indirect or count range overlaps them
 DM_VK_UB_SCOPED	switch	`0` (Android, live, default 1) a full barrier after the replay's inline uniform copies, as before, instead of a TRANSFER_WRITE to ALL_COMMANDS one
-DM_VK_UNPLACE_MREMAP	diagnostic	
+DM_VK_UNPLACE_MREMAP	diagnostic	`1` (Android, default 0) pool memory given back is moved over its range with mremap, as before, instead of copied into a fixed anonymous map (moved pages never merge with their neighbours; `vka_mem.c` `unplace`)
 DM_VK_UNPLACE_REMAP	diagnostic	`1` (Android, experiment, off): giving back a memory pool maps its Vulkan memory again where the driver likes before moving the anonymous pages in, and frees it after them, to find out whether the Adreno driver's vkFreeMemory then leaves the guest range alone (no hole between the free and the move); a `[RED]` line says when it does not (the pool's bytes are then lost). Needs a phone test before any default
 DM_VK_UPLOAD_BATCH	switch	`=0` (Android, live, default 1) records a new image's first content into the submission being recorded instead of an upload batch whose staging retires on its own completion (docs/reference/memory.md)
 DM_VK_UPLOAD_BATCH_MB	switch	`=<MiB>` (Android, live, 64) the staging an upload batch takes before it goes to the queue
@@ -572,6 +591,8 @@ DM_VK_UPLOAD_INFLIGHT_MB	switch	`=<MiB>` (Android, live, 256) the batch staging 
 DM_VK_UPLOAD_MT	switch	`=<n>` (Android, live, 3) helper threads (`vk-upload`) deswizzle big block-linear texture uploads with the replay thread, in runs of block rows; `0` the replay thread only
 DM_VK_UPLOAD_MT_MIN	switch	`=<bytes>` (Android, live, 262144) the smallest texture upload `DM_VK_UPLOAD_MT` spreads over the helper threads
 DM_VK_VALIDATE	diagnostic	`1` (Android, restart) turns on the Khronos validation layer when it is installed
+DM_VK_VALIDATE_LIBRARY	path	`=<file>.so` (Android) a Vulkan validation layer library loaded explicitly (dlopen) and put in front of the driver; its messages go to stderr as `[vk-validation]` lines (`vka_validation.inc`)
+DM_VK_VALIDATE_PROBE	diagnostic	When set with `DM_VK_VALIDATE_LIBRARY`, makes one invalid buffer to check that the layer intercepts, and the layer's error messages make the failing call return an error (`vka_validation.inc`)
 DM_VK_VB_FILTER	switch	(Android, live, on) vertex buffers (consecutive slots in one call), the vertex input state and the index buffer are bound only when they change in the command buffer; `0` every slot every draw
 DM_VK_VIEW_LEARN	switch	(Android, on) a texture of another format over a live image's memory, or a view in a format the image's list lacks, is learned (format, other format, size) and kept in `$DM_TEMP/vk_view_formats.txt`; images of that format and size made from then on take the other format in their format list (`MUTABLE_FORMAT`, no UBWC for them) and are shared. Until then the texture gets its own image. `0` learns and reads nothing (such textures always get their own image)
 DM_VK_WORKER	switch	`0` (Android, restart, on) submissions and presents are replayed inline on the game's thread instead of on the replay worker thread
@@ -581,7 +602,7 @@ DM_VK_ZEROLOG	diagnostic	`=<n>` (Android): the first n textures made as zero ima
 DM_VK_ZERO_DISPATCH	switch	`0` (Android, live, default 1) a direct dispatch with a zero or negative group count goes through the whole dispatch path (descriptors, pipeline bind and its full barrier) as before instead of recording nothing; it always takes that path while `DM_VK_GPUPROF` times a frame or `DM_VK_NANSCAN` is on (`docs/reference/rendering.md` "Zero-grid dispatches and zero-count draws")
 DM_VK_ZERO_DRAW	switch	`0` (Android, live, default 1) a direct draw with a count of 0 goes through the whole draw path (pipeline, descriptors, pass) as before instead of recording nothing; indirect, indirect-count and the emulated mesh path's own draws always take it, and so does every draw while `DM_VK_GPUPROF` times a frame
 DM_VK_ZSHARE	switch	`0` (Android, live: images made from then on, on) every image has memory of its own, as before; on, a large image whose content is the GPU's and that nothing has written yet (dense, single-sampled, not 3D, uncompressed, not linear or a window texture) aliases one zeroed allocation per identical create info and gets memory of its own right before its first write (`vka_tex.c` "Zero-shared images"; the ctl stats' `image memory:` line counts them)
-DM_VK_ZSHARE_MAX_MB	diagnostic	
+DM_VK_ZSHARE_MAX_MB	diagnostic	`=<MiB>` (Android; default none on Turnip, 32 elsewhere; 0 none) the largest color image that may alias zeroed memory (zero-shared images, `DM_VK_ZSHARE`); depth and stencil stay at 32 MiB (`vka_tex.c`)
 DM_VK_ZSHARE_MB	switch	`=<MiB>` (Android, live, 4) the smallest storage of an image `DM_VK_ZSHARE` shares; `0` turns it off
 DM_VSYNC_HZ	switch	`=<Hz>`: rate at which a host thread fires the vi vsync event when the display link does not drive it (default 60)
 DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) and turns on the stall watchdog; off unless set

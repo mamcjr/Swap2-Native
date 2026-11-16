@@ -456,13 +456,13 @@ static void shp_add(const pool_t *o, uint64_t gen) {   // nvnMemoryPoolInitializ
         return; }
     uint64_t lo = (uint64_t)(uintptr_t)o->mem; int i = shp_lower(lo, n);
     // (shp_find needs pools that do not overlap: one over a pool in the table stays out of it and is placed as before)
-    if ((i > 0 && atomic_load_explicit(&g_shp_hi[i - 1], memory_order_relaxed) > lo) || (i < n && atomic_load_explicit(&g_shp_lo[i], memory_order_relaxed) < lo + o->size)) {
+    if ((i > 0 && atomic_load_explicit(&g_shp_hi[i - 1], memory_order_relaxed) > lo) || (i < n && atomic_load_explicit(&g_shp_lo[i], memory_order_relaxed) < lo + o->size)) {   // NOLINT(clang-analyzer-security.ArrayBound): n is the table's size, below SHP_MAX here (returned above), and shp_lower gives 0..n; the analyzer takes the atomic n as any int
         shp_wend(); static int told; int first = !told++; pthread_mutex_unlock(&g_shp_mu);
         if (first) LOG("[nvn] shader-code pools: pool %p+%#llx overlaps one in the table: it and later such pools are placed as before (not in the table)", (const void *)o->mem, (unsigned long long)o->size);
         return; }
-    for (int k = n; k > i; k--) { atomic_store_explicit(&g_shp_lo[k], atomic_load_explicit(&g_shp_lo[k - 1], memory_order_relaxed), memory_order_relaxed);
+    for (int k = n; k > i; k--) { atomic_store_explicit(&g_shp_lo[k], atomic_load_explicit(&g_shp_lo[k - 1], memory_order_relaxed), memory_order_relaxed);   // NOLINT(clang-analyzer-security.ArrayBound): n is the table's size, below SHP_MAX here (returned above), and shp_lower gives 0..n; the analyzer takes the atomic n as any int
         atomic_store_explicit(&g_shp_hi[k], atomic_load_explicit(&g_shp_hi[k - 1], memory_order_relaxed), memory_order_relaxed); g_shp[k] = g_shp[k - 1]; }
-    atomic_store_explicit(&g_shp_lo[i], lo, memory_order_relaxed); atomic_store_explicit(&g_shp_hi[i], lo + o->size, memory_order_relaxed);
+    atomic_store_explicit(&g_shp_lo[i], lo, memory_order_relaxed); atomic_store_explicit(&g_shp_hi[i], lo + o->size, memory_order_relaxed);   // NOLINT(clang-analyzer-security.ArrayBound): n is the table's size, below SHP_MAX here (returned above), and shp_lower gives 0..n; the analyzer takes the atomic n as any int
     g_shp[i] = (shp_info){o, gen, o->size, 0, 0, (uint32_t)o->flags, 0, 0};
     atomic_store_explicit(&g_shp_n, n + 1, memory_order_relaxed);
     shp_wend(); pthread_mutex_unlock(&g_shp_mu);

@@ -48,7 +48,7 @@ if hasattr(os, 'pread'): pread = os.pread
 else:
     import threading
     _seek_lock = threading.Lock()
-    def pread(fd, n, offset):
+    def pread(fd, n, offset, /):   # (positional only, as os.pread)
         out = []
         with _seek_lock:
             os.lseek(fd, offset, os.SEEK_SET)

@@ -253,7 +253,7 @@ class Inputs(Base):
 class Redaction(Base):
     def test_paths_and_keys(self):
         lines = start() + [f'title_key = {KEY}', f'master_key_00 : {KEY}{KEY}', f'[dm] [RED] something odd with {KEY}{KEY} in it',
-                           '[dm] [RED] cannot read /Us' 'ers/somebody/Games/x and /home/other/y']
+                           '[dm] [RED] cannot read /Us' + 'ers/somebody/Games/x and /home/other/y']
         d = self.digest(lines, tail=40)
         text = L.render(d) + json.dumps(d)
         self.assertNotIn(KEY, text)

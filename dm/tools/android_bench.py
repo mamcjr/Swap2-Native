@@ -15,10 +15,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent.parent
 
 
-def adb(a, *cmd, check=True, binary=False, timeout=120):
+def adb_bytes(a, *cmd, check=True, timeout=120):
     r = subprocess.run(['adb', '-s', a.serial, *cmd], capture_output=True, timeout=timeout)
     if check and r.returncode: sys.exit(f'error: adb {" ".join(cmd)}: {r.stderr.decode(errors="replace").strip()}')
-    return r.stdout if binary else r.stdout.decode(errors='replace')
+    return r.stdout
+
+
+def adb(a, *cmd, **kw): return adb_bytes(a, *cmd, **kw).decode(errors='replace')
 
 
 def sh(a, cmd, **kw): return adb(a, 'shell', cmd, **kw)
@@ -61,7 +64,9 @@ def summary(sel, secs):
     for name, xs in (('frame', ft), ('shown', col('@presented_ms', lambda x: x > 0)), ('gpu', col('@gpu_ms')), ('rec', col('@rec_ms')), ('cpu', col('@cpu_ms')),
                      ('proc_cpu', col('@proc_cpu_ms')), ('wait', col('@wait_ms')), ('passes', col('@passes')), ('draws', col('@draws'))):
         if not xs: continue
-        for p in (50, 95, 99): d[f'{name}_p{p}'] = round(pct(xs, p), 2)
+        for p in (50, 95, 99):
+            q = pct(xs, p)
+            if q is not None: d[f'{name}_p{p}'] = round(q, 2)   # (xs is not empty: never None)
         d[f'{name}_max'] = round(max(xs), 2)
     d['over_40ms'] = sum(1 for x in ft if x > 40)     # a frame a 30 fps target sees as late
     d['over_50ms'] = sum(1 for x in ft if x > 50)     # a hitch
@@ -113,13 +118,13 @@ def run_one(a, label, env, n, out):
         at(a.start + off); sh(a, f"echo '{line}' >> {files}/ctl.txt", check=False)
     at(a.start + a.secs); t1, m1 = thermal(a), mem_available(a)
     alive = bool(sh(a, f'pidof {a.package}:game', check=False).strip())
-    shot = adb(a, 'exec-out', 'screencap -p', binary=True, check=False)
+    shot = adb_bytes(a, 'exec-out', 'screencap -p', check=False)
     sh(a, f'am force-stop {a.package}')
     time.sleep(2)
     rd = out / f'{label}-{n}'; rd.mkdir(parents=True, exist_ok=True)
-    tsv = adb(a, 'exec-out', f'cat {tsv_dev}', binary=True, check=False).decode(errors='replace')
+    tsv = adb(a, 'exec-out', f'cat {tsv_dev}', check=False)
     logp = sh(a, f'ls -t {files}/logs/{a.title}-*.log | head -1').strip()
-    log = adb(a, 'exec-out', f'cat {logp}', binary=True).decode(errors='replace')
+    log = adb(a, 'exec-out', f'cat {logp}')
     (rd / 'frames.tsv').write_text(tsv, encoding='utf-8'); (rd / 'log.txt').write_text(log, encoding='utf-8'); (rd / 'end.png').write_bytes(shot)
     sh(a, f'rm -f {files}/env.txt {temp}/vk_backing-*.txt {tsv_dev}')
     s = digest(a, tsv, log)
@@ -133,7 +138,7 @@ FIRST_FRAME_S = 4   # the game's first frame, seconds after the intent (the POCO
 def digest(a, tsv, log):
     """The window's summary: the TSV's @t_s has a base of its own (not the host's start), so the window counts from the first frame's @t_s"""
     ts = [float(c[2]) for c in (ln.split('\t') for ln in tsv.splitlines()) if len(c) == 3 and c[1] == '@t_s']
-    s = {'frames': 0}
+    s: dict = {'frames': 0}
     if ts:
         base = min(ts) - FIRST_FRAME_S
         sel = frames(tsv, base + a.start, base + a.start + a.secs)
