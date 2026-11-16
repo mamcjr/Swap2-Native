@@ -79,6 +79,9 @@ static void check(int which) {
         uint8_t *app = object + 0x100, *fw = object + 0x200, *ctl = object + 0x400;
         *(uintptr_t *)(base + 0x26cc208) = (uintptr_t)app; *(uintptr_t *)app = (uintptr_t)fw; *(uintptr_t *)(fw + 0x218) = which == 19 ? 0 : (uintptr_t)ctl;   // 19: the controller made later
         sync = (int32_t *)ctl; sync[0] = 1; sync[1] = 3;
+    } else if (which == 20) {   // a frame step alone (Ocarina of Time: the rewriter's FRAME_STEP stub and its state page, no limiter row)
+        strcpy(g_mod[0].build_id, "e0f3ccfaf50065ae4ea01eb5aeb13b1a");
+        dm_fps_state = object + 0x100;
     } else if (which >= 9) {   // the present interval alone (UE 4.18's nvn.SyncInterval); 12: a main the rewriter found no variable in
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         if (which != 12) cvar("nvn.SyncInterval", 0x8adca10);
@@ -150,13 +153,20 @@ static void check(int which) {
         dm_fps_target_set(30, "test"); dm_fps_lock_tick(); assert(sync[0] == 2 && writes == 1);   // another cap still applies
         dm_fps_target_set(0, "test"); dm_fps_lock_tick(); assert(sync[0] == 1 && writes == 2);
     }
+    else if (which == 20) {
+        float *t = (float *)dm_fps_state;
+        assert(dm_fps_lock_rates() == (4 | 32) && writes == 0);   // 30 and 60: the step's caps, offered though no limiter row was found
+        dm_fps_target_set(30, "test"); assert(*t == 30);
+        dm_fps_target_set(0, "test"); assert(*t == 0 && dm_fps_target() == 0);   // back to the game's own step
+        dm_fps_target_set(20, "test"); assert(*t == 0);   // a rate the step does not hold: the page stays
+    }
     else assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
     munmap(base, len);
 }
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 21; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

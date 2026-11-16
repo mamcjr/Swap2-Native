@@ -246,9 +246,9 @@ void dm_fps_target_set(int t, const char *src) {
     if (!target_ok(t)) { LOG("[RED] frame rate cap %d (%s): must be 0, 15, 20, 30, 40, 45 or 60; unchanged", t, src); return; }
     dm_fps_target(); g_target_src = src; atomic_store(&g_target, t); atomic_fetch_add(&g_target_gen, 1);
     LOG("frame rate cap %d%s (%s)", t, t ? " fps" : " (the game's own)", src);
-    // A frame step (loader.c dm_fps_state_apply) reads its cap from the state page at every frame: 30 and 60 go there too; its stubs know no other rate
+    // A frame step (loader.c dm_fps_state_apply) reads its cap from the state page at every frame: 0 (the game's own step), 30 and 60 go there too; its stubs know no other rate
     if (dm_fps_state) {
-        if (t == 30 || t == 60) { float f = (float)t; __atomic_store_n((uint32_t *)dm_fps_state, *(uint32_t *)&f, __ATOMIC_RELAXED); }
+        if (t == 0 || t == 30 || t == 60) { float f = (float)t; __atomic_store_n((uint32_t *)dm_fps_state, *(uint32_t *)&f, __ATOMIC_RELAXED); }
         else LOG("[RED] frame rate cap %d: this game's frame step holds 30 or 60 only; its cap stays until the next start", t);
     }
 }
@@ -277,11 +277,14 @@ static int holds(int t) {
     for (int r = 0; r < nrow && !ok; r++) ok = row_holds(rows[r], t);
     return ok;
 }
-// Which caps this main's limiters hold, as a bit per rate (bit 0: 15, 1: 20, 2: 30, 3: 40, 4: 45, 5: 60); 0 = none, the game keeps its own frame rate
+// Which caps this main's limiters hold, as a bit per rate (bit 0: 15, 1: 20, 2: 30, 3: 40, 4: 45, 5: 60); 0 = none, the game keeps its own frame rate.
+// A frame step (the rewriter's FRAME_STEP stub, its state page dm_fps_state) holds 30 and 60 (dm_fps_target_set) without any limiter row: Ocarina of Time has only the step,
+// and with 0 here the Android panel and Game settings said "this game picks its own frame rate" and offered no cap, so the game ran at its own step, 2 vsyncs of game time
+// a frame whatever the frame took: at 21 fps about 0.7 of real time (POCO F7 Ultra, the signed 0.1.8.8-beta, 2026-11-15)
 static const int k_rates[] = {15, 20, 30, 40, 45, 60};
 int dm_fps_lock_rates(void) {
     pthread_once(&g_found, lock_find);
-    int m = 0;
+    int m = dm_fps_state ? 1 << 2 | 1 << 5 : 0;
     for (int i = 0; i < 6; i++) if (holds(k_rates[i])) m |= 1 << i;   // a floor's maximum is read each time: the panel asks again while the game runs
     return m;
 }

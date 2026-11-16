@@ -93,6 +93,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Measured:** Ocarina of Time by the scarecrow, 30 cap, 90 s: game time 1.000 of real time (was about 0.75), 1,800 of 1,800 frames held 3 vsyncs (a steady 20 fps), 158 late frames (516 with the first part alone, 12 failed probes; now 2); by Mido, 30.0 fps at 1.000 of real time, held 2 (unchanged).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### A frame step alone offered no cap in the Android launcher
+
+- **Symptom:** (Android, a game whose only frame control is the rewriter's frame step) the in-game panel says "This game picks its own frame rate" and shows no caps, and the game's Game settings show its Frame rate cap greyed out; a game left at "The game's own" then runs at its own step: Ocarina of Time at 21 fps ran at about 0.7 of real time (POCO F7 Ultra, the signed 0.1.8.8-beta, 2026-11-15; the user saw it).
+- **Cause:** `hle_fpslock.c` `dm_fps_lock_rates`, which `nxhost_fps_cap_status` gives the launcher as the caps the game can hold, counted only the engine limiter rows the host writes. A game with a `FRAME_STEP` stub and no row (Ocarina of Time) read 0, which the launcher takes as a game that picks its own rate (`SidePanel.refresh`, `Prefs.ownRate`). Also, setting the cap back to 0 while the game ran left the frame step's state page at the last cap (`dm_fps_target_set` wrote only 30 and 60).
+- **Fix:** with a frame step (`dm_fps_state`) the rates hold 30 and 60, the caps its stubs know; 0 is written to the state page too, so "The game's own" while the game runs gives the game its own step again. Unit test `t_fpslock.c` case 20.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### GPU timestamps per submission segment
 
 - **Symptom:** slow motion when the GPU is the bottleneck: a game's interval controller that times the GPU never steps up (GitHub issue #9).
