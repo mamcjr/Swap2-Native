@@ -85,6 +85,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** production memory-policy tests cover 0/30/60 FPS, on/off/unset/invalid choices, older code and unmatched builds. An asset-backed fixture executes the actual native controller with only GOT addresses relocated, checking both console modes, scale reduction under load, correct UV publication, full-resolution recovery and the fixed-resolution path.
 - **Found on:** [NieR:Automata iPhone controls](../../dm/games/010056B015FE8000/README.md#iphone-resolution-and-frame-rate-controls).
 
+### Slow motion below 30 fps at a 30 fps cap on Android
+
+- **Symptom:** (Android, a game with a frame step and a 30 fps cap) where the GPU cannot hold 30 fps the game runs in slow motion: Ocarina of Time by Kokiri Forest's scarecrow drew 22-23 fps at about 0.75 of real time (POCO F7 Ultra, Adreno 830, 2026-11-15; the user saw it).
+- **Cause:** (1) `hle_nvn.c` `fstep_tick` capped the hold at 2 vsyncs at a 30 fps cap (`kmax`), a rule from Apple, whose display link runs at 30 Hz there and holds only even counts; so a 44 ms frame still advanced 2 vsyncs (33 ms) of game time. The Vulkan replay paces any whole number of 60 Hz periods, and the frame-step stubs take 3 (Ocarina of Time's: ratio = step × base / 60). (2) Once the hold could rise, it went back to 2 every few seconds (a probe, 3 late frames each): the GPU reference at hold 2 (`nvn_fstep_gpu_slowed`) had been learned on the loading screen (0.51 vsyncs against 2.7 in the scene), and every later visit to hold 2 was a probe, whose frames do not update it, so the GPU always looked "slowed" (a test made for the iPhone, whose GPU clock follows the hold).
+- **Fix:** on Android the hold at a 30 fps cap may rise to 3 (`FSTEP_MAX`), as at a 60 cap; Apple keeps 2. And after a failed probe, the last GPU time at the longer hold becomes the reference at kmin when the reference was at least `FSTEP_GPU_SLOW` lower (Android only; logged as "the probe failed with the GPU at … : that is its reference now"): a further probe then needs the GPU to get faster, or the CPU's or the cost's reasons.
+- **Measured:** Ocarina of Time by the scarecrow, 30 cap, 90 s: game time 1.000 of real time (was about 0.75), 1,800 of 1,800 frames held 3 vsyncs (a steady 20 fps), 158 late frames (516 with the first part alone, 12 failed probes; now 2); by Mido, 30.0 fps at 1.000 of real time, held 2 (unchanged).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### GPU timestamps per submission segment
 
 - **Symptom:** slow motion when the GPU is the bottleneck: a game's interval controller that times the GPU never steps up (GitHub issue #9).

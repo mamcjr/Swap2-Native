@@ -2231,7 +2231,15 @@ static void fstep_tick(const win_t *o, int c) {
     double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st;
     for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; break; } }
     double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
-    int kmin = 60 / c, kmax = !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k, kmin0 = g_fs.kmin, probe0 = g_fs.probe;
+    // kmax at a 30 fps cap: 2 on Apple, whose display link then runs at 30 Hz and holds only even counts; elsewhere 3 (FSTEP_MAX), as at a 60 cap: the Vulkan replay paces
+    // any whole number of 60 Hz periods (vka_present.c). With 2 there, a game below 30 fps advanced 2 vsyncs of game time per frame whatever the frame took: Ocarina of Time
+    // by Kokiri Forest's scarecrow at 22-23 fps ran at about 0.75 of real time, in slow motion (POCO F7 Ultra, 2026-11-15); with 3 the hold steps to 20 fps at real time
+#if PLAT_APPLE
+    int kmax30 = 2;
+#else
+    int kmax30 = FSTEP_MAX;
+#endif
+    int kmin = 60 / c, kmax = !fstep_hold() ? kmin : kmin >= 2 ? kmax30 : FSTEP_MAX, k0 = g_fs.k, kmin0 = g_fs.kmin, probe0 = g_fs.probe;
     int fixed = (int)__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED);
     uint64_t probes0 = g_fs.probes, failed0 = g_fs.failed;
     // A screen whose rate is not a multiple of 60 (144, 165 Hz) shows the link's 1/60 s ticks on their nearest refreshes (nvn_mtl.m link_range), so a frame on time can show for one
@@ -2252,6 +2260,17 @@ static void fstep_tick(const win_t *o, int c) {
         if (__builtin_popcount(slow_bits) >= 12) g_fs.screen = 2;
     }
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
+#if !PLAT_APPLE
+    // A probe that failed on a GPU called slowed: its reference at kmin was learned on lighter frames (a loading screen), and every later visit to kmin is a probe, whose
+    // frames do not update it (nvn_fstep_gpu_slowed), so it never would: the hold probed again and failed every few seconds, 3 late frames each (Ocarina of Time by Kokiri
+    // Forest's scarecrow: reference 0.51 vsyncs, GPU 2.7 at hold 3, 12 failed probes in 88 s; POCO F7 Ultra, 2026-11-15). The phone's GPU clock does not follow the hold as an
+    // iPhone's does (the reason for the GPU test), so the GPU time now becomes the reference: a further probe needs the GPU to get faster, or the CPU's or the cost's reasons
+    // (the failure is seen at kmin, where the GPU test says nothing: compared here with the last GPU time at the longer hold)
+    if (g_fs.failed != failed0 && kmin >= 1 && kmin <= FSTEP_MAX && g_fg.cur > 0 && g_fg.cur >= FSTEP_GPU_SLOW * g_fg.ref_at[kmin]) {
+        static int nref; if (nref++ < 8) LOG("[nvn] frame step: the probe failed with the GPU at %.2f vsyncs against %.2f at hold %d: that is its reference now", g_fg.cur, g_fg.ref_at[kmin], kmin);
+        g_fg.ref_at[kmin] = g_fg.ref = g_fg.cur;
+    }
+#endif
     __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED); atomic_store(&g_fs_k, g_fs.k);
     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps
     static int fixed_was, nfix;
