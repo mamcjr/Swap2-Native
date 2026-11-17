@@ -31,9 +31,16 @@ void vka_gp_draw(uint64_t vertex, uint64_t fragment, uint64_t mesh, uint64_t tas
     for (int i = 0; i < g_nfs; i++) if (g_fs[i].key == fragment) { g_fs[i].count++; return; }
     if (g_nfs < SHADERS) { g_fs[g_nfs].key = fragment; g_fs[g_nfs++].count = 1; } else g_fs_over++;
 }
+// Dispatches in a row have no full barrier between them ("Dispatch order", vka_draw.c), so one timed step can hold several: each is listed (up to the description's
+// length; the count is always right), the first ones first. Before 2026-11-16 a step showed only its last dispatch, and Ocarina of Time's run of dispatches ending in
+// one AGL kernel of a single workgroup read as 3-4.5 ms of that kernel
+static unsigned g_ncompute;
 void vka_gp_compute(uint64_t key, uint32_t x, uint32_t y, uint32_t z, int indirect) {
     if (!vka_gp_active) return;
-    snprintf(g_compute, sizeof g_compute, "compute %016llx grid %ux%ux%u%s", (unsigned long long)key, x, y, z, indirect ? " (indirect)" : "");
+    if (!g_compute_new) { g_ncompute = 0; g_compute[0] = 0; }
+    g_ncompute++;
+    size_t used = strlen(g_compute);
+    if (used < DESC - 48) snprintf(g_compute + used, DESC - used, "%s%016llx %ux%ux%u%s", used ? ", " : "", (unsigned long long)key, x, y, z, indirect ? " (indirect)" : "");
     g_compute_new = 1;
 }
 int vka_gp_active;                      // marks are taken (read by vka_barrier)
@@ -74,7 +81,7 @@ static void mark(VkCommandBuffer cb, int kind, const char *file, int line) {
             if (g_fs_over && used < DESC) snprintf(m->desc + used, DESC - used, " (+%u more)", g_fs_over);
         }
         g_pass_new = 0; g_pass_draws = 0; g_nfs = 0; g_fs_over = 0; g_compute_new = 0;
-    } else if (g_compute_new) { snprintf(m->desc, DESC, "%s", g_compute); g_compute_new = 0; }
+    } else if (g_compute_new) { snprintf(m->desc, DESC, "compute x%u: %s", g_ncompute, g_compute); g_compute_new = 0; }
     else m->desc[0] = 0;
     vka_enc_sync();
     g_write(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qp, (uint32_t)g_n);

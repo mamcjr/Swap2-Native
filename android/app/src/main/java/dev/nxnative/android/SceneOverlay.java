@@ -52,7 +52,7 @@ final class SceneOverlay {
             String l = log.get(i).trim();
             if (l.isEmpty() || l.startsWith("== ")) continue;
             if (last == null) last = l;
-            if (l.startsWith("gsys_dynres: ") || l.startsWith("[RED] ") || l.matches("[A-Za-z_.]*(Error|Exception): .*")) return l;
+            if (l.startsWith("gsys_dynres: ") || l.startsWith("gsys_foliage: ") || l.startsWith("[RED] ") || l.matches("[A-Za-z_.]*(Error|Exception): .*")) return l;
         }
         return last;
     }

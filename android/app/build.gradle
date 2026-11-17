@@ -100,7 +100,15 @@ def sceneOf = { String game -> def base = tsvRows(game, 'scene_scale_palette').c
 def ndsrDefaultOf = { String game -> if (!ndsrOf(game)) return ''
     def v = tsvRows(game, 'ndsr_default').collect { it[1].trim() }.find() ?: 'net'
     if (!(v in ['fsr', 'net'])) throw new GradleException("dm/games/$game/game.tsv: ndsr_default must be fsr or net, not $v"); v == 'fsr' ? 'fsr' : '' }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), ndsrOf(g), sceneOf(g), ndsrDefaultOf(g)].join('\\t') }.join('\\n')
+// and the Ground foliage (Profile.foliageLevels): the profile's foliage_off rows as "<level>=<boolean keys, ','>|…", empty without rows (the option is not offered)
+def foliageOf = { String game -> tsvRows(game, 'foliage_off').collect { c ->
+        if (c.size() < 3 || !(c[1].trim() ==~ /[A-Za-z0-9_]+/) || !(c[2].trim() ==~ /[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*/)) throw new GradleException("dm/games/$game/game.tsv: foliage_off takes <level> <keys, comma-separated>: ${c.join(' ')}")
+        c[1].trim() + '=' + c[2].trim() }.join('|') }
+// and the frame hold (Profile.fpsHold): the profile's fps_hold row, on or off, empty without one. The launcher passes it as DM_FPS_HOLD, so a pack prepared before the
+// row changed takes the APK's (a pack's game_profile.tsv is written once, when it is prepared)
+def fpsHoldOf = { String game -> def v = tsvRows(game, 'fps_hold').collect { it[1].trim() }.find() ?: ''
+    if (v && !(v in ['on', 'off'])) throw new GradleException("dm/games/$game/game.tsv: fps_hold must be on or off, not $v"); v }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), ndsrOf(g), sceneOf(g), ndsrDefaultOf(g), foliageOf(g), fpsHoldOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {

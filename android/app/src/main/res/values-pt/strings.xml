@@ -324,6 +324,18 @@
     <string name="s2_scene_making">Criando a cena 720p a partir dos arquivos do seu jogo…</string>
     <string name="s2_scene_made">Cena 720p pronta: vale a partir do próximo início.</string>
     <string name="s2_scene_failed">Não foi possível criar a cena 720p: %1$s</string>
+    <string name="s2_game_lang">Idioma do jogo</string>
+    <string name="s2_game_lang_note">O idioma que o jogo recebe do sistema; ele usa esse idioma se o tiver. Vale na próxima vez que abrir o jogo.</string>
+    <string name="s2_game_lang_default">Padrão (inglês dos EUA)</string>
+    <string name="s2_game_lang_device">Idioma do celular (%1$s)</string>
+    <string name="s2_foliage">Plantas do chão</string>
+    <string name="s2_foliage_note">Menos plantas do chão e pedras do próprio jogo: as cenas pesadas ficam mais leves. Vale na próxima vez que abrir o jogo.</string>
+    <string name="s2_foliage_game">Padrão do jogo</string>
+    <string name="s2_foliage_reduced">Reduzido (sem musgo nem pedras)</string>
+    <string name="s2_foliage_lowest">Mínimo (também sem a vegetação rasteira; somem alguns tufos cortáveis que dão corações e rúpias)</string>
+    <string name="s2_foliage_making">Preparando as plantas do chão a partir dos arquivos do seu jogo…</string>
+    <string name="s2_foliage_made">Plantas do chão ajustadas: vale na próxima vez que abrir o jogo</string>
+    <string name="s2_foliage_failed">Não deu para preparar as plantas do chão: %1$s</string>
     <string name="s2_scene_busy">uma preparação está em andamento; tente de novo quando ela terminar</string>
     <string name="s2_scene_running">A cena em 720p ainda está sendo criada; ela é ativada quando ficar pronta</string>
     <string name="s2_scene_no_pack">prepare o jogo primeiro (é preciso o pacote e os arquivos do jogo)</string>
@@ -784,6 +796,8 @@
     <string name="s2_gfx_memory_alias">Buffer compartilhado</string>
     <string name="s2_gfx_memory_placed">Mapeamento direto</string>
     <string name="s2_gfx_memory_note">Como a memória do jogo chega à GPU. Experimente a outra opção se o jogo fechar sozinho ao carregar uma cena. Vale na próxima abertura.</string>
+    <string name="s2_gfx_mesh">Geometria por mesh</string>
+    <string name="s2_gfx_mesh_note">Ligada: o jogo desenha tudo. Desligada: boa parte da folhagem, as folhas caindo e alguns objetos não são desenhados, em troca de mais quadros por segundo nas cenas pesadas.</string>
     <string name="s2_warm_title">Preparando os gráficos de %1$s</string>
     <string name="s2_warm_explain">Compilando os pipelines gráficos do jogo para o driver da GPU deste celular, com o jogo fechado, para os primeiros minutos não travarem por eles. Feito uma vez por driver e por atualização de shaders; deixe o celular carregando.</string>
     <string name="s2_warm_starting">Começando…</string>

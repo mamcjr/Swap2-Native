@@ -190,6 +190,11 @@ static int init_once(void) {
     const char *fault_env = getenv("DM_VK_DEVICE_FAULT");
     int x_fault = has_ext(de, nde, VK_EXT_DEVICE_FAULT_EXTENSION_NAME) && !(fault_env && !strcmp(fault_env, "0"));
     if (x_fault) dext[ndext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+    // DM_VK_VRS_TEST=<w>x<h> (diagnostic, restart only): VK_KHR_fragment_shading_rate's pipeline rate, given to the pipelines of the fragment shaders in DM_VK_VRS_KEYS
+    // (vka_pso.c full_pipeline), to measure how much of a pass is its pixel shading before the game's own shading rate image is mapped
+    const char *vrs_env = getenv("DM_VK_VRS_TEST");
+    int x_fsr = vrs_env && *vrs_env && strcmp(vrs_env, "0") && has_ext(de, nde, VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+    if (x_fsr) dext[ndext++] = VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME;
     free(de);
 
     // Every feature the device has, but robustness and capture-replay (they cost and nothing needs them); the shader side takes what it needs from the same device
@@ -202,10 +207,11 @@ static int init_once(void) {
     VkPhysicalDeviceMeshShaderFeaturesEXT fmesh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
     VkPhysicalDeviceFaultFeaturesEXT ffault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR fpexec = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR ffsr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR};
     void *chain = placed ? &fmp : NULL;
 #define LINK(on, st) if (on) { (st).pNext = chain; chain = &(st); }
     struct { VkStructureType sType; void *pNext; VkBool32 queuePerfHint; } fph = {(VkStructureType)1000302001};   // VkPhysicalDeviceQueuePerfHintFeaturesQCOM (not in the NDK's headers yet)
-    LINK(x_vin, fvin) LINK(x_rob, frob) LINK(x_i8, fi8) LINK(x_div, fdiv) LINK(x_ph, fph) LINK(x_gpl, fgpl) LINK(x_mesh, fmesh) LINK(x_fault, ffault) LINK(x_pexec, fpexec)
+    LINK(x_vin, fvin) LINK(x_rob, frob) LINK(x_i8, fi8) LINK(x_div, fdiv) LINK(x_ph, fph) LINK(x_gpl, fgpl) LINK(x_mesh, fmesh) LINK(x_fault, ffault) LINK(x_pexec, fpexec) LINK(x_fsr, ffsr)
 #undef LINK
     VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = chain};
     VkPhysicalDeviceVulkan12Features f12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &f13};
@@ -226,6 +232,9 @@ static int init_once(void) {
     V.divisor = x_div && fdiv.vertexAttributeInstanceRateDivisor; V.logic_op = f2.features.logicOp; V.dual_src = f2.features.dualSrcBlend; V.geom = f2.features.geometryShader;
     V.tess = f2.features.tessellationShader; V.depth_clamp = f2.features.depthClamp; V.fill_lines = f2.features.fillModeNonSolid; V.depth_bias_clamp = f2.features.depthBiasClamp;
     V.pexec = x_pexec && fpexec.pipelineExecutableInfo;
+    ffsr.primitiveFragmentShadingRate = VK_FALSE; ffsr.attachmentFragmentShadingRate = VK_FALSE;   // (the test sets the pipeline's rate only)
+    V.fsr_pipe = x_fsr && ffsr.pipelineFragmentShadingRate;
+    if (x_fsr) VLOG("fragment shading rate test (DM_VK_VRS_TEST=%s): pipeline rate %s", vrs_env, V.fsr_pipe ? "on" : "not on this device");
     V.multi_vp = f2.features.multiViewport; V.a2c = 1; V.mesh = x_mesh && fmesh.meshShader; V.task = V.mesh && fmesh.taskShader;
     V.vstores = f2.features.vertexPipelineStoresAndAtomics; V.fstores = f2.features.fragmentStoresAndAtomics;   // (enabled with the rest: texture pool reads, vka_tex.c)
     if (!f12.timelineSemaphore || !f13.dynamicRendering) { VRED("the device lacks timeline semaphores (%d) or dynamic rendering (%d)", f12.timelineSemaphore, f13.dynamicRendering); return 0; }

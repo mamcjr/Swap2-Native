@@ -89,6 +89,7 @@ typedef struct {
     // NVN2 task and mesh programs (VK_EXT_mesh_shader: mesh = meshShader, task = taskShader too; DM_VK_MESH=0 leaves it off): their shaders are refused without it (vka_shader.c refusal)
     // and their draws skipped. mesh_inv / task_inv: the largest workgroup (maxMeshWorkGroupInvocations / maxTaskWorkGroupInvocations); mesh_out_v / mesh_out_p: the most vertices /
     // primitives a mesh workgroup may output; task_payload: maxTaskPayloadSize; task_groups / mesh_groups: maxTaskWorkGroupCount[0] / maxMeshWorkGroupCount[0] (a draw's count)
+    int fsr_pipe;   // DM_VK_VRS_TEST: VK_KHR_fragment_shading_rate's pipeline rate on (a diagnostic; vka_pso.c full_pipeline)
     int pexec;   // DM_VK_PIPE_STATS: VK_KHR_pipeline_executable_properties on, compute pipelines log the driver's statistics (vka_pso.c pipe_stats)
     int mesh, task; uint32_t mesh_inv, task_inv, mesh_out_v, mesh_out_p, task_payload, task_groups, mesh_groups;
     int gpl;                                        // graphics pipeline libraries with fast linking (VK_EXT_graphics_pipeline_library): a pipeline the cache lacks is linked from stage libraries at once, the optimized one made in the background (vka_pso.c)

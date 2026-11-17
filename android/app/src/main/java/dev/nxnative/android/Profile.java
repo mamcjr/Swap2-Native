@@ -27,6 +27,8 @@ final class Profile {
     String stamp = "";   // its "stamp" rows: "version:old SHA-256:new SHA-256", ';' between them (ShaderLibs.restamp)
     String resolution = "";   // what Game resolution sets (build.gradle resolutionOf): "window", "scale:<choice>=<scale>/<console|handheld>,…" or "" (nothing: not offered)
     String ndsr = "";    // agl's NDSR networks (build.gradle ndsrOf): the FSR stand-in's input encoding (profile ndsr_input: sqrt or linear) when the shader map has them, else ""
+    String fpsHold = "";   // the frame hold (build.gradle fpsHoldOf): the profile's fps_hold row, "on" / "off", or "" (the pack's own); the launcher passes it as DM_FPS_HOLD
+    String foliage = "";   // the Ground foliage (build.gradle foliageOf): "<level>=<keys, ','>|…" from foliage_off rows, or "" (not offered)
     String scene = "";   // the Scene resolution (build.gradle sceneOf): "<scale>/<expected original scales, ','>[/<label>=<scale>|…]" from scene_scale_palette and scene_preset, or "" (not offered)
 
     /** Whether Game resolution does something for this game (its profile has window_fn, res_levels or graphics_scale rows) */
@@ -96,6 +98,22 @@ final class Profile {
         return out;
     }
 
+    /**
+     * The Ground foliage's levels besides the game's own, level → the booleans gsys_foliage.py writes false (--off, ',' between them), in the profile's order (its
+     * foliage_off rows: reduced, lowest). Empty when the option is not offered
+     */
+    java.util.LinkedHashMap<String, String> foliageLevels() {
+        java.util.LinkedHashMap<String, String> out = new java.util.LinkedHashMap<>();
+        for (String kv : foliage.split("\\|")) {
+            int eq = kv.indexOf('=');
+            if (eq > 0 && eq < kv.length() - 1) out.put(kv.substring(0, eq), kv.substring(eq + 1));
+        }
+        return out;
+    }
+
+    /** Whether the Ground foliage option is offered: the profile has foliage_off rows */
+    boolean hasFoliage() { return !foliageLevels().isEmpty(); }
+
     /** Whether the Scene resolution option does something for this game: its profile has a scene_scale_palette row */
     boolean hasScene() { return sceneScale() != null; }
 
@@ -147,6 +165,8 @@ final class Profile {
             p.ndsr = c.length > 10 ? c[10] : "";
             p.scene = c.length > 11 ? c[11] : "";
             p.upscaler = c.length > 12 ? c[12] : "";
+            p.foliage = c.length > 13 ? c[13] : "";
+            p.fpsHold = c.length > 14 ? c[14] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);
@@ -198,8 +218,8 @@ final class Profile {
                     rows.add(c);
                 }
             } catch (IOException e) { continue; }
-            String name = d.getName(), ndsrInput = "linear", scene = "", upscaler = "";
-            List<String> presets = new ArrayList<>();
+            String name = d.getName(), ndsrInput = "linear", scene = "", upscaler = "", fpsHold = "";
+            List<String> presets = new ArrayList<>(), foliage = new ArrayList<>();
             List<String> builds = new ArrayList<>(), scale = new ArrayList<>();
             boolean window = false;
             for (String[] c : rows) {
@@ -207,6 +227,9 @@ final class Profile {
                 if (c[0].equals("ndsr_default") && c.length > 1 && c[1].equals("fsr")) upscaler = "fsr";
                 if (c[0].equals("scene_scale_palette") && c.length > 1 && scene.isEmpty()) scene = c[1] + "/" + (c.length > 2 ? c[2] : "") + scene;
                 if (c[0].equals("scene_preset") && c.length > 2) presets.add(c[1] + "=" + c[2]);
+                if (c[0].equals("fps_hold") && c.length > 1 && (c[1].equals("on") || c[1].equals("off"))) fpsHold = c[1];
+                if (c[0].equals("foliage_off") && c.length > 2 && c[1].matches("[A-Za-z0-9_]+") && c[2].matches("[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*"))
+                    foliage.add(c[1] + "=" + c[2]);
                 if (c[0].equals("name") && c.length > 1) name = c[1].replaceAll("[\\t\\n\\\\\"]", " ");
                 else if (c[0].equals("build") && c.length > 3) {
                     java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\d+").matcher(c[1]);
@@ -227,6 +250,8 @@ final class Profile {
             p.ndsr = ndsr ? ndsrInput : "";
             p.scene = scene.isEmpty() || presets.isEmpty() ? scene : scene + "/" + String.join("|", presets);
             p.upscaler = upscaler;
+            p.foliage = String.join("|", foliage);
+            p.fpsHold = fpsHold;
             out.add(p);
         }
         return out;

@@ -55,9 +55,13 @@ shader_note	The Legend of Zelda: Ocarina of Time shaders
 # frames showed 25 and 33 ms in turn. With 30: 30.0 fps in all six runs (dm/tools/android_bench.py), every frame 33.3 ms on screen at p50 and p95, 78-80 % of frames
 # within 2 ms of 33.3 (docs/RESULTADOS-ETAPA1-2026-11-15.md). 60 with fps_hold went to a 3-vsync hold (22.9 fps) in one of two runs: the frame costs about 2.1 vsyncs there
 fps_target	30
-# fps_hold is left at its default (on): three late frames step the hold up to 2 or 3 vsyncs, so the game keeps real time down to 20 fps. With off the step is at most 2 at a 60 cap
-# (1 and 2 alternating, frames shown as soon as they are ready: 30-60 fps, as in erickmendes22's 8021046), and below 30 fps the game runs slow: at the door's 25 fps on 891.14 (2026-11-12)
-# that is about 0.83 of real time. An A/B with DM_FPS_HOLD=off (Documents/env.txt) is open
+# fps_hold off (2026-11-16): at the 30 cap the hold stays at 2 vsyncs, a frame that runs long shows for 3 and the time it lost is paid back with steps of 3, so game time
+# stays real time. With on, three late frames (loading's, at every start) stepped the hold to 3 for good: the GPU clock falls at the longer hold, so the cost never looked
+# like 2 vsyncs again. POCO F7 Ultra (891.14), Link's porch, two runs each (dm/tools/android_bench.py): mesh geometry off, on 20.0 / 20.0 fps, off 30.0 / 30.0 fps
+# (frames 33.3 ms at p50, 35.5-35.7 at p95, game time 1.004 of real time); mesh geometry on, on 19.9 / 17.9 fps, off 22.2 / 20.9 fps at 1.002-1.003 of real time (frames
+# shown 33 and 50 ms in turn where on held a steady 50). (On 2026-11-12, before the payback, off ran the door's 25 fps at about 0.83 of real time.) The launcher passes this
+# row as DM_FPS_HOLD (Profile.fpsHold), so packs prepared before it take it too
+fps_hold	off
 
 # ---- Graphics ----
 # agl's render buffer binding wraps its clears in render conditions in Donkey Kong Bananza and Mario Kart World (same engine); assumed here (open)
@@ -84,3 +88,12 @@ scene_preset	720p	0.6135
 scene_preset	540p	0.46875
 scene_preset	480p	0.4166667
 scene_preset	360p	0.3125
+# The Android launcher's Ground foliage (Game settings): dm/tools/gsys_foliage.py writes false into these booleans of every scene's ResFoliageScene in
+# Pack/Foliage.pack.zs, as a RomFS overlay made on the phone from the player's files (DM_ROMFS_OVERLAY), so the game places none of those layers (the task/mesh
+# foliage they draw goes with them). reduced: the moss and the stones; lowest: also the two undergrowth layers, where 4 of the 61 scenes' cuttable plants
+# (Land_Kokiri_Plant_E_02 / _E_04) drop hearts, magic and rupees. The grass (IsEnableTurf) stays. AnkaNative's measurement (POCO F8 Pro, Link's porch): all four off,
+# 78.8 to 55-56 ms of GPU; grass density, LOD distances, SSAO, depth of field, bloom and shadow resolution at half: within the noise. Ours: the game's note
+# Commented out (2026-11-16): on this phone the edited pack is read but the porch's picture, mesh draws and GPU time do not change, not even with the grass off
+# (the game's note, Open): uncomment when a run shows the layers gone
+# foliage_off	reduced	IsEnableMoss,IsEnableStone
+# foliage_off	lowest	IsEnableMoss,IsEnableStone,IsEnableUndergrowth4,IsEnableUndergrowth8

@@ -132,6 +132,50 @@ final class Prefs {
         if (scale == null) e.remove(gameKey("scene_scale", titleId)); else e.putString(gameKey("scene_scale", titleId), scale);
         e.commit();
     }
+    /**
+     * The game's Ground foliage level (one of its profile's foliage_off levels, Profile.foliageLevels: reduced, lowest), null for the game's own (the default). A
+     * level the profile no longer offers falls back to the game's own
+     */
+    static String foliage(Context c, String titleId, Profile p) {
+        if (p == null || !p.hasFoliage()) return null;
+        String v = of(c).getString(gameKey("foliage", titleId), null);
+        return v != null && p.foliageLevels().containsKey(v) ? v : null;
+    }
+    static void foliage(Context c, String titleId, String level) {
+        if (level == null) of(c).edit().remove(gameKey("foliage", titleId)).commit(); else of(c).edit().putString(gameKey("foliage", titleId), level).commit();
+    }
+    /**
+     * The game's language (Game settings › Game language): what the host gives the game as the system's language (DM_LANG, hle_oe.c GetDesiredLanguage and the
+     * region that fits it). "" is the host's default, US English, as before the setting; "device" is the phone's own language (deviceGameLang); else a Switch
+     * language code, one of GAME_LANGS. A game shows it only where it has that language: the game itself falls back to its own default otherwise
+     */
+    static final String[] GAME_LANGS = {"en-US", "en-GB", "pt-BR", "pt", "es-419", "es", "fr", "fr-CA", "de", "it", "nl", "ru", "ja", "ko", "zh-Hans", "zh-Hant"};
+    static String gameLang(Context c, String titleId) { return of(c).getString(gameKey("game_lang", titleId), ""); }
+    static void gameLang(Context c, String titleId, String v) {
+        if (v == null || v.isEmpty()) of(c).edit().remove(gameKey("game_lang", titleId)).commit(); else of(c).edit().putString(gameKey("game_lang", titleId), v).commit();
+    }
+    /** The Switch language code nearest the phone's language (the host's codes: nn::settings::Language, with zh-Hans / zh-Hant for Chinese); US English otherwise */
+    static String deviceGameLang() {
+        java.util.Locale l = java.util.Locale.getDefault();
+        String lang = l.getLanguage(), country = l.getCountry(), script = l.getScript();
+        switch (lang) {
+            case "pt": return country.equals("BR") ? "pt-BR" : "pt";
+            case "en": return java.util.Arrays.asList("GB", "IE", "AU", "NZ", "ZA", "IN").contains(country) ? "en-GB" : "en-US";
+            case "es": return country.equals("ES") ? "es" : "es-419";
+            case "fr": return country.equals("CA") ? "fr-CA" : "fr";
+            case "zh": return script.equals("Hant") || java.util.Arrays.asList("TW", "HK", "MO").contains(country) ? "zh-Hant" : "zh-Hans";
+            case "de": case "it": case "nl": case "ru": case "ja": case "ko": return lang;
+            default: return "en-US";
+        }
+    }
+    /** The code the host gets for a choice (gameLang), null for the host's default */
+    static String gameLangCode(String choice) { return choice == null || choice.isEmpty() ? null : choice.equals("device") ? deviceGameLang() : choice; }
+    /** A language code's name in the app's language (Locale's own names: "português (Brasil)", "espanhol (América Latina)") */
+    static String langName(String code) {
+        java.util.Locale l = java.util.Locale.forLanguageTag(code);
+        String n = l.getDisplayName(java.util.Locale.getDefault());
+        return n.isEmpty() ? code : Character.toUpperCase(n.charAt(0)) + n.substring(1);
+    }
     /** The label of a preset's scale (Profile.scenePresets), the scale itself when the profile has no label for it */
     static String sceneLabel(Profile p, String scale) {
         for (java.util.Map.Entry<String, String> e : p.scenePresets().entrySet()) if (e.getValue().equals(scale)) return e.getKey();

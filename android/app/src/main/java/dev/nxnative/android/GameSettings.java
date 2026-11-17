@@ -165,6 +165,8 @@ final class GameSettings {
             GameGraphics.reset(a, id);
             sceneWant(id, null);
             Prefs.sceneScale(a, id, (String) null);   // (the overlay's files stay in the app's folder: made again at once if 720p is chosen again)
+            Prefs.foliage(a, id, (String) null);   // (the same for the Ground foliage's overlays)
+            Prefs.gameLang(a, id, null);
             Prefs.of(a).edit().remove(Prefs.gameKey("pause_return", id)).commit();
             again.run();
         });
@@ -185,6 +187,8 @@ final class GameSettings {
             box.addView(fixed.view);
         } else box.addView(new Ui.Setting(a, R.drawable.s2_ic_gauge, a.getString(R.string.s2_frame_cap), v -> cap(a, g, again)).value(a.getString(R.string.s2_frame_cap_note))
                 .override(a, Prefs.ownFpsCap(a, id), MainActivity.capLabel(Prefs.fpsCap(a, id))).chevron(a).view);
+        box.addView(new Ui.Setting(a, R.drawable.s2_ic_chip, a.getString(R.string.s2_game_lang), v -> gameLang(a, g, again))
+                .value(gameLangLabel(a, Prefs.gameLang(a, id)) + " · " + a.getString(R.string.s2_game_lang_note)).chevron(a).view);
         GameGraphics.rows(a, id, box, again, false);
         if (prof != null && prof.hasScene()) {   // only where the profile names the palette's scale (scene_scale_palette; SceneOverlay)
             String sc = Prefs.sceneScale(a, id, prof);
@@ -193,6 +197,11 @@ final class GameSettings {
                     .value(cur + " · " + a.getString(R.string.s2_scene_note));
             box.addView(row.chevron(a).view);
             if (sc != null) sceneCheck(a, g, prof, sc, row);
+        }
+        if (prof != null && prof.hasFoliage()) {   // only where the profile names the layers (foliage_off; FoliageOverlay)
+            String lv = Prefs.foliage(a, id, prof);
+            box.addView(new Ui.Setting(a, R.drawable.s2_ic_image, a.getString(R.string.s2_foliage), v -> foliage(a, g, again))
+                    .value(foliageLabel(a, lv) + " · " + a.getString(R.string.s2_foliage_note)).chevron(a).view);
         }
         builtinMods(a, g, box);
         Ui.add(p, Ui.small(a, a.getString(R.string.s2_game_graphics_hint)), 8);
@@ -648,6 +657,99 @@ final class GameSettings {
             if (w == 0) { sceneWant(g.titleId, null); Prefs.sceneScale(a, g.titleId, (String) null); done.run(); }
             else makeScene(a, g, prof, scales.get(w - 1));
         }).setNegativeButton(android.R.string.cancel, null).show();
+    }
+
+    /** A Game language choice's label: the default (US English), the phone's language (and what it maps to), or the language's own name */
+    private static String gameLangLabel(MainActivity a, String choice) {
+        if (choice == null || choice.isEmpty()) return a.getString(R.string.s2_game_lang_default);
+        if (choice.equals("device")) return a.getString(R.string.s2_game_lang_device, Prefs.langName(Prefs.deviceGameLang()));
+        return Prefs.langName(choice);
+    }
+
+    /** Game language: the default, the phone's language or one of the Switch's languages (Prefs.GAME_LANGS); the game takes it at its next start */
+    private static void gameLang(MainActivity a, Game g, Runnable done) {
+        java.util.List<String> values = new java.util.ArrayList<>(java.util.Arrays.asList("", "device"));
+        values.addAll(java.util.Arrays.asList(Prefs.GAME_LANGS));
+        String[] labels = new String[values.size()];
+        for (int i = 0; i < labels.length; i++) labels[i] = gameLangLabel(a, values.get(i));
+        int checked = Math.max(0, values.indexOf(Prefs.gameLang(a, g.titleId)));
+        new AlertDialog.Builder(a).setTitle(a.getString(R.string.s2_game_lang) + " · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+            x.dismiss();
+            Prefs.gameLang(a, g.titleId, values.get(w));
+            done.run();
+        }).setNegativeButton(android.R.string.cancel, null).show();
+    }
+
+    /** A Ground foliage level's name for the player: the two the profiles use, else the profile's own label; null is the game's own */
+    private static String foliageLabel(MainActivity a, String level) {
+        if (level == null) return a.getString(R.string.s2_foliage_game);
+        if (level.equals("reduced")) return a.getString(R.string.s2_foliage_reduced);
+        if (level.equals("lowest")) return a.getString(R.string.s2_foliage_lowest);
+        return level;
+    }
+
+    /**
+     * Ground foliage: the game's own (the default) or one of its profile's levels (Profile.foliageLevels), whose overlay is made from the player's files first
+     * (makeFoliage) when the one there was not made for this pack
+     */
+    private static void foliage(MainActivity a, Game g, Runnable done) {
+        Profile prof = Profile.of(g.titleId);
+        if (prof == null || !prof.hasFoliage()) return;
+        java.util.List<String> levels = new java.util.ArrayList<>(prof.foliageLevels().keySet());
+        String[] labels = new String[levels.size() + 1];
+        labels[0] = foliageLabel(a, null);
+        for (int i = 0; i < levels.size(); i++) labels[i + 1] = foliageLabel(a, levels.get(i));
+        String cur = Prefs.foliage(a, g.titleId, prof);
+        int checked = cur == null ? 0 : levels.indexOf(cur) + 1;
+        new AlertDialog.Builder(a).setTitle(a.getString(R.string.s2_foliage) + " · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
+            x.dismiss();
+            if (w == 0) { foliageWant(g.titleId, null); Prefs.foliage(a, g.titleId, (String) null); done.run(); }
+            else makeFoliage(a, g, prof, levels.get(w - 1));
+        }).setNegativeButton(android.R.string.cancel, null).show();
+    }
+
+    /** The player's last Ground foliage choice per game in this process: an overlay's answer turns its level on only while that is still the choice (as SCENE_WANT) */
+    private static final java.util.Map<String, String> FOLIAGE_WANT = new java.util.HashMap<>();
+    private static void foliageWant(String id, String level) { synchronized (FOLIAGE_WANT) { FOLIAGE_WANT.put(id, level); } }
+    private static boolean foliageWanted(String id, String level) { synchronized (FOLIAGE_WANT) { return level.equals(FOLIAGE_WANT.get(id)); } }
+
+    /** A level chosen: its overlay is made from the player's own RomFS by gsys_foliage.py in the packer's process (SceneService) unless the one there matches */
+    private static void makeFoliage(MainActivity a, Game g, Profile prof, String level) {
+        File files = a.getExternalFilesDir(null);
+        foliageWant(g.titleId, level);
+        AlertDialog wait = new AlertDialog.Builder(a).setMessage(R.string.s2_foliage_making).setCancelable(true).create();
+        wait.show();
+        String id = g.titleId, keys = prof.foliageLevels().get(level);
+        new Thread(() -> {
+            String[] in = sceneInputs(g);
+            boolean have = files != null && in != null && FoliageOverlay.current(files, id, level, keys, in[0]);
+            UI.post(() -> {
+                boolean gone = a.isFinishing() || a.isDestroyed();
+                if (in == null || files == null || have) {
+                    if (!gone) { try { wait.dismiss(); } catch (RuntimeException ignored) { /* its window is gone */ } }
+                    if (have) { if (foliageWanted(id, level)) Prefs.foliage(a, id, level); }
+                    else if (gone) modToast(a, a.getString(R.string.s2_foliage_failed, a.getString(R.string.s2_scene_no_pack)));
+                    else a.error(a.getString(R.string.s2_foliage_failed, a.getString(R.string.s2_scene_no_pack)));
+                    if (!gone) a.gameSettingsChanged(g);
+                    return;
+                }
+                SceneService.startFoliage(a, id, in[1], level, keys, in[0], new android.os.ResultReceiver(UI) {
+                    @Override protected void onReceiveResult(int code, android.os.Bundle data) {
+                        String msg = data == null ? null : data.getString(SceneService.MESSAGE);
+                        boolean end = a.isFinishing() || a.isDestroyed();
+                        if (!end) { try { wait.dismiss(); } catch (RuntimeException ignored) { /* its window is gone */ } }
+                        if (code == 0) { if (foliageWanted(id, level)) { Prefs.foliage(a, id, level); modToast(a, a.getString(R.string.s2_foliage_made)); } }
+                        else if (code == SceneService.RUNNING) modToast(a, a.getString(R.string.s2_scene_running));
+                        else {
+                            String why = code == SceneService.BUSY ? a.getString(R.string.s2_scene_busy) : msg != null ? msg : "exit " + code;
+                            if (end) modToast(a, a.getString(R.string.s2_foliage_failed, why));
+                            else a.error(a.getString(R.string.s2_foliage_failed, why));
+                        }
+                        if (!end) a.gameSettingsChanged(g);
+                    }
+                });
+            });
+        }, "nx-foliage-make").start();
     }
 
     /** The pack's version and the RomFS as the host takes it ({version, romfs}), or null with no pack or RomFS. Reads pack.tsv and the .nup: off the main thread */

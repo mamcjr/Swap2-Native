@@ -1482,6 +1482,11 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
     // An NVN2 mesh draw (nvnCommandBufferDrawMeshTasks, hle_nvn.c): the task (optional) and mesh shaders of one program, the fragment stage's shader, in a mesh pipeline
     // (vka_pso.c pstate_fill) drawn with vkCmdDrawMeshTasksEXT: no vertex input, primitive type or index buffer
     const int mesh = dw && dw->prim == NVN_PRIM_MESH;
+    // DM_VK_MESH_DRAWS=0 (a player's graphics option, live, default 1): every task/mesh draw is left out before it records anything, native or through the compute
+    // fallback. What the game draws with mesh programs goes from the picture (Ocarina of Time: much of the foliage, the falling leaves, some models and effects), and the
+    // fallback's compute, controller steps and pass breaks with it: by Kokiri Forest's scarecrow on the POCO F7 Ultra the GPU frame went from 48.2 to 29.5 ms (2026-11-15,
+    // the same cut as DM_VK_MESH_DIAG_STAGE=3). Not a fix: a trade of picture for frame rate, which the player chooses
+    if (mesh && !VKA_ENV("DM_VK_MESH_DRAWS", 1)) { g_skipped++; static _Atomic int n_; if (!atomic_fetch_add(&n_, 1)) VLOG("task/mesh draws left out (DM_VK_MESH_DRAWS=0, the graphics option): foliage and other mesh geometry are not drawn"); return; }
     if (mesh && !V.mesh) {
         if (R.on && vka_ub_active()) { vka_ub_hazard_end(); vka_rp_end(); }   // (its compute steps read guest memory: inline updates kept in the pass land first, "Inline uniform updates")
         if (!mesh_emulate(d, rt, has_rt, sc, has_sc, dw)) SKIP("task/mesh compute fallback failed; see shader/descriptor diagnostics");

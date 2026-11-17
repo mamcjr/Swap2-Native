@@ -55,19 +55,27 @@ class Interp:
             op = x[0] & 0xffff
             if op in (41, 42): self.glob[x[2]] = op == 41
             elif op == spv.OP_CONSTANT_NULL: self.glob[x[2]] = (0,) * m.types[x[1]][3] if m.op(x[1]) == spv.OP_TYPE_VECTOR else 0
+            elif op == spv.OP_CONSTANT_COMPOSITE: self.glob[x[2]] = tuple(self.glob[i] for i in x[3:])
             elif op == spv.OP_FUNCTION: break
         self.fns = {}
 
     def rd(self, p):
         if p[0] == 'tab': return self.table[p[1]]
         if p[0] == 'phys': self.reads.append(p[1]); return self.phys.get(p[1], word_at(p[1]))
-        if p[0] == 'v': return self.mem[p]
+        if p[0] == 'v':
+            v = self.mem[p]
+            return tuple(v[i] for i in range(len(v))) if isinstance(v, dict) else v   # (an array a loop filled element by element)
+        if p[0] == 've': v = self.mem[('v', p[1])]; return v[p[2]]
         if p[0] in ('log', 'io'): return (self.log if p[0] == 'log' else self.io).get(p[1], 0)
         return self.other.get(p, word_at(p[0] << 24 ^ (p[1] if isinstance(p[1], int) else p[1][0] * 4 + p[1][1])))
 
     def wr(self, p, v):
         if p[0] == 'phys': self.writes.append((p[1], v)); self.phys[p[1]] = v
         elif p[0] == 'v': self.mem[p] = v
+        elif p[0] == 've':
+            a = self.mem[('v', p[1])]
+            a = dict(enumerate(a)) if isinstance(a, tuple) else a if isinstance(a, dict) else {}
+            a[p[2]] = v; self.mem[('v', p[1])] = a
         elif p[0] == 'tab': raise AssertionError('a store to the pool table')
         elif p[0] in ('log', 'io'): (self.log if p[0] == 'log' else self.io)[p[1]] = v
         else: self.other[p] = v
@@ -102,6 +110,8 @@ class Interp:
             if op == 228: self.wr(val[x[1]], val[x[4]]); continue   # OpAtomicStore
             r = x[2]
             if op == spv.OP_LOAD: val[r] = self.rd(val[x[3]])
+            elif op == spv.OP_ACCESS_CHAIN and x[3] not in self.bufs and isinstance(val.get(x[3]), tuple) and val[x[3]][0] == 'v' and len(x) == 5:
+                val[r] = ('ve', val[x[3]][1], val[x[4]])   # an element of a Function array variable
             elif op == spv.OP_ACCESS_CHAIN:
                 assert x[3] in self.bufs and len(x) in (6, 7) and val[x[4]] == 0, f'interpreter: access chain {x}'
                 val[r] = (self.bufs[x[3]], val[x[5]] if len(x) == 6 else (val[x[5]], val[x[6]]))   # (a word of a word array, or a component of a row of a vec4 array)

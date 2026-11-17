@@ -12,7 +12,7 @@ import java.util.List;
 
 /** BananaNative 0.2.5 graphics choices in Swap2's settings UI, backed by the local renderer. */
 final class GameGraphics {
-    private static final String MODE = "graphics_mode", SHARP = "graphics_sharp", ASYNC = "graphics_async", TIMING = "graphics_timing", MEMORY = "graphics_memory";
+    private static final String MODE = "graphics_mode", SHARP = "graphics_sharp", ASYNC = "graphics_async", TIMING = "graphics_timing", MEMORY = "graphics_memory", MESH = "graphics_mesh";
     private static final int[] MODES = {R.string.s2_gfx_nearest, R.string.s2_gfx_bilinear, R.string.s2_upscaler_fsr, R.string.s2_upscaler_net};
     private static final int[] SHARPS = {R.string.s2_gfx_off, R.string.s2_fsr_sharp_softer, R.string.s2_fsr_sharp_soft, R.string.s2_fsr_sharp_default, R.string.s2_fsr_sharp_max};
     private static String key(String key, String id) { return id == null ? key : Prefs.gameKey(key, id); }
@@ -32,15 +32,19 @@ final class GameGraphics {
      *  the alias (docs/reference/memory.md "A game killed from outside on placed guest memory") */
     static String memory(Context c, String id) { return Prefs.of(c).getString(key(MEMORY, id), Prefs.of(c).getString(MEMORY, "alias")); }
     static String timing(Context c, String id) { return Prefs.of(c).getString(key(TIMING, id), Prefs.of(c).getString(TIMING, null)); }
+    /** Whether the game's task/mesh geometry is drawn (default on). Off leaves every mesh draw out (DM_VK_MESH_DRAWS=0, live): in Ocarina of Time much of the foliage, the
+     *  falling leaves and some models go, for about 10 fps in Kokiri Forest on the POCO F7 Ultra (GPU 48 to 30 ms a frame by the scarecrow) */
+    static boolean meshDraws(Context c, String id) { return Prefs.of(c).getBoolean(key(MESH, id), Prefs.of(c).getBoolean(MESH, true)); }
     static void reset(Context c, String id) {
         SharedPreferences.Editor e = Prefs.of(c).edit();
-        for (String k : new String[] {MODE, SHARP, ASYNC, TIMING, MEMORY, "graphics_stretch", "graphics_ram_saver"}) e.remove(key(k, id));
+        for (String k : new String[] {MODE, SHARP, ASYNC, TIMING, MEMORY, MESH, "graphics_stretch", "graphics_ram_saver"}) e.remove(key(k, id));
         e.commit();
     }
     static void env(Context c, String id, List<String> env) {
         env.addAll(Arrays.asList(GraphicsMode.lines(mode(c, id), sharp(c, id))));
         env.add("DM_VK_PSO_ASYNC=" + (async(c, id) ? 2 : 0));
         env.add("DM_VK_STRETCH=" + (stretch(c, id) ? 1 : 0));
+        if (!meshDraws(c, id)) env.add("DM_VK_MESH_DRAWS=0");
         if (id != null && Prefs.of(c).getBoolean(key("graphics_ram_saver", id), false)) {
             env.add("DM_MEM_FILEBACK=1");
             env.add("DM_MEM_FILEBACK_KINDS=shader,texture");
@@ -85,6 +89,10 @@ final class GameGraphics {
                         n -> Prefs.of(c).edit().putFloat(key(SHARP, id), GraphicsMode.SHARPS[n]).commit(), changed))
                     .value(c.getString(SHARPS[selected]) + " · " + c.getString(R.string.s2_gfx_sharp_note)).chevron(c).view);
         }
+        // Mesh geometry on or off: live (the in-game panel applies it at once, push)
+        box.addView(new Ui.Setting(c, R.drawable.s2_ic_image, c.getString(R.string.s2_gfx_mesh), null)
+                .value(c.getString(R.string.s2_gfx_mesh_note))
+                .toggle(c, meshDraws(c, id), (button, on) -> { Prefs.of(c).edit().putBoolean(key(MESH, id), on).commit(); if (live) push(c, id); }).view);
         if (live) return;
         if (id != null) box.addView(new Ui.Setting(c, R.drawable.s2_ic_chip, c.getString(R.string.s2_gfx_ram_saver), null)
                 .value(c.getString(R.string.s2_gfx_ram_saver_note))
@@ -118,6 +126,7 @@ final class GameGraphics {
         if (ext == null) return;
         try (FileWriter w = new FileWriter(new File(ext, "ctl.txt"), true)) {
             for (String line : GraphicsMode.lines(mode(c, id), sharp(c, id))) w.write("env " + line + "\n");
+            w.write("env DM_VK_MESH_DRAWS=" + (meshDraws(c, id) ? 1 : 0) + "\n");
         } catch (IOException e) { Native.note("[RED] graphics settings: could not apply live: " + e); }
     }
 }

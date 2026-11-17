@@ -877,10 +877,29 @@ static VkPipeline full_pipeline(pstate *P, vka_shader *const sh[VKA_NSTAGE], con
     VkPipeline p = VK_NULL_HANDLE;
     const vka_shader *pre0 = P->mesh ? sh[7] : sh[0];
     VkResult r;
+    VkPipelineCreateFlags flags0 = P->ci.flags;
+    // DM_VK_PIPE_STATS: the graphics pipelines' statistics too (each stage's registers and occupancy); DM_VK_PIPE_STATS_KEYS=<key>,<key>... only those with these fragment shaders (and the compute pipelines of those keys)
+    // (a pipeline asked for statistics is compiled again, not taken from the cache: the list keeps a run from recompiling every pipeline)
+    int stats = V.pexec;
+    if (stats) { const char *only = getenv("DM_VK_PIPE_STATS_KEYS"); char hex[20];
+                 if (only && *only) { snprintf(hex, sizeof hex, "%016llx", sh[1] ? (unsigned long long)sh[1]->key : 0ull); stats = strstr(only, hex) != NULL; } }
+    if (stats) P->ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    // DM_VK_VRS_TEST=<w>x<h> with DM_VK_VRS_KEYS=<fragment key>+<key>... (diagnostic): those fragment shaders' whole pipelines shade at that pipeline rate (vka_dev.c)
+    VkPipelineFragmentShadingRateStateCreateInfoKHR fsr = {VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR, .fragmentSize = {1, 1},
+        .combinerOps = {VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR, VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR}};
+    int vrs = 0;
+    if (V.fsr_pipe && sh[1]) { const char *keys = getenv("DM_VK_VRS_KEYS"), *t = getenv("DM_VK_VRS_TEST"); char hex[20]; unsigned w = 1, h = 1;
+        snprintf(hex, sizeof hex, "%016llx", (unsigned long long)sh[1]->key);
+        if (t && sscanf(t, "%ux%u", &w, &h) == 2 && keys && strstr(keys, hex) && w >= 1 && w <= 4 && h >= 1 && h <= 4) {
+            fsr.fragmentSize = (VkExtent2D){w, h}; fsr.pNext = P->ci.pNext; P->ci.pNext = &fsr; vrs = 1;
+            static _Atomic int n; if (atomic_fetch_add(&n, 1) < 64) VLOG("fragment shading rate test: fragment %s at %ux%u", hex, w, h); } }
     if (deadly_skip("whole graphics pipeline", pre0 ? pre0->key : 0, sh[1] ? sh[1]->key : 0)) r = VK_ERROR_INITIALIZATION_FAILED;
     else { int bslot = build_begin("whole graphics pipeline", pre0 ? pre0->key : 0, sh[1] ? sh[1]->key : 0);
            r = vk.vkCreateGraphicsPipelines(V.dev, g_pc, 1, &P->ci, NULL, &p);
            build_end(bslot); }
+    P->ci.flags = flags0;
+    if (vrs) P->ci.pNext = fsr.pNext;
+    if (stats && !r && p) pipe_stats(p, sh[1] ? "graphics (fragment key)" : "graphics (no fragment; vertex key)", sh[1] ? sh[1]->key : pre0 ? pre0->key : 0, 0, 0);
     P->ci.pNext = fbi.pNext;
     uint64_t dns = now_ns() - t0; double ms_ = dns / 1e6;
     pthread_mutex_lock(&g_mu);
@@ -1898,7 +1917,10 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, const vka_img
     // replayed as compute pipelines on native mesh"
     int notcs = V.mesh && cs->e->stage >= DMSH_VK_STAGE_TS;
     if (!notcs) ci.stage.module = img ? vka_shader_img_module(cs, &k.rt) : vka_shader_cs_module(cs);
-    if (V.pexec) ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    int stats = V.pexec;   // (DM_VK_PIPE_STATS_KEYS: only the listed programs, see full_pipeline)
+    if (stats) { const char *only = getenv("DM_VK_PIPE_STATS_KEYS"); char hex[20];
+                 if (only && *only) { snprintf(hex, sizeof hex, "%016llx", (unsigned long long)cs->key); stats = strstr(only, hex) != NULL; } }
+    if (stats) ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     VkPipeline p = VK_NULL_HANDLE; VkResult r; int over = 0;
     // Shared memory past the device's limit is invalid usage (the driver may refuse, crash or run it with less). The translator keeps a program's shared memory past
     // DMSH_VK_SHARED_MAX in a storage buffer (DMSH_VK_KIND_SHARED_SPILL), and e->shared is then what stays in workgroup memory; a program still over this device's
@@ -1923,7 +1945,7 @@ static VkPipeline cs_obtain(vka_shader *cs, const vka_layout *lay, const vka_img
     { uint64_t dns = now_ns() - t0; g_create_ms += dns / 1e6; if (!prewarm) g_create_ns += dns; }
     g->p = p; g->busy = 0; pthread_cond_broadcast(&g_busy_cv);
     pthread_mutex_unlock(&g_mu);
-    if (V.pexec && !r && p) pipe_stats(p, cs->e->stage >= DMSH_VK_STAGE_TS ? (cs->e->stage == DMSH_VK_STAGE_TS ? "task (compute)" : "mesh (compute)") : "compute", cs->key, cs->e->local[0], shared);
+    if (stats && !r && p) pipe_stats(p, cs->e->stage >= DMSH_VK_STAGE_TS ? (cs->e->stage == DMSH_VK_STAGE_TS ? "task (compute)" : "mesh (compute)") : "compute", cs->key, cs->e->local[0], shared);
     if (r && !over) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("compute pipeline %016llx: %d; its dispatches are skipped", (unsigned long long)cs->key, r); }
     { double ms_ = (now_ns() - t0) / 1e6; static _Atomic int n; if (!r && ms_ > 50 && atomic_fetch_add(&n, 1) < 200) VLOG("compute pipeline %016llx took %.0f ms%s", (unsigned long long)cs->key, ms_, prewarm ? " (prewarm)" : "");
     // (one not made stays out of the prewarm list. A task / mesh program's fallback compute is recorded: it is what warms those stages on a driver that emulates mesh, Qualcomm's

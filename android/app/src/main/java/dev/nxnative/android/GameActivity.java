@@ -488,15 +488,33 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             if (prof != null) env.addAll(prof.ndsrEnv(Prefs.ndsr(this, id)));
             // Scene resolution 720p (Game settings): the RomFS overlay made on the phone from the player's files, while it matches this pack (SceneOverlay)
             String sceneNote = null;
+            List<String> overlays = new ArrayList<>();   // DM_ROMFS_OVERLAY's folders (they hold different files: the scene's Bootup pack, the foliage pack)
             String sceneScale = Prefs.sceneScale(this, id, prof);
             if (sceneScale != null) {
-                if (SceneOverlay.current(files, id, sceneScale, prof.sceneExpect(), pack.version)) env.add("DM_ROMFS_OVERLAY=" + SceneOverlay.dir(files, id));
+                if (SceneOverlay.current(files, id, sceneScale, prof.sceneExpect(), pack.version)) overlays.add(SceneOverlay.dir(files, id).getPath());
                 else sceneNote = "[RED] [nxlaunch] Scene resolution " + Prefs.sceneLabel(prof, sceneScale) + ": the overlay " + SceneOverlay.dir(files, id) + " was not made for this pack (version "
                         + pack.version + ", scale " + sceneScale + "): the game's own scene size this run; choosing it again in its Game settings makes it again";
             }
+            // Ground foliage (Game settings): the level's RomFS overlay made on the phone from the player's files, while it matches this pack (FoliageOverlay)
+            String foliage = Prefs.foliage(this, id, prof);
+            if (foliage != null) {
+                String keys = prof.foliageLevels().get(foliage);
+                if (FoliageOverlay.current(files, id, foliage, keys, pack.version)) overlays.add(FoliageOverlay.dir(files, id, foliage).getPath());
+                else {
+                    String n = "[RED] [nxlaunch] Ground foliage " + foliage + ": the overlay " + FoliageOverlay.dir(files, id, foliage) + " was not made for this pack (version " + pack.version
+                            + "): the game's own foliage this run; choosing the level again in its Game settings makes it again";
+                    sceneNote = sceneNote == null ? n : sceneNote + "\n" + n;
+                }
+            }
+            if (!overlays.isEmpty()) env.add("DM_ROMFS_OVERLAY=" + String.join(":", overlays));
             Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings
             Fsr.env(this, env);   // FSR 1 upscaling (the in-game panel)
             GameGraphics.env(this, id, env);   // per-title choices, before the player's environment overrides
+            String lang = Prefs.gameLangCode(Prefs.gameLang(this, id));   // Game language (Game settings): the system language the host gives the game, else its default (US English)
+            if (lang != null) env.add("DM_LANG=" + lang);
+            // The frame hold of the APK's profile (fps_hold; DM_FPS_HOLD): a pack's game_profile.tsv is written once, when it is prepared, so a pack made before the row
+            // changed would keep the old one. env.txt and the game's own lines still override it (they come after)
+            if (prof != null && !prof.fpsHold.isEmpty()) env.add("DM_FPS_HOLD=" + prof.fpsHold);
             int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
             if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
             String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)

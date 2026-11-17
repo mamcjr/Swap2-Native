@@ -93,6 +93,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Measured:** Ocarina of Time by the scarecrow, 30 cap, 90 s: game time 1.000 of real time (was about 0.75), 1,800 of 1,800 frames held 3 vsyncs (a steady 20 fps), 158 late frames (516 with the first part alone, 12 failed probes; now 2); by Mido, 30.0 fps at 1.000 of real time, held 2 (unchanged).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### A 30 fps hold raised by loading stayed at 20 fps on Android
+
+- **Symptom:** (Android, a game with a frame step at a 30 fps cap and `fps_hold` on) a scene whose frames cost just under 33 ms runs at a steady 20 fps for whole runs: Ocarina of Time at Link's porch with its mesh geometry off (POCO F7 Ultra, 891.14, 2026-11-16) held 20.0 fps in every run at the 30 cap, and 30-32.5 fps at the game's own cap.
+- **Cause:** loading's late frames step the hold to 3 vsyncs at every start, and nothing brings it back. A trial needs 30 frames in a row at most 0.85 of 2 vsyncs (28.3 ms), which 30-33 ms frames never make; a probe needs a cost that held 2 vsyncs for 8 s (none yet) or a GPU called slowed, and the first probe, right after the load, failed and made the load's GPU time its reference. At the longer hold the GPU clock falls too, so the cost there kept looking above 2 vsyncs (a trial by share of a window, tried in `nvn_fstep.h`, never fired on the phone for that reason and was not kept).
+- **Fix:** the game's profile row `fps_hold off`: the hold stays at the cap's 2 vsyncs, a frame that runs long shows for 3, and the frame step pays the time back with steps of 3, so game time stays real time. The Android launcher passes the APK's row as `DM_FPS_HOLD` (`Profile.fpsHold`, `build.gradle` `fpsHoldOf`), since a pack's `game_profile.tsv` is written once, when it is prepared.
+- **Measured:** Link's porch, 30 cap, two runs each: mesh geometry off, 20.0 / 20.0 fps with the hold, 30.0 / 30.0 fps without (frames 33.3 ms at p50, 35.5-35.7 at p95; game time 1.004 of real time); mesh geometry on, 19.9 / 17.9 fps with, 22.2 / 20.9 fps without (1.002-1.003 of real time; frames shown 33 and 50 ms in turn where the hold showed a steady 50).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
+
 ### A frame step alone offered no cap in the Android launcher
 
 - **Symptom:** (Android, a game whose only frame control is the rewriter's frame step) the in-game panel says "This game picks its own frame rate" and shows no caps, and the game's Game settings show its Frame rate cap greyed out; a game left at "The game's own" then runs at its own step: Ocarina of Time at 21 fps ran at about 0.7 of real time (POCO F7 Ultra, the signed 0.1.8.8-beta, 2026-11-15; the user saw it).

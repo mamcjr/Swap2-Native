@@ -331,6 +331,18 @@
     <string name="s2_scene_making">Making the 720p scene from your game files…</string>
     <string name="s2_scene_made">720p scene ready: it applies from the next start.</string>
     <string name="s2_scene_failed">The 720p scene could not be made: %1$s</string>
+    <string name="s2_game_lang">Game language</string>
+    <string name="s2_game_lang_note">The language the game gets from the system; it shows it where it has that language. Applies on the next launch.</string>
+    <string name="s2_game_lang_default">Default (English, US)</string>
+    <string name="s2_game_lang_device">Phone language (%1$s)</string>
+    <string name="s2_foliage">Ground foliage</string>
+    <string name="s2_foliage_note">Fewer of the game\'s own ground plants and stones: lighter heavy scenes. Applies on the next launch.</string>
+    <string name="s2_foliage_game">Game default</string>
+    <string name="s2_foliage_reduced">Reduced (no moss or stones)</string>
+    <string name="s2_foliage_lowest">Lowest (also no undergrowth; a few cuttable plants that drop hearts and rupees are gone)</string>
+    <string name="s2_foliage_making">Preparing the ground foliage from your game files…</string>
+    <string name="s2_foliage_made">Ground foliage set: it applies on the next launch</string>
+    <string name="s2_foliage_failed">The ground foliage could not be prepared: %1$s</string>
     <string name="s2_scene_busy">a preparation is running; try again when it ends</string>
     <string name="s2_scene_running">The 720p scene is still being made; it turns on when it is ready</string>
     <string name="s2_scene_no_pack">prepare the game first (it needs the pack and the game\'s files)</string>
@@ -791,6 +803,8 @@
     <string name="s2_gfx_memory_alias">Shared buffer</string>
     <string name="s2_gfx_memory_placed">Direct mapping</string>
     <string name="s2_gfx_memory_note">How the game\'s memory reaches the GPU. Try the other one if the game closes by itself when a scene loads. Applies on the next launch.</string>
+    <string name="s2_gfx_mesh">Mesh geometry</string>
+    <string name="s2_gfx_mesh_note">On: the game draws everything. Off: much of the foliage, the falling leaves and some objects are not drawn, for more frames per second in heavy scenes.</string>
     <string name="s2_warm_title">Preparing %1$s\'s graphics</string>
     <string name="s2_warm_explain">Compiling the game\'s graphics pipelines for this phone\'s GPU driver, with the game closed, so the first minutes of play do not stop for them. Done once per driver and shader update; keep the phone charging.</string>
     <string name="s2_warm_starting">Starting…</string>
