@@ -2,7 +2,6 @@
 English one (values/) and no other, with the same placeholders (%s, %1$d, %%, ...) and plural forms, and no text aapt refuses (an unescaped apostrophe or
 double quote, a leading @ or ?). The languages are the Switch 2's: LANGUAGES below, one resource folder each. Run: python3 dm/tools/tests/test_android_strings.py"""
 import re
-import sys
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -110,4 +109,4 @@ class Strings(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    sys.exit(unittest.main())
+    unittest.main()
