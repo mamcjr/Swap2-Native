@@ -127,13 +127,21 @@ final class DumpLayout {
 
     /** What a dump holds, for a log line or a message's detail: "the base and update 131072", or that it holds no game code */
     static String describe(File dump) {
+        return describe(dump, "no game code (no exefs/main in the base or an update)", "the base", "update %1$s", "%1$s (no RomFS)", "and");
+    }
+
+    /**
+     * describe in the words given (for the launcher's message, from its string resources; the log keeps the English above): none when it holds no game code, base,
+     * update (%1$s: the version), noRomfs (%1$s: a version's name) and the word between the last two names
+     */
+    static String describe(File dump, String none, String base, String update, String noRomfs, String and) {
         List<Long> vs = versions(dump);
-        if (vs.isEmpty()) return "no game code (no exefs/main in the base or an update)";
+        if (vs.isEmpty()) return none;
         StringBuilder s = new StringBuilder();
         for (int i = 0; i < vs.size(); i++) {
             long v = vs.get(i);
-            s.append(i == 0 ? "" : i == vs.size() - 1 ? " and " : ", ").append(name(v));
-            if (!hasRomfs(dump, v)) s.append(" (no RomFS)");
+            String n = v == 0 ? base : String.format(java.util.Locale.ROOT, update, v);
+            s.append(i == 0 ? "" : i == vs.size() - 1 ? " " + and + " " : ", ").append(hasRomfs(dump, v) ? n : String.format(java.util.Locale.ROOT, noRomfs, n));
         }
         return s.toString();
     }

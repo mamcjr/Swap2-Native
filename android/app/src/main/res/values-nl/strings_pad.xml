@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">Tabbladen</string>
+    <string name="s2_pad_nintendo">Knoppen zoals bij Nintendo</string>
+    <string name="s2_pad_nintendo_note">In de menu\'s van de app bevestigt A (rechts) en gaat B (onder) terug, zoals op de Switch; uit: de onderste knop bevestigt. De besturing van games verandert niet.</string>
+</resources>

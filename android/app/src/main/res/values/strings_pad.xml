@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The gamepad in the app's own menus (PadNav, MainActivity.padKey): the hints' L R and Settings > Interface's layout switch -->
+    <string name="s2_hint_tabs">Tabs</string>
+    <string name="s2_pad_nintendo">Nintendo button layout</string>
+    <string name="s2_pad_nintendo_note">In the app\'s menus, A (right) confirms and B (bottom) goes back, as on the Switch; off, the bottom button confirms. Games keep their own controls.</string>
+</resources>

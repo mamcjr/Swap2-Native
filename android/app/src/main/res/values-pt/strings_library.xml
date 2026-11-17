@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The library's texts that were Java literals, in Brazilian Portuguese (values/strings_library.xml has the English) -->
+    <string name="s2l_cancel">Cancelar</string>
+    <string name="s2l_done">Concluído</string>
+    <string name="s2l_pick">Escolher…</string>
+    <string name="s2l_default">Padrão</string>
+    <string name="s2l_allow">Permitir</string>
+    <string name="s2l_access_needed">Necessário para ler o dump do jogo.</string>
+    <string name="s2l_this_game">Este jogo</string>
+    <string name="s2l_that_packs_game">O jogo desse pacote</string>
+    <string name="s2l_the_zip">o .zip</string>
+    <string name="s2l_simulated">(simulado)</string>
+    <string name="s2l_unsupported">%1$s não é compatível com este app: este jogo, ou a versão desta região, não tem perfil de jogo. Title IDs compatíveis: %2$s. (Um perfil pode ser adicionado em %3$s: game.tsv e suas tabelas, como em dm/games do repositório.)</string>
+
+    <!-- Manage -->
+    <string name="s2l_manage_facts">Title ID: %1$s\nJogo: %2$s\nPacote: %3$s\nShaders: %4$s\nSaves: %5$s</string>
+    <string name="s2l_shaders_present">presentes (%1$s)</string>
+    <string name="s2l_not_set">não definida</string>
+    <string name="s2l_remove_from_list">Remover da lista</string>
+    <string name="s2l_remove_title">Remover %1$s?</string>
+    <string name="s2l_remove_text">Só a entrada da lista sai. Seu dump, o pacote e os seus saves continuam no celular; Adicionar jogo traz o jogo de volta.</string>
+    <string name="s2l_remove_text_save">Só a entrada da lista sai. Seu dump, o pacote e os seus saves (%1$s) continuam no celular; Adicionar jogo traz o jogo de volta.</string>
+    <string name="s2l_remove">Remover</string>
+    <string name="s2l_add_cannot_use">%1$s não pode ser usado: %2$s</string>
+    <string name="s2l_add_no_romfs_nup">%1$s não tem %2$s com RomFS (o pacote é da versão %3$s).</string>
+    <string name="s2l_add_no_romfs">Nenhuma RomFS em %1$s (procurado em %2$s, romfs/ e updates/&lt;versão&gt;/romfs).</string>
+
+    <!-- Settings: frame rate cap, frame generation, logs -->
+    <string name="s2l_cap_own">O do próprio jogo</string>
+    <string name="s2l_cap_fps">%1$d fps</string>
+    <string name="s2l_dll_installed">Lossless.dll instalado</string>
+    <string name="s2l_dll_not_installed">Lossless.dll não instalado: %1$s</string>
+    <string name="s2l_lsfg_put_it">Coloque-o em Documents/Emulation/bios ou Switch2, ou escolha o arquivo.</string>
+    <string name="s2l_lsfg_credit">Portado do Eden (GPL-3.0-or-later). O Lossless.dll é seu; ele nunca faz parte do app.</string>
+    <string name="s2l_lsfg_pick_dll">Escolher Lossless.dll</string>
+    <string name="s2l_no_log">Ainda não há log.</string>
+    <string name="s2l_no_log_game">Ainda não há log deste jogo.</string>
+    <string name="s2l_share_file">Compartilhar %1$s</string>
+    <string name="s2l_no_app_opens">Nenhum app consegue abrir %1$s</string>
+
+    <!-- Folders -->
+    <string name="s2l_folders_no_games">Ainda não há jogos: use + Adicionar jogo primeiro. Cada jogo tem as próprias pastas (no ⋯ do cartão › Pastas…).</string>
+    <string name="s2l_folders_which_game">Pastas de qual jogo?</string>
+    <string name="s2l_folders_title">Pastas · %1$s</string>
+    <string name="s2l_folders_game">Pasta do jogo</string>
+    <string name="s2l_folders_game_nup">Jogo (arquivo .nup)</string>
+    <string name="s2l_folders_pack">Pasta do pacote e dos shaders (pack.tsv, shaders/)</string>
+    <string name="s2l_folders_save">Pasta do save</string>
+    <string name="s2l_folders_picked">(escolhida)</string>
+    <string name="s2l_folders_default_app">(padrão: no armazenamento do app)</string>
+    <string name="s2l_folders_default_beside">(padrão: ao lado do jogo)</string>
+    <string name="s2l_folders_library_present">Biblioteca de shaders %1$s: presente.</string>
+    <string name="s2l_folders_pick_save">Escolha a pasta do save de %1$s</string>
+    <string name="s2l_folders_kept">Isto é mantido quando o app é atualizado. Escolher uma pasta nunca move, copia ou apaga nada sem perguntar.</string>
+    <string name="s2l_folders_not_pack">Não é uma pasta de pacote: %1$s</string>
+    <string name="s2l_folders_other_game">Esse pacote é de %1$s, não de %2$s (%3$s).</string>
+    <string name="s2l_folders_pack_set">Pasta do pacote definida</string>
+    <string name="s2l_folders_pack_ready">Ela tem a biblioteca de shaders deste app (%1$s): pronto para jogar.</string>
+    <string name="s2l_save_default_old">(padrão: seu save de uma versão anterior, ao lado do jogo. A próxima inicialização do jogo o copia para o armazenamento do app, %1$s, e passa a usá-lo de lá; esta pasta nunca é alterada)</string>
+    <string name="s2l_save_default_app">(padrão: no armazenamento do app). Fazer cópia de segurança coloca as cópias em %1$s, no armazenamento compartilhado: elas ficam mesmo se o app for desinstalado.</string>
+    <string name="s2l_save_default_copied">(padrão: no armazenamento do app; copiado de %1$s, que é mantido como estava). Fazer cópia de segurança coloca as cópias em %2$s, no armazenamento compartilhado: elas ficam mesmo se o app for desinstalado.</string>
+    <string name="s2l_save_copy_title">Copiar o save?</string>
+    <string name="s2l_save_copy_text">A pasta escolhida está vazia. Seu save atual está em %1$s.\n\nCopiá-lo para %2$s? A pasta atual fica como está: nada é apagado.</string>
+    <string name="s2l_save_copy_use">Copiar e usar</string>
+    <string name="s2l_save_use_empty">Usar vazia</string>
+    <string name="s2l_save_copy_failed">A cópia falhou (%1$s); a pasta do save não foi alterada.</string>
+
+    <!-- A pack's shader library (Pack.libraryProblem) -->
+    <string name="s2l_lib_unreadable">A biblioteca de shaders do pacote (%1$s) não pode ser lida: %2$s</string>
+    <string name="s2l_lib_inputs">A biblioteca de shaders do pacote foi feita com outras tabelas de shaders (inputs %1$s) que não as deste app (%2$s): os shaders precisam ser feitos de novo.</string>
+    <string name="s2l_lib_none">A pasta do pacote %1$s não tem biblioteca de shaders: este app precisa de shaders/v-%2$s/dmsh_vk.lib nela.</string>
+    <string name="s2l_lib_version">A pasta do pacote %1$s tem a biblioteca de shaders da versão %2$s, mas este app precisa da versão %3$s (shaders/v-%3$s/dmsh_vk.lib).</string>
+
+    <!-- Whether a pack's code fits the game (PackCheck) -->
+    <string name="s2l_check_unfinished">O código do jogo no pacote está incompleto (falta %1$s.android.key: uma atualização do pacote parou no meio). Preparar de novo conclui.</string>
+    <string name="s2l_check_rewriting">O código do jogo no pacote está sendo reescrito (%1$s: %2$s). Deixe a preparação terminar primeiro.</string>
+    <string name="s2l_check_mods_gone">Os mods de %1$s mudaram (%2$s: o código foi reescrito com um mod que foi removido ou desativado). Preparar de novo aplica as mudanças.</string>
+    <string name="s2l_check_mods_new">Os mods de %1$s mudaram (%2$s: %3$s tem um mod que o código ainda não tem). Preparar de novo aplica as mudanças.</string>
+    <string name="s2l_check_mods_changed">Os mods de %1$s mudaram (%2$s: um mod dele mudou). Preparar de novo aplica as mudanças.</string>
+    <string name="s2l_check_mods_unreadable">Os mods de %1$s não podem ser lidos: %2$s</string>
+    <string name="s2l_check_no_module_folder">O pacote é de %1$s, atualização %2$s, mas a pasta do jogo não tem %3$s. Escolha o dump que tem essa atualização, ou use Preparar de novo com este.</string>
+    <string name="s2l_check_no_module_nup">O pacote é de %1$s, atualização %2$s, mas o .nup do jogo não tem %3$s. Escolha o dump que tem essa atualização, ou use Preparar de novo com este.</string>
+    <string name="s2l_check_unreadable">%1$s não pode ser lido: %2$s</string>
+    <string name="s2l_check_other_build">O pacote foi feito com outra build de %1$s (%2$s %3$s…), diferente da que está na pasta do jogo (%4$s…, atualização %5$s). O código travaria com este jogo: Preparar de novo faz um pacote a partir desta pasta.</string>
+    <string name="s2l_check_unsupported_update">O pacote é de %1$s, atualização %2$s; este app só aceita a atualização %3$s. Faça o dump do jogo com essa atualização e prepare-o.</string>
+
+    <!-- Export pack… and Import pack… -->
+    <string name="s2l_pack_export_none">Não há pacote para exportar: %1$s</string>
+    <string name="s2l_pack_export_where">Escolha a pasta para o .zip do pacote</string>
+    <string name="s2l_pack_zip_no_path">Esse arquivo não está no armazenamento deste celular por um caminho que o app consiga ler (%1$s). Escolha-o pelo armazenamento do celular (☰ › o nome do celular), não por Recentes ou Downloads.</string>
+    <string name="s2l_pack_exporting">Exportando o pacote de %1$s…</string>
+    <string name="s2l_pack_export_space">o zip precisa de %1$s, e %2$s tem %3$s livres</string>
+    <string name="s2l_pack_export_failed">Nenhum pacote foi exportado: %1$s\n\nO pacote em %2$s foi apenas lido.</string>
+    <string name="s2l_pack_exported_title">Pacote exportado</string>
+    <string name="s2l_pack_exported_text">%1$s\n\n%2$s, conferido com o pacote arquivo por arquivo. Importar pacote… em outro celular (ou depois de uma nova instalação) o coloca de volta.</string>
+    <string name="s2l_pack_importing">Importando o pacote de %1$s…</string>
+    <string name="s2l_pack_import_space">o pacote precisa de %1$s, e o armazenamento do app tem %2$s livres</string>
+    <string name="s2l_pack_import_job">uma preparação deste jogo grava em %1$s (%2$s): deixe-a terminar, ou descarte-a no ⋯ Gerenciar dela, primeiro</string>
+    <string name="s2l_pack_started_meanwhile">%1$s foi iniciado nesse meio-tempo</string>
+
+    <!-- A game sent by an emulator frontend (FrontendLaunch) -->
+    <string name="s2l_frontend_access">Ative o acesso a todos os arquivos para o %1$s e inicie o jogo de novo.</string>
+    <string name="s2l_frontend_not_file">O frontend enviou %1$s, que não é um arquivo do armazenamento deste celular por um caminho que o app consiga ler. Configure o frontend para enviar o caminho do arquivo, ou a URI (SAF) do próprio armazenamento do celular.</string>
+    <string name="s2l_frontend_no_game">O frontend não enviou nenhum jogo: envie o .nup (ou a pasta do jogo) como dados do intent, ou o extra \"game\" com o caminho.</string>
+    <string name="s2l_frontend_missing">%1$s não existe (o frontend enviou %2$s).</string>
+    <string name="s2l_frontend_unreadable">%1$s não pode ser lido. Confira se o acesso a todos os arquivos está ativado.</string>
+    <string name="s2l_frontend_no_card">Nenhum jogo com o title ID %1$s está na Biblioteca. Adicione-o no %2$s primeiro, ou envie o arquivo do jogo.</string>
+    <string name="s2l_frontend_cannot_start">Não foi possível iniciar o jogo</string>
+
+    <!-- A .nup used where it is (PickedNup) -->
+    <string name="s2l_nup_none_picked">Nenhum arquivo foi escolhido.</string>
+    <string name="s2l_nup_no_grant">O Android não deu acesso de leitura permanente a esse arquivo (%1$s). Escolha-o pelo armazenamento do celular no seletor de arquivos (não por Recentes nem pela lista de compartilhamento de outro app).</string>
+    <string name="s2l_nup_bad_name">O nome desse arquivo não pode ser usado.</string>
+    <string name="s2l_nup_not_nup">%1$s não é um arquivo .nup (o nome precisa terminar em .nup).</string>
+    <string name="s2l_nup_cannot_create">Não foi possível criar %1$s.</string>
+    <string name="s2l_nup_too_small">%1$s é pequeno demais para ser um arquivo .nup (%2$s bytes).</string>
+    <string name="s2l_nup_unlinked">%1$s não está mais vinculado ao app. Escolha-o de novo.</string>
+    <string name="s2l_nup_provider_none">O provedor de arquivos do Android não retornou nenhum arquivo para %1$s.</string>
+    <string name="s2l_nup_no_longer_read">O app não consegue mais ler %1$s (%2$s). Escolha-o de novo.</string>
+    <string name="s2l_nup_cannot_open">%1$s não existe ou não pode ser aberto (%2$s). Escolha-o de novo.</string>
+    <string name="s2l_nup_streamed">%1$s foi entregue como fluxo, não como arquivo deste celular (%2$s), então o jogo não consegue buscar posições nele onde está. Escolha-o pelo armazenamento do celular no seletor de arquivos, ou copie-o para o app.</string>
+    <string name="s2l_nup_no_size">%1$s não tem um tamanho legível por este provedor de arquivos. Escolha-o pelo armazenamento do celular no seletor de arquivos, ou copie-o para o app.</string>
+</resources>

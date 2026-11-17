@@ -41,7 +41,7 @@ def edit(raw, file_part, keys, log=print):
         found = []
         done = set()
 
-        def walk(off):
+        def walk(off, by=by, found=found, done=done):
             if off in done:
                 return
             done.add(off)

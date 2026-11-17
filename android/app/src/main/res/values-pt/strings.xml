@@ -105,7 +105,7 @@
     <string name="s2_touch_auto">Automático</string>
     <string name="s2_touch_bananza">Donkey Kong Bananza</string>
     <string name="s2_touch_classic">Controle clássico</string>
-    <string name="s2_touch_show">Mostrar os controles na tela (somem com um controle conectado; o botão Home dele abre este painel)</string>
+    <string name="s2_touch_show">Mostrar os controles na tela (somem com um controle conectado; o botão Home dele, ou − e + segurados juntos, abre este painel)</string>
     <string name="s2_touch_per_game">Layout, tamanho, opacidade e vibração são salvos para este jogo.</string>
     <string name="s2_touch_dk_hint">Analógico esquerdo: movimento. Direito: câmera. Direcional: formas, habilidades e foto. L+R: Bananza. Ajuste as posições no editor de controles.</string>
     <string name="s2_touch_racing">Mario Kart World — corrida</string>

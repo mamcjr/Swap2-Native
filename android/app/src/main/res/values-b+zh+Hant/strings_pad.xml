@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">分頁</string>
+    <string name="s2_pad_nintendo">任天堂按鍵配置</string>
+    <string name="s2_pad_nintendo_note">在應用程式選單中，與 Switch 相同，A（右）確認，B（下）返回；關閉後由下方按鍵確認。遊戲內的操作不變。</string>
+</resources>

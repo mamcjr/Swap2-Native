@@ -2,16 +2,16 @@
 # <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
 # A table of its own, not game.tsv rows: game.tsv is part of a pack's rewrite key (pack_android.py rewrite_key), and a change here must not make packs stale.
 
-# In bring-up on Android: it reaches its first frames and does not play yet on the tested phone (the note)
-status	bring-up
+# Played on the POCO F7 Ultra (Adreno 830) with Turnip V38 by the user (2026-11-15/16), so no start-up warning of its own: what still draws wrongly or stops is in
+# the note (mesh / task draws without a compute fallback in the d274c85fc9f9 library, Qualcomm's 891.x drivers crashing in their own vkQueueBindSparse)
+status	playable
 
 # Memory: on the 16 GB phone (14.66 GiB totalMem) the game reaches its first frames and is stopped by the low-memory killer about 20 s in (the note); nothing less has run it
 required	ram_gib	14	Memory: the game needs more than 8 GB; even a 16 GB phone runs short today
 
-# The shader library: 168 compute shaders take 49,152 bytes of shared memory (shader_facts.tsv), more than Vulkan's minimum of 16 KiB. The tested phone reports 32,768
-# (Adreno 840, Qualcomm 718a07726a) and the game still reaches its first frames there, so the row is degraded, not required: what those dispatches do above the limit
-# (pipeline refused, dispatch skipped, or the driver takes it anyway) is not measured yet (open). Make it required once a phone shows they fail
-degraded	limit.maxComputeSharedMemorySize	49152	Compute shared memory: 168 of the game's compute shaders take 48 KiB, more than this GPU's limit, and what that leaves out is not measured yet
+# The shader library: 168 compute shaders take 49,152 bytes of shared memory (shader_facts.tsv), more than Vulkan's minimum of 16 KiB. The tested phones report 32,768
+# (Adreno 840 and 830) and the game runs there: on the POCO F7 Ultra (891.14, 2026-11-16) no compute pipeline was refused. No row, so no start-up warning for it;
+# make it a required row once a phone shows those dispatches fail (what the driver does above its limit is still not measured: open)
 required	feature.textureCompressionBC	1	BC compressed textures: the game's textures are sampled as they are, never decoded on the CPU
 required	feature.textureCompressionASTC_LDR	1	ASTC compressed textures: the game's textures are sampled as they are, never decoded on the CPU
 

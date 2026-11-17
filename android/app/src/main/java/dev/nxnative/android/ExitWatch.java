@@ -275,20 +275,46 @@ final class ExitWatch {
                 File dg = log == null ? null : digestOf(log);
                 String url = v == null ? null : v.docUrl();
                 String likely = LogDigest.likely(v, end.why);
-                AlertDialog.Builder b = new AlertDialog.Builder(a).setTitle(ExitNotice.TITLE).setMessage(ExitNotice.message(rec.get("name"), end.why, likely))
-                        .setPositiveButton("OK", null);
-                if (log != null) b.setNeutralButton("Share log", (d, w) -> a.shareLog(log, dg != null && dg.isFile() ? dg : null));
-                if (likely != null && url != null) b.setNegativeButton("What it means", (d, w) -> a.openLink(url));
+                AlertDialog.Builder b = new AlertDialog.Builder(a).setTitle(R.string.s2g_exit_title).setMessage(message(a, rec.get("name"), end.why, likely))
+                        .setPositiveButton(android.R.string.ok, null);
+                if (log != null) b.setNeutralButton(R.string.s2g_exit_share, (d, w) -> a.shareLog(log, dg != null && dg.isFile() ? dg : null));
+                if (likely != null && url != null) b.setNegativeButton(R.string.s2g_exit_what, (d, w) -> a.openLink(url));
                 showing = b.show();
             });
         }, "exit-digest").start();
     }
 
-    /** The game's screen restored into a new process (GameActivity.onCreate): the cause of the end before, when the record has one, else null; marked shown */
+    /** The game's screen restored into a new process (GameActivity.onCreate): the cause of the end before (in the player's language), when the record has one,
+     *  else null; marked shown */
     static String restoredCause(Activity a) {
         Map<String, String> rec = read(a);
         String why = cause(a, rec, false);
         if (ExitNotice.pending(rec)) shown(a);
-        return why;
+        return why == null ? null : causeText(a, why);
+    }
+
+    /** ExitNotice.message in the player's language: the game's name and the cause, the log's likely cause (LogDigest's, English: log_rules.tsv), Share log */
+    private static String message(Context c, String name, String cause, String likely) {
+        String n = name == null || name.isEmpty() || name.equals("null") ? c.getString(R.string.s2g_exit_the_game) : name;
+        return n + ": " + causeText(c, cause) + (likely == null || likely.isEmpty() ? "" : "\n\n" + c.getString(R.string.s2g_exit_likely, likely))
+                + "\n\n" + c.getString(R.string.s2g_exit_share_note);
+    }
+
+    /** One of ExitNotice's cause sentences (English: its JVM test checks them, LogDigest.likely compares with them) in the player's language; another text as it is */
+    static String causeText(Context c, String why) {
+        int id = why == null ? 0
+                : why.equals(ExitNotice.JAVA) ? R.string.s2g_exit_java
+                : why.equals(ExitNotice.NATIVE) ? R.string.s2g_exit_native
+                : why.equals(ExitNotice.FATAL) ? R.string.s2g_exit_fatal
+                : why.equals(ExitNotice.GPU) ? R.string.s2g_exit_gpu
+                : why.equals(ExitNotice.MEMORY) ? R.string.s2g_exit_memory
+                : why.equals(ExitNotice.MEMORY_BG) ? R.string.s2g_exit_memory_bg
+                : why.equals(ExitNotice.KILLED) ? R.string.s2g_exit_killed
+                : why.equals(ExitNotice.ANR_TEXT) ? R.string.s2g_exit_anr
+                : why.equals(ExitNotice.RESOURCES) ? R.string.s2g_exit_resources
+                : why.equals(ExitNotice.PERMISSION) ? R.string.s2g_exit_permission
+                : why.equals(ExitNotice.HOST_ERROR) ? R.string.s2g_exit_host_error
+                : why.equals(ExitNotice.UNKNOWN_TEXT) ? R.string.s2g_exit_unknown : 0;
+        return id != 0 ? c.getString(id) : why;
     }
 }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_app_lang">应用语言</string>
+    <string name="s2_app_lang_note">这些菜单的语言</string>
+    <string name="s2_app_lang_system">手机语言</string>
+</resources>

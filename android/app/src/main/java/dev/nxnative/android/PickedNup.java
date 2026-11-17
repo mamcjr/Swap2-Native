@@ -68,26 +68,25 @@ final class PickedNup {
      * where it is ({@link Streamed} when the provider streams the file instead of giving a seekable descriptor).
      */
     static File picked(Context c, Uri uri) throws IOException {
-        if (uri == null) throw new IOException("No file was picked.");
+        if (uri == null) throw new IOException(c.getString(R.string.s2l_nup_none_picked));
         ContentResolver cr = c.getContentResolver();
         try {
             cr.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (SecurityException e) {
-            throw new IOException("Android did not grant lasting read access to that file (" + e.getMessage()
-                    + "). Pick it from the phone's storage in the file picker (not from Recent or another app's share list).");
+            throw new IOException(c.getString(R.string.s2l_nup_no_grant, String.valueOf(e.getMessage())));
         }
         String name = displayName(cr, uri);
         String bad = PickedPath.nameProblem(name);
-        if (bad != null) throw new IOException(bad);
+        if (bad != null) throw new IOException(bad.equals(PickedPath.BAD_NAME) ? c.getString(R.string.s2l_nup_bad_name) : c.getString(R.string.s2l_nup_not_nup, String.valueOf(CopyPlan.safeName(name))));
         File root = AppStorage.root(c);
         String key = PickedPath.key(uri.toString());
         File standIn = PickedPath.standIn(root, key, name);
         File dir = standIn.getParentFile();
-        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create " + dir + ".");
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException(c.getString(R.string.s2l_nup_cannot_create, dir.getPath()));
         Files.write(uriFile(dir).toPath(), (uri + "\n" + name + "\n").getBytes(StandardCharsets.UTF_8));
         // Open it once now: a pipe-backed provider (Streamed) or a file that is not a .nup fails here, before a card is made
         try (Nup.Source s = openSource(c, standIn)) {
-            if (s.size < 128) throw new IOException(name + " is too small to be a .nup file (" + s.size + " bytes).");
+            if (s.size < 128) throw new IOException(c.getString(R.string.s2l_nup_too_small, name, String.valueOf(s.size)));
         } catch (IOException e) {
             uriFile(dir).delete();
             dir.delete();
@@ -117,11 +116,11 @@ final class PickedNup {
      */
     private static Nup.Source openSource(Context c, File standIn) throws IOException {
         Uri uri = uriOf(c, standIn);
-        if (uri == null) throw new IOException(standIn.getName() + " is no longer linked in the app. Pick it again.");
+        if (uri == null) throw new IOException(c.getString(R.string.s2l_nup_unlinked, standIn.getName()));
         ParcelFileDescriptor pfd = openPfd(c, uri, standIn.getName());
         boolean ok = false;
         try {
-            long size = seekableSize(pfd, standIn.getName());
+            long size = seekableSize(c, pfd, standIn.getName());
             FileInputStream in = new FileInputStream(pfd.getFileDescriptor());
             String id = uri + "|" + size + "|" + queryLong(c.getContentResolver(), uri, DocumentsContract.Document.COLUMN_LAST_MODIFIED);
             ok = true;
@@ -140,10 +139,10 @@ final class PickedNup {
     static int detachedFd(Context c, File game) throws IOException {
         if (!is(c, game)) return -1;
         Uri uri = uriOf(c, game);
-        if (uri == null) throw new IOException(game.getName() + " is no longer linked in the app. Pick it again.");
+        if (uri == null) throw new IOException(c.getString(R.string.s2l_nup_unlinked, game.getName()));
         ParcelFileDescriptor pfd = openPfd(c, uri, game.getName());
         try {
-            seekableSize(pfd, game.getName());
+            seekableSize(c, pfd, game.getName());
             return pfd.detachFd();
         } catch (Throwable t) {
             try { pfd.close(); } catch (IOException ignored) {}
@@ -179,28 +178,27 @@ final class PickedNup {
     private static ParcelFileDescriptor openPfd(Context c, Uri uri, String name) throws IOException {
         try {
             ParcelFileDescriptor pfd = c.getContentResolver().openFileDescriptor(uri, "r");
-            if (pfd == null) throw new IOException("Android's file provider returned no file for " + name + ".");
+            if (pfd == null) throw new IOException(c.getString(R.string.s2l_nup_provider_none, name));
             return pfd;
         } catch (SecurityException | IllegalArgumentException e) {
-            throw new IOException("The app can no longer read " + name + " (" + e.getMessage() + "). Pick it again.");
+            throw new IOException(c.getString(R.string.s2l_nup_no_longer_read, name, String.valueOf(e.getMessage())));
         } catch (IOException e) {
-            throw new IOException(name + " is not there or cannot be opened (" + e.getMessage() + "). Pick it again.");
+            throw new IOException(c.getString(R.string.s2l_nup_cannot_open, name, String.valueOf(e.getMessage())));
         }
     }
 
     /** Checks that the descriptor is a seekable file (pread at 0 works) and returns its byte size */
-    private static long seekableSize(ParcelFileDescriptor pfd, String name) throws IOException {
+    private static long seekableSize(Context c, ParcelFileDescriptor pfd, String name) throws IOException {
         try {
             long end = Os.lseek(pfd.getFileDescriptor(), 0, OsConstants.SEEK_END);
             Os.lseek(pfd.getFileDescriptor(), 0, OsConstants.SEEK_SET);
             if (end > 0) return end;
         } catch (ErrnoException e) {
-            throw new Streamed(name + " was provided as a stream rather than a file on this phone (" + Os.strerror(e.errno)
-                    + "), so the game cannot seek in it where it is. Pick it from the phone's storage in the file picker, or copy it into the app.");
+            throw new Streamed(c.getString(R.string.s2l_nup_streamed, name, Os.strerror(e.errno)));
         }
         long s = pfd.getStatSize();
         if (s > 0) return s;
-        throw new Streamed(name + " has no readable size from this file provider. Pick it from the phone's storage in the file picker, or copy it into the app.");
+        throw new Streamed(c.getString(R.string.s2l_nup_no_size, name));
     }
 
     private static String displayName(ContentResolver cr, Uri uri) {

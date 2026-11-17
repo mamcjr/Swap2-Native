@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The library's texts that were Java literals: Home, Manage, Folders, packs, frontends, picked .nup files (values-pt/strings_library.xml has the Portuguese) -->
+    <string name="s2l_cancel">Cancel</string>
+    <string name="s2l_done">Done</string>
+    <string name="s2l_pick">Pick…</string>
+    <string name="s2l_default">Default</string>
+    <string name="s2l_allow">Allow</string>
+    <string name="s2l_access_needed">Needed to read your game dump.</string>
+    <string name="s2l_this_game">This game</string>
+    <string name="s2l_that_packs_game">That pack\'s game</string>
+    <string name="s2l_the_zip">the .zip</string>
+    <string name="s2l_simulated">(simulated)</string>
+    <string name="s2l_unsupported">%1$s is not supported by this app: this game, or this region\'s version of it, has no game profile. Supported title IDs: %2$s. (A profile can be added in %3$s: game.tsv and its tables, as in the repository\'s dm/games.)</string>
+
+    <!-- Manage -->
+    <string name="s2l_manage_facts">Title ID: %1$s\nGame: %2$s\nPack: %3$s\nShaders: %4$s\nSaves: %5$s</string>
+    <string name="s2l_shaders_present">present (%1$s)</string>
+    <string name="s2l_not_set">not set</string>
+    <string name="s2l_remove_from_list">Remove from list</string>
+    <string name="s2l_remove_title">Remove %1$s?</string>
+    <string name="s2l_remove_text">Only the list entry goes. Your dump, its pack and your saves stay on the phone; Add game brings it back.</string>
+    <string name="s2l_remove_text_save">Only the list entry goes. Your dump, its pack and your saves (%1$s) stay on the phone; Add game brings it back.</string>
+    <string name="s2l_remove">Remove</string>
+    <string name="s2l_add_cannot_use">%1$s cannot be used: %2$s</string>
+    <string name="s2l_add_no_romfs_nup">%1$s has no %2$s with a RomFS (the pack is for version %3$s).</string>
+    <string name="s2l_add_no_romfs">No RomFS in %1$s (looked for %2$s, romfs/ and updates/&lt;version&gt;/romfs).</string>
+
+    <!-- Settings: frame rate cap, frame generation, logs -->
+    <string name="s2l_cap_own">The game\'s own</string>
+    <string name="s2l_cap_fps">%1$d fps</string>
+    <string name="s2l_dll_installed">Lossless.dll installed</string>
+    <string name="s2l_dll_not_installed">Lossless.dll not installed: %1$s</string>
+    <string name="s2l_lsfg_put_it">Put it in Documents/Emulation/bios or Switch2, or pick it.</string>
+    <string name="s2l_lsfg_credit">Ported from Eden (GPL-3.0-or-later). Lossless.dll is yours; it is never part of the app.</string>
+    <string name="s2l_lsfg_pick_dll">Pick Lossless.dll</string>
+    <string name="s2l_no_log">No log yet.</string>
+    <string name="s2l_no_log_game">No log of this game yet.</string>
+    <string name="s2l_share_file">Share %1$s</string>
+    <string name="s2l_no_app_opens">No app can open %1$s</string>
+
+    <!-- Folders -->
+    <string name="s2l_folders_no_games">No games yet: + Add game first. Each game has its own folders (its card\'s ⋯ › Folders…).</string>
+    <string name="s2l_folders_which_game">Folders of which game?</string>
+    <string name="s2l_folders_title">Folders · %1$s</string>
+    <string name="s2l_folders_game">Game folder</string>
+    <string name="s2l_folders_game_nup">Game (.nup file)</string>
+    <string name="s2l_folders_pack">Pack and shader folder (pack.tsv, shaders/)</string>
+    <string name="s2l_folders_save">Save folder</string>
+    <string name="s2l_folders_picked">(picked)</string>
+    <string name="s2l_folders_default_app">(default: in the app\'s storage)</string>
+    <string name="s2l_folders_default_beside">(default: beside the game)</string>
+    <string name="s2l_folders_library_present">Shader library %1$s: present.</string>
+    <string name="s2l_folders_pick_save">Pick the folder for %1$s\'s save</string>
+    <string name="s2l_folders_kept">These are kept when the app is updated. Picking a folder never moves, copies or deletes anything without asking.</string>
+    <string name="s2l_folders_not_pack">Not a pack folder: %1$s</string>
+    <string name="s2l_folders_other_game">That pack is for %1$s, not %2$s (%3$s).</string>
+    <string name="s2l_folders_pack_set">Pack folder set</string>
+    <string name="s2l_folders_pack_ready">It has this app\'s shader library (%1$s): ready to play.</string>
+    <string name="s2l_save_default_old">(default: your save from an earlier version, beside the game. The game\'s next start copies it into the app\'s storage, %1$s, and plays it from there; this folder is never changed)</string>
+    <string name="s2l_save_default_app">(default: in the app\'s storage). Back up saves puts copies in %1$s, on shared storage: they stay when the app is uninstalled.</string>
+    <string name="s2l_save_default_copied">(default: in the app\'s storage; copied from %1$s, which is kept as it was). Back up saves puts copies in %2$s, on shared storage: they stay when the app is uninstalled.</string>
+    <string name="s2l_save_copy_title">Copy the save?</string>
+    <string name="s2l_save_copy_text">The folder you picked is empty. Your current save is in %1$s.\n\nCopy it into %2$s? The current folder stays as it is: nothing is deleted.</string>
+    <string name="s2l_save_copy_use">Copy and use</string>
+    <string name="s2l_save_use_empty">Use it empty</string>
+    <string name="s2l_save_copy_failed">The copy failed (%1$s); the save folder was not changed.</string>
+
+    <!-- A pack's shader library (Pack.libraryProblem) -->
+    <string name="s2l_lib_unreadable">The pack\'s shader library (%1$s) cannot be read: %2$s</string>
+    <string name="s2l_lib_inputs">The pack\'s shader library was built from other shader tables (inputs %1$s) than this app\'s (%2$s): its shaders need making again.</string>
+    <string name="s2l_lib_none">The pack folder %1$s has no shader library: this app needs shaders/v-%2$s/dmsh_vk.lib in it.</string>
+    <string name="s2l_lib_version">The pack folder %1$s has the shader library version %2$s, but this app needs version %3$s (shaders/v-%3$s/dmsh_vk.lib).</string>
+
+    <!-- Whether a pack's code fits the game (PackCheck) -->
+    <string name="s2l_check_unfinished">The pack\'s game code is unfinished (%1$s.android.key is missing: an update of the pack was stopped part way). Prepare again finishes it.</string>
+    <string name="s2l_check_rewriting">The pack\'s game code is being rewritten (%1$s: %2$s). Let preparing finish first.</string>
+    <string name="s2l_check_mods_gone">The mods for %1$s changed (%2$s: its code was rewritten with a mod that is gone or turned off). Prepare again applies them.</string>
+    <string name="s2l_check_mods_new">The mods for %1$s changed (%2$s: %3$s has a mod its code does not have yet). Prepare again applies them.</string>
+    <string name="s2l_check_mods_changed">The mods for %1$s changed (%2$s: a mod of it changed). Prepare again applies them.</string>
+    <string name="s2l_check_mods_unreadable">The mods for %1$s cannot be read: %2$s</string>
+    <string name="s2l_check_no_module_folder">The pack is for %1$s update %2$s, but the game folder has no %3$s. Pick the dump that has that update, or Prepare again from this one.</string>
+    <string name="s2l_check_no_module_nup">The pack is for %1$s update %2$s, but the game .nup has no %3$s. Pick the dump that has that update, or Prepare again from this one.</string>
+    <string name="s2l_check_unreadable">%1$s cannot be read: %2$s</string>
+    <string name="s2l_check_other_build">The pack was made from another build of %1$s (%2$s %3$s…) than the one in the game folder (%4$s…, update %5$s). Its code would crash with this game: Prepare again makes a pack from this folder.</string>
+    <string name="s2l_check_unsupported_update">The pack is for %1$s update %2$s; this app supports update %3$s only. Dump the game with that update and Prepare it.</string>
+
+    <!-- Export pack… and Import pack… -->
+    <string name="s2l_pack_export_none">There is no pack to export: %1$s</string>
+    <string name="s2l_pack_export_where">Pick the folder for the pack\'s .zip</string>
+    <string name="s2l_pack_zip_no_path">That file is not on this phone\'s storage by a path the app can read (%1$s). Pick it from the phone\'s storage (☰ › the phone\'s name), not from Recent or Downloads.</string>
+    <string name="s2l_pack_exporting">Exporting %1$s\'s pack…</string>
+    <string name="s2l_pack_export_space">the zip needs %1$s, and %2$s has %3$s free</string>
+    <string name="s2l_pack_export_failed">No pack was exported: %1$s\n\nThe pack in %2$s was only read.</string>
+    <string name="s2l_pack_exported_title">Pack exported</string>
+    <string name="s2l_pack_exported_text">%1$s\n\n%2$s, checked against the pack file by file. Import pack… on another phone (or after a new install) puts it back.</string>
+    <string name="s2l_pack_importing">Importing %1$s\'s pack…</string>
+    <string name="s2l_pack_import_space">the pack needs %1$s, and the app\'s storage has %2$s free</string>
+    <string name="s2l_pack_import_job">a Prepare job of this game writes to %1$s (%2$s): let it finish, or forget it in its ⋯ Manage, first</string>
+    <string name="s2l_pack_started_meanwhile">%1$s was started meanwhile</string>
+
+    <!-- A game sent by an emulator frontend (FrontendLaunch) -->
+    <string name="s2l_frontend_access">Turn on All files access for %1$s, then start the game again.</string>
+    <string name="s2l_frontend_not_file">The frontend sent %1$s, which is not a file on this phone\'s storage by a path the app can read. Set the frontend to send the file\'s path, or its storage (SAF) URI from the phone\'s own storage.</string>
+    <string name="s2l_frontend_no_game">The frontend sent no game: send the .nup (or the game folder) as the intent\'s data, or the extra \"game\" with its path.</string>
+    <string name="s2l_frontend_missing">%1$s is not there (the frontend sent %2$s).</string>
+    <string name="s2l_frontend_unreadable">%1$s cannot be read. Check that All files access is on.</string>
+    <string name="s2l_frontend_no_card">No game with title ID %1$s is on Home. Add it in %2$s first, or send the game\'s file instead.</string>
+    <string name="s2l_frontend_cannot_start">Cannot start the game</string>
+
+    <!-- A .nup used where it is (PickedNup) -->
+    <string name="s2l_nup_none_picked">No file was picked.</string>
+    <string name="s2l_nup_no_grant">Android did not grant lasting read access to that file (%1$s). Pick it from the phone\'s storage in the file picker (not from Recent or another app\'s share list).</string>
+    <string name="s2l_nup_bad_name">That file\'s name cannot be used.</string>
+    <string name="s2l_nup_not_nup">%1$s is not a .nup file (its name must end in .nup).</string>
+    <string name="s2l_nup_cannot_create">Cannot create %1$s.</string>
+    <string name="s2l_nup_too_small">%1$s is too small to be a .nup file (%2$s bytes).</string>
+    <string name="s2l_nup_unlinked">%1$s is no longer linked in the app. Pick it again.</string>
+    <string name="s2l_nup_provider_none">Android\'s file provider returned no file for %1$s.</string>
+    <string name="s2l_nup_no_longer_read">The app can no longer read %1$s (%2$s). Pick it again.</string>
+    <string name="s2l_nup_cannot_open">%1$s is not there or cannot be opened (%2$s). Pick it again.</string>
+    <string name="s2l_nup_streamed">%1$s was provided as a stream rather than a file on this phone (%2$s), so the game cannot seek in it where it is. Pick it from the phone\'s storage in the file picker, or copy it into the app.</string>
+    <string name="s2l_nup_no_size">%1$s has no readable size from this file provider. Pick it from the phone\'s storage in the file picker, or copy it into the app.</string>
+</resources>

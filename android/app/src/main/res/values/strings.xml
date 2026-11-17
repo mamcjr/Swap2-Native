@@ -108,7 +108,7 @@
     <string name="s2_touch_auto">Automatic</string>
     <string name="s2_touch_bananza">Donkey Kong Bananza</string>
     <string name="s2_touch_classic">Classic controller</string>
-    <string name="s2_touch_show">Show the on-screen controls (they hide while a controller is connected; its Home button opens this panel)</string>
+    <string name="s2_touch_show">Show the on-screen controls (they hide while a controller is connected; its Home button, or − and + held together, opens this panel)</string>
     <string name="s2_touch_per_game">Layout, size, opacity and vibration are saved for this game.</string>
     <string name="s2_touch_dk_hint">Left stick: move. Right stick: camera. D-pad: forms, skills and photo. L+R: Bananza. Use the layout editor to adjust positions.</string>
     <string name="s2_touch_racing">Mario Kart World — racing</string>

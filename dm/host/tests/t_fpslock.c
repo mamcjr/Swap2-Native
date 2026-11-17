@@ -82,6 +82,14 @@ static void check(int which) {
     } else if (which == 20) {   // a frame step alone (Ocarina of Time: the rewriter's FRAME_STEP stub and its state page, no limiter row)
         strcpy(g_mod[0].build_id, "e0f3ccfaf50065ae4ea01eb5aeb13b1a");
         dm_fps_state = object + 0x100;
+    } else if (which == 21) {   // Mario Kart World 1.8.0: no row (its framework's fixed interval did not keep the race at real time), so the paced cap
+        strcpy(g_mod[0].build_id, "d00e4f399e411d0613aa8d26b1c02fef");
+    } else if (which == 22) {   // DM_FPS_ROWS=0: Donkey Kong Bananza's floor row left out, so the paced cap (A/B against the row)
+        strcpy(g_mod[0].build_id, "e25c90c1c136638885659fd55bf8a03b");
+        setenv("DM_FPS_ROWS", "0", 1);
+    } else if (which == 23 || which == 24) {   // a main with no frame step and no limiter the host writes (Pokopia's): the cap by pacing presents; 24: DM_FPS_PACE=0
+        strcpy(g_mod[0].build_id, "76a489f3bd3642fa5e18bd83d32c98ba");
+        if (which == 24) setenv("DM_FPS_PACE", "0", 1);
     } else if (which >= 9) {   // the present interval alone (UE 4.18's nvn.SyncInterval); 12: a main the rewriter found no variable in
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         if (which != 12) cvar("nvn.SyncInterval", 0x8adca10);
@@ -160,16 +168,23 @@ static void check(int which) {
         dm_fps_target_set(0, "test"); assert(*t == 0 && dm_fps_target() == 0);   // back to the game's own step
         dm_fps_target_set(20, "test"); assert(*t == 0);   // a rate the step does not hold: the page stays
     }
+    else if (which == 21 || which == 22) {
+        assert(dm_fps_lock_paced() && !dm_fps_lock_floor() && writes == 0);
+        assert(dm_fps_lock_rates() == (1 | 2 | 4 | 32 | 64));
+    } else if (which == 23) {
+        assert(dm_fps_lock_paced() && !dm_fps_lock_floor() && writes == 0);
+        assert(dm_fps_lock_rates() == (1 | 2 | 4 | 32 | 64));   // 15, 20, 30, 60, and bit 6: paced by presents alone
+    } else if (which == 24) assert(!dm_fps_lock_paced() && dm_fps_lock_rates() == 0);
     else assert(sync[0] == 2 && sync[1] == 2 && writes == 0);
     munmap(base, len);
 }
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 21; i++) {
+    for (int i = 0; i < 25; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, floors behind pointers and under the controller's maximum, caps set while running, build gates and overrides passed");
+    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, floors behind pointers and under the controller's maximum, presents paced where nothing else holds a cap, caps set while running, build gates and overrides passed");
 }

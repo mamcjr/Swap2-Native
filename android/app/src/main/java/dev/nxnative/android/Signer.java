@@ -48,7 +48,12 @@ final class Signer {
 
     /** The build tag with its mark: "<tag> · official", "<tag> · unofficial build", or the tag alone (test app) */
     static String tag(String tag, boolean play, String[] signers) {
+        return tag(tag, play, signers, "official", "unofficial build");
+    }
+
+    /** tag with the mark in the words given (for the launcher's chips, from their string resources; logs and reports keep the English above) */
+    static String tag(String tag, boolean play, String[] signers, String official, String unofficial) {
         String m = mark(play, signers);
-        return m == null ? tag : tag + " · " + m;
+        return m == null ? tag : tag + " · " + (official(signers) ? official : unofficial);
     }
 }

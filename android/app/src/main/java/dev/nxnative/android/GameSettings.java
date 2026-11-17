@@ -179,13 +179,10 @@ final class GameSettings {
         Profile prof = Profile.of(id);
         if (prof != null && prof.hasResolution())   // only where it does something: a profile with window_fn or graphics_scale rows
             box.addView(new Ui.Setting(a, R.drawable.s2_ic_display, a.getString(R.string.s2_game_resolution), v -> resolution(a, g, again)).value(a.getString(R.string.s2_resolution_note))
-                    .override(a, Prefs.ownWindow(a, id), Prefs.windowName(Prefs.gameWindow(a, id), true)).chevron(a).view);
-        if (Prefs.ownRate(a, id)) {   // the host found no limiter it can hold for this game: choices would do nothing
-            Ui.Setting fixed = new Ui.Setting(a, R.drawable.s2_ic_gauge, a.getString(R.string.s2_frame_cap), null).value(a.getString(R.string.s2_frame_cap_own));
-            fixed.view.setClickable(false);
-            fixed.view.setAlpha(0.6f);
-            box.addView(fixed.view);
-        } else box.addView(new Ui.Setting(a, R.drawable.s2_ic_gauge, a.getString(R.string.s2_frame_cap), v -> cap(a, g, again)).value(a.getString(R.string.s2_frame_cap_note))
+                    .override(a, Prefs.ownWindow(a, id), Prefs.windowName(a, Prefs.gameWindow(a, id), true)).chevron(a).view);
+        // Every game has a cap: where the host finds no limiter it paces the presents (hle_fpslock.c dm_fps_lock_paced), so Prefs.ownRate, which an older host's run may have
+        // stored, no longer hides the row
+        box.addView(new Ui.Setting(a, R.drawable.s2_ic_gauge, a.getString(R.string.s2_frame_cap), v -> cap(a, g, again)).value(a.getString(R.string.s2_frame_cap_note))
                 .override(a, Prefs.ownFpsCap(a, id), MainActivity.capLabel(Prefs.fpsCap(a, id))).chevron(a).view);
         box.addView(new Ui.Setting(a, R.drawable.s2_ic_chip, a.getString(R.string.s2_game_lang), v -> gameLang(a, g, again))
                 .value(gameLangLabel(a, Prefs.gameLang(a, id)) + " · " + a.getString(R.string.s2_game_lang_note)).chevron(a).view);
@@ -473,7 +470,7 @@ final class GameSettings {
             String name = displayName(a, uri);
             stageMod(a, g, name, () -> {
                 try (InputStream in = a.getContentResolver().openInputStream(uri)) {
-                    if (in == null) throw new IOException("cannot open " + uri);
+                    if (in == null) throw new IOException(a.getString(R.string.s2s_cannot_open, String.valueOf(uri)));
                     return ExefsMods.stage(root, in, name);
                 }
             });
@@ -570,8 +567,8 @@ final class GameSettings {
 
     static String windowLabel(MainActivity a, String id) {
         String w = Prefs.gameWindow(a, id);
-        String l = Prefs.windowName(w, false);
-        return Prefs.ownWindow(a, id) ? l : "Default · " + l;
+        String l = Prefs.windowName(a, w, false);
+        return Prefs.ownWindow(a, id) ? l : a.getString(R.string.s2s_default_value, l);
     }
 
     private static void touchProfile(MainActivity a, Game g, Runnable done) {
@@ -589,13 +586,13 @@ final class GameSettings {
 
     static String capLabel(MainActivity a, String id) {
         String l = MainActivity.capLabel(Prefs.fpsCap(a, id));
-        return Prefs.ownFpsCap(a, id) ? l : "Default · " + l;
+        return Prefs.ownFpsCap(a, id) ? l : a.getString(R.string.s2s_default_value, l);
     }
 
     static String driverLabel(MainActivity a, String id) {
         GpuDriver.Info i = GpuDriver.selected(a, id);
-        String l = i == null ? "System (the phone's own driver)" : i.label();
-        return GpuDriver.choice(a, id) != null ? l : "Default · " + l;
+        String l = i == null ? a.getString(R.string.s2_driver_system_long) : i.label();
+        return GpuDriver.choice(a, id) != null ? l : a.getString(R.string.s2s_default_value, l);
     }
 
     private static void resolution(MainActivity a, Game g, Runnable done) {
@@ -605,10 +602,10 @@ final class GameSettings {
         for (int i = 0; i < Prefs.WINDOWS.length; i++) {
             if ("960x540".equals(Prefs.WINDOWS[i]) && (profile == null || !profile.supports540p())) continue;
             values.add(Prefs.WINDOWS[i]);
-            names.add(Prefs.WINDOW_NAMES[i]);
+            names.add(Prefs.windowName(a, i));
         }
         String[] labels = new String[values.size() + 1];
-        labels[0] = a.getString(R.string.s2_inherit_choice, Prefs.windowName(Prefs.defaultWindow(a, g.titleId), false));
+        labels[0] = a.getString(R.string.s2_inherit_choice, Prefs.windowName(a, Prefs.defaultWindow(a, g.titleId), false));
         for (int i = 0; i < names.size(); i++) labels[i + 1] = names.get(i);
         int checked = Prefs.ownWindow(a, g.titleId) ? 1 + Math.max(0, values.indexOf(Prefs.gameWindow(a, g.titleId))) : 0;
         new AlertDialog.Builder(a).setTitle(a.getString(R.string.s2_game_resolution) + " · " + g.name).setSingleChoiceItems(labels, checked, (x, w) -> {
@@ -741,7 +738,7 @@ final class GameSettings {
                         if (code == 0) { if (foliageWanted(id, level)) { Prefs.foliage(a, id, level); modToast(a, a.getString(R.string.s2_foliage_made)); } }
                         else if (code == SceneService.RUNNING) modToast(a, a.getString(R.string.s2_scene_running));
                         else {
-                            String why = code == SceneService.BUSY ? a.getString(R.string.s2_scene_busy) : msg != null ? msg : "exit " + code;
+                            String why = code == SceneService.BUSY ? a.getString(R.string.s2_scene_busy) : msg != null ? msg : a.getString(R.string.s2s_exit_code, code);
                             if (end) modToast(a, a.getString(R.string.s2_foliage_failed, why));
                             else a.error(a.getString(R.string.s2_foliage_failed, why));
                         }
@@ -821,7 +818,7 @@ final class GameSettings {
                             // an earlier run (its wait dialog closed with Back) is still making it; its answer turns 720p on while 720p is still the choice
                             modToast(a, a.getString(R.string.s2_scene_running));
                         } else {
-                            String why = code == SceneService.BUSY ? a.getString(R.string.s2_scene_busy) : msg != null ? msg : "exit " + code;
+                            String why = code == SceneService.BUSY ? a.getString(R.string.s2_scene_busy) : msg != null ? msg : a.getString(R.string.s2s_exit_code, code);
                             if (end) modToast(a, a.getString(R.string.s2_scene_failed, why));
                             else a.error(a.getString(R.string.s2_scene_failed, why));
                         }
@@ -861,9 +858,9 @@ final class GameSettings {
         t.setText(Prefs.gameEnv(a, g.titleId));
         LinearLayout box = new LinearLayout(a);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.addView(Ui.small(a, "KEY=VALUE lines for the host, one a line (# starts a comment). They come after env.txt and win over it, for " + g.name + " only."));
+        box.addView(Ui.small(a, a.getString(R.string.s2s_env_hint, g.name)));
         Ui.add(box, t, 8);
-        Ui.sheet(a, "Extra environment · " + g.name, box).setPositiveButton("Save", (x, w) -> { Prefs.gameEnv(a, g.titleId, t.getText().toString()); done.run(); })
-                .setNeutralButton("Clear", (x, w) -> { Prefs.gameEnv(a, g.titleId, null); done.run(); }).setNegativeButton(android.R.string.cancel, null).show();
+        Ui.sheet(a, a.getString(R.string.s2s_env_title, g.name), box).setPositiveButton(R.string.s2s_save, (x, w) -> { Prefs.gameEnv(a, g.titleId, t.getText().toString()); done.run(); })
+                .setNeutralButton(R.string.s2s_clear, (x, w) -> { Prefs.gameEnv(a, g.titleId, null); done.run(); }).setNegativeButton(android.R.string.cancel, null).show();
     }
 }

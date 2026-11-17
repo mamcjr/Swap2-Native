@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">Abas</string>
+    <string name="s2_pad_nintendo">Botões no padrão Nintendo</string>
+    <string name="s2_pad_nintendo_note">Nos menus do app, A (à direita) confirma e B (embaixo) volta, como no Switch; desligado, o botão de baixo confirma. Os controles dos jogos não mudam.</string>
+</resources>

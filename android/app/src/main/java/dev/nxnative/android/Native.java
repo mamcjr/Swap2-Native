@@ -14,16 +14,19 @@ final class Native {
     private Native() {}
 
     /** Loads the host of a game this APK runs (Profile). Throws IllegalStateException with a sentence for the user when it has none, or another game's is loaded */
-    static synchronized void load(String titleId) {
+    static synchronized void load(String titleId) { load(null, titleId); }
+
+    /** The same, its sentences in the player's language (c's resources; English without a context) */
+    static synchronized void load(android.content.Context c, String titleId) {
         if (titleId.equals(loaded)) return;
-        if (loaded != null) throw new IllegalStateException("this process runs the host of " + loaded + ", not " + titleId);
+        if (loaded != null) throw new IllegalStateException(c != null ? c.getString(R.string.s2g_native_other_host, loaded, titleId) : "this process runs the host of " + loaded + ", not " + titleId);
         String why = Profile.missing(titleId, null);
         if (why != null) throw new IllegalStateException(why);
         try {
             System.loadLibrary("nxhost");
             System.loadLibrary("nxlaunch");
         } catch (UnsatisfiedLinkError e) {
-            throw new IllegalStateException("The host of " + titleId + " cannot be loaded: " + e.getMessage());
+            throw new IllegalStateException(c != null ? c.getString(R.string.s2g_native_load_failed, titleId, e.getMessage()) : "The host of " + titleId + " cannot be loaded: " + e.getMessage());
         }
         loaded = titleId;
     }

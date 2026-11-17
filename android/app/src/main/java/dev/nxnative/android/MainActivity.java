@@ -100,6 +100,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        appContext = getApplicationContext();
         if (saved != null) {
             settingsPage = saved.getBoolean("settings");
             settingsCat = saved.getString("settingsCat");
@@ -564,17 +565,17 @@ public final class MainActivity extends Activity {
             c.setPadding(dp(16), dp(6), dp(8), dp(6));
             LinearLayout words = new LinearLayout(this);
             words.setOrientation(LinearLayout.VERTICAL);
-            words.addView(Ui.text(this, "Allow file access", 15, R.color.bn_text, 700));
-            words.addView(Ui.small(this, "Needed to read your game dump."));
+            words.addView(Ui.text(this, getString(R.string.s2_access_title), 15, R.color.bn_text, 700));
+            words.addView(Ui.small(this, getString(R.string.s2l_access_needed)));
             c.addView(words, Ui.weight());
             LinearLayout.LayoutParams bl = Ui.wrap();
             bl.leftMargin = dp(12);
-            c.addView(Ui.button(this, "Allow", Ui.Kind.PRIMARY, v -> openAccessSettings()), bl);
+            c.addView(Ui.button(this, getString(R.string.s2l_allow), Ui.Kind.PRIMARY, v -> openAccessSettings()), bl);
             return c;
         }
-        c.addView(Ui.heading(this, "Allow file access"));
-        Ui.add(c, Ui.body(this, "Needed to read your game dump."), 4);
-        Ui.add(c, Ui.button(this, "Allow", Ui.Kind.PRIMARY, v -> openAccessSettings()), 14, Ui.wrap());
+        c.addView(Ui.heading(this, getString(R.string.s2_access_title)));
+        Ui.add(c, Ui.body(this, getString(R.string.s2l_access_needed)), 4);
+        Ui.add(c, Ui.button(this, getString(R.string.s2l_allow), Ui.Kind.PRIMARY, v -> openAccessSettings()), 14, Ui.wrap());
         return c;
     }
 
@@ -654,10 +655,47 @@ public final class MainActivity extends Activity {
         rows.addView(new Ui.Setting(this, R.drawable.s2_ic_display, getString(R.string.s2_reduced_motion), null)
                 .value(getString(R.string.s2_reduced_note)).toggle(this, LauncherEffects.reduced(this),
                     (b, on) -> LauncherEffects.preference(this, "reduced_motion", on)).view);
+        rows.addView(new Ui.Setting(this, R.drawable.s2_ic_gamepad, getString(R.string.s2_pad_nintendo), null)   // the app's own buttons only (PadNav)
+                .value(getString(R.string.s2_pad_nintendo_note)).toggle(this, PadNav.nintendo(this), (b, on) -> PadNav.nintendo(this, on)).view);
         rows.addView(soundsRow());
         volumeRow = new Ui.Setting(this, R.drawable.s2_ic_volume, getString(R.string.s2_volume), v -> openSettings("audio")).chevron(this);
         rows.addView(volumeRow.view);
+        rows.addView(new Ui.Setting(this, R.drawable.s2_ic_settings, getString(R.string.s2_app_lang), v -> appLang())
+                .value(appLangLabel(appLang(this)) + " · " + getString(R.string.s2_app_lang_note)).chevron(this).view);
         Ui.add(p, Ui.small(this, getString(R.string.s2_saved_auto)), 10);
+    }
+
+    /** The app's languages: the Switch 2's (res/xml/locales_config.xml, dm/tools/tests/test_android_strings.py), "" = the phone's language */
+    static final String[] APP_LANGS = {"", "en-US", "en-GB", "ja", "fr", "fr-CA", "de", "it", "es", "es-419", "nl", "pt-BR", "pt-PT", "ru", "ko", "zh-Hans", "zh-Hant"};
+
+    /** The app's own language (Android 13's per-app language, the same as the system's App languages setting), "" when it follows the phone */
+    static String appLang(android.content.Context c) {
+        android.os.LocaleList l = c.getSystemService(android.app.LocaleManager.class).getApplicationLocales();
+        return l.isEmpty() ? "" : l.get(0).toLanguageTag();
+    }
+
+    /** A language's name in that language ("Deutsch", "日本語"), or "Phone's language" */
+    private String appLangLabel(String tag) {
+        if (tag.isEmpty()) return getString(R.string.s2_app_lang_system);
+        java.util.Locale l = java.util.Locale.forLanguageTag(tag);
+        String n = l.getDisplayName(l);
+        return n.isEmpty() ? tag : n.substring(0, 1).toUpperCase(l) + n.substring(1);
+    }
+
+    /** Settings › App language: Android applies it to every screen of the app (it recreates them) and keeps it */
+    private void appLang() {
+        String cur = appLang(this);
+        String[] labels = new String[APP_LANGS.length];
+        int checked = 0;
+        for (int i = 0; i < APP_LANGS.length; i++) {
+            labels[i] = appLangLabel(APP_LANGS[i]);
+            if (!cur.isEmpty() && java.util.Locale.forLanguageTag(APP_LANGS[i]).equals(java.util.Locale.forLanguageTag(cur))) checked = i;
+        }
+        new AlertDialog.Builder(this).setTitle(R.string.s2_app_lang).setSingleChoiceItems(labels, checked, (d, w) -> {
+            d.dismiss();
+            getSystemService(android.app.LocaleManager.class).setApplicationLocales(
+                    APP_LANGS[w].isEmpty() ? android.os.LocaleList.getEmptyLocaleList() : android.os.LocaleList.forLanguageTags(APP_LANGS[w]));
+        }).setNegativeButton(android.R.string.cancel, null).show();
     }
 
     /** Interface sounds on or off (Interface and Audio show the same switch) */
@@ -848,7 +886,7 @@ public final class MainActivity extends Activity {
         word.setPadding(dp(14), 0, 0, 0);
         brand.addView(word, Ui.weight());
         about.addView(brand);
-        TextView tag = Ui.chip(this, Prefs.buildTag(this));   // which build this is (also the first line of every log)
+        TextView tag = Ui.chip(this, Prefs.buildTagShown(this));   // which build this is (also the first line of every log)
         tag.setTextIsSelectable(true);
         Ui.add(about, tag, 12, Ui.wrap());
         StringBuilder ids = new StringBuilder();
@@ -1259,7 +1297,85 @@ public final class MainActivity extends Activity {
 
     @Override public boolean dispatchKeyEvent(android.view.KeyEvent e) {
         if (e.getAction() == android.view.KeyEvent.ACTION_DOWN) lastKeyAt = android.os.SystemClock.uptimeMillis();
+        if (PadNav.gamepad(e) && padKey(e)) return true;
         return super.dispatchKeyEvent(e);
+    }
+
+    private int padDown;   // the gamepad button (as PadNav names it) pressed in this window: its release acts, never that of a press begun in a dialog or the game
+
+    /**
+     * The gamepad's buttons as PadNav names them (the Nintendo layout by default: A on the right, B at the bottom). A on a cover does the shelf's action (Play,
+     * Prepare, ...), anywhere else it presses what has the focus (the first press after a touch only shows the focus, on the selected cover at Home); B is Back;
+     * Y opens the selected game's settings (its Options menu for a game without a profile); L and R go to the dock's previous or next page (tab). X does nothing
+     */
+    private boolean padKey(android.view.KeyEvent e) {
+        int k = PadNav.label(this, e);
+        boolean home = !settingsPage && settingsGame == null;
+        switch (k) {
+            case android.view.KeyEvent.KEYCODE_BUTTON_A: {
+                if (getWindow().getDecorView().isInTouchMode()) {   // what Android's own DPAD_CENTER does there: the focus first
+                    if (released(e, k)) {
+                        Tile s = home ? tiles.get(selected) : null;
+                        (s != null && s.card != null && s.card.isAttachedToWindow() ? s.card : getWindow().getDecorView()).requestFocusFromTouch();
+                    }
+                    return true;
+                }
+                Tile tl = null;
+                View f = getCurrentFocus();
+                if (home) for (Tile t : tiles.values()) if (t.card != null && t.card == f) tl = t;
+                if (tl == null) { super.dispatchKeyEvent(PadNav.as(e, android.view.KeyEvent.KEYCODE_DPAD_CENTER)); return true; }
+                if (released(e, k)) {
+                    if (!tl.game.gameDir.equals(selected)) userSelect(tl.game.gameDir);
+                    if (detPlay != null && detPlay.isEnabled()) detPlay.performClick();
+                }
+                return true;
+            }
+            case android.view.KeyEvent.KEYCODE_BUTTON_B:
+                if (released(e, k)) onBackPressed();
+                return true;
+            case android.view.KeyEvent.KEYCODE_BUTTON_Y: {
+                Tile tl = home ? tiles.get(selected) : null;
+                if (released(e, k) && tl != null) {
+                    LauncherEffects.play(this, LauncherEffects.Cue.PANEL_OPEN);
+                    if (PackCheck.unsupported(this, tl.game.titleId, tl.game.name) == null) GameSettings.dialog(this, tl.game); else manage(tl.game);
+                }
+                return true;
+            }
+            case android.view.KeyEvent.KEYCODE_BUTTON_X:
+                return true;
+            case android.view.KeyEvent.KEYCODE_BUTTON_L1:
+            case android.view.KeyEvent.KEYCODE_BUTTON_R1:
+                if (released(e, k)) tab(k == android.view.KeyEvent.KEYCODE_BUTTON_R1 ? 1 : -1);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** The release of a press that began in this window (DOWN remembers the button; a repeat or a canceled press does nothing) */
+    private boolean released(android.view.KeyEvent e, int k) {
+        if (e.getAction() == android.view.KeyEvent.ACTION_DOWN) { if (e.getRepeatCount() == 0) padDown = k; return false; }
+        if (e.getAction() != android.view.KeyEvent.ACTION_UP || padDown != k) return false;
+        padDown = 0;
+        return !e.isCanceled();
+    }
+
+    /**
+     * L or R: the dock's previous or next page, as its own item opens it: Library, the selected game's Controls (only with a profile; a game's settings count
+     * as it), Settings, About. Files is not one (it opens the system's picker); there is no wrap past either end
+     */
+    private void tab(int step) {
+        Tile tl = tiles.get(selected);
+        boolean controls = tl != null && Profile.of(tl.game.titleId) != null;
+        int now = settingsGame != null ? 1 : !settingsPage ? 0 : "about".equals(settingsCat) ? 3 : 2;
+        int to = now + step;
+        if (to == 1 && !controls) to += step;
+        if (to < 0 || to > 3 || to == now) return;
+        LauncherEffects.play(this, to == 0 ? LauncherEffects.Cue.PANEL_CLOSE : LauncherEffects.Cue.PANEL_OPEN);
+        if (to == 0) { page(false); getWindow().getDecorView().post(this::focusSelected); }
+        else if (to == 1) gameSettings(tl.game, GameSettings.CONTROLS);
+        else if (to == 2) openSettings(null);
+        else about();
     }
 
     /** A selection the user made (a tap, the focus moved by a gamepad or keyboard): the Focus cue when it changes, never for a restored or rebuilt selection */
@@ -1393,6 +1509,7 @@ public final class MainActivity extends Activity {
         detPlay.setKind(st.kind());
         slimPlate(detPlay);
         detPlay.setText(getString(st.labelRes()));
+        if (hintAction != null) hintAction.setText(detPlay.label.getText());   // the A hint says what A does on the cover
         detPlay.setIcon(st.iconRes());
         detPlay.setEnabled(st.action != GameFlow.Action.CHECKING);   // every other state does something, with a reason and a fix
     }
@@ -1496,8 +1613,8 @@ public final class MainActivity extends Activity {
 
     /**
      * The gamepad hints (docs/REVISAO-UI-AUDIO-CONSOLE-2026-11-07.md section 3), in the footer centered under the dock, only while a gamepad is connected (its
-     * row's height goes back to the covers otherwise; padListener follows a connection or a removal). Each names what its button does here: A presses the focused
-     * item (the selected cover, or Choose folder in the empty library), B is Back. They are not touch targets
+     * row's height goes back to the covers otherwise; padListener follows a connection or a removal). Each names what its button does here (padKey): A does the
+     * shelf's action on a cover (Choose folder in the empty library), B is Back, Y the game's settings, L and R the dock's pages. They are not touch targets
      */
     private void hints(boolean library) {
         hintLibrary = library;
@@ -1506,13 +1623,20 @@ public final class MainActivity extends Activity {
         boolean on = gamepad();
         hintRow.setVisibility(on ? View.VISIBLE : View.GONE);
         if (!on) return;
-        hintRow.addView(hint("A", getString(library ? R.string.s2_hint_select : R.string.s2_choose_folder)));
+        // A does the shelf's action on a cover (padKey): its label, kept current by showDetails
+        View a = hint("A", library && detPlay != null ? detPlay.label.getText().toString() : getString(library ? R.string.s2_hint_select : R.string.s2_choose_folder));
+        hintAction = library ? (TextView) ((ViewGroup) a).getChildAt(((ViewGroup) a).getChildCount() - 1) : null;
+        hintRow.addView(a);
         if (library) {
-            LinearLayout.LayoutParams lp = Ui.wrap();
-            lp.leftMargin = dp(compact() ? 18 : 24);
-            hintRow.addView(hint("B", getString(R.string.s2_hint_back)), lp);
+            String[][] more = {{"B", getString(R.string.s2_hint_back)}, {"Y", getString(R.string.s2_settings)}, {"L R", getString(R.string.s2_hint_tabs)}};
+            for (String[] m : more) {
+                LinearLayout.LayoutParams lp = Ui.wrap();
+                lp.leftMargin = dp(compact() ? 18 : 24);
+                hintRow.addView(hint(m[0], m[1]), lp);
+            }
         }
     }
+    private TextView hintAction;   // the A hint's label at Home: the shelf's action (showDetails)
 
     /** A gamepad connected or removed while Home shows: its hints come or go, and the covers take or give back their row's height */
     private final android.hardware.input.InputManager.InputDeviceListener padListener = new android.hardware.input.InputManager.InputDeviceListener() {
@@ -1534,11 +1658,15 @@ public final class MainActivity extends Activity {
     private View hint(String button, String what) {
         boolean small = compact();
         LinearLayout h = Ui.row(this);
-        TextView k = Ui.text(this, button, small ? 11 : 12, R.color.bn_banana, 800);
-        k.setGravity(Gravity.CENTER);
-        k.setIncludeFontPadding(false);
-        k.setBackground(Ui.round(0, dp(999), Ui.col(this, R.color.bn_banana), Math.max(1, Math.round(1.5f * getResources().getDisplayMetrics().density))));
-        h.addView(k, new LinearLayout.LayoutParams(dp(small ? 18 : 22), dp(small ? 18 : 22)));
+        for (String b : button.split(" ")) {   // "L R": a keycap each
+            TextView k = Ui.text(this, b, small ? 11 : 12, R.color.bn_banana, 800);
+            k.setGravity(Gravity.CENTER);
+            k.setIncludeFontPadding(false);
+            k.setBackground(Ui.round(0, dp(999), Ui.col(this, R.color.bn_banana), Math.max(1, Math.round(1.5f * getResources().getDisplayMetrics().density))));
+            LinearLayout.LayoutParams kl = new LinearLayout.LayoutParams(dp(small ? 18 : 22), dp(small ? 18 : 22));
+            if (h.getChildCount() > 0) kl.leftMargin = dp(3);
+            h.addView(k, kl);
+        }
         TextView t = Ui.text(this, what, small ? 12 : 13, R.color.bn_text_2, 500);
         t.setSingleLine(true);
         t.setPadding(dp(6), 0, 0, 0);
@@ -1566,8 +1694,8 @@ public final class MainActivity extends Activity {
         f.pack = true;
         f.unfinished = p.unfinishedModule() != null;
         if (f.unfinished) { f.rewrite = true; f.shaders = true; f.toTranslate = f.mapShaders; return f; }
-        f.build = PackCheck.build(p, gd) != null;
-        f.mods = !f.build && PackCheck.mods(p, gd) != null;   // the code lacks a mod the mods folder has now, or has one it no longer has
+        f.build = PackCheck.build(this, p, gd) != null;
+        f.mods = !f.build && PackCheck.mods(this, p, gd) != null;   // the code lacks a mod the mods folder has now, or has one it no longer has
         f.shadersMissing = Pack.libraryProblem(pd, g.titleId) != null;
         f.shaders = f.shadersMissing;   // the split and the library run even when the manifest keeps every shader (0 to translate)
         if (f.shadersMissing) {
@@ -1627,8 +1755,8 @@ public final class MainActivity extends Activity {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         File save = Folders.save(this, g);
-        String lp = Pack.libraryProblem(new File(g.packDir), g.titleId);
-        String noProfile = Profile.missing(g.titleId, g.name);
+        String lp = PackCheck.libraryProblem(this, new File(g.packDir), g.titleId);
+        String noProfile = PackCheck.unsupported(this, g.titleId, g.name);
         AlertDialog[] d = new AlertDialog[1];
         if (noProfile != null) Ui.add(box, Ui.small(this, noProfile), 0);
         // The game's own job (running, paused, interrupted or stopped): its preparation screen, first (the screen opens by itself only when Prepare starts the job)
@@ -1654,15 +1782,16 @@ public final class MainActivity extends Activity {
         adv.setOrientation(LinearLayout.VERTICAL);
         Ondevice.advancedRows(this, g, adv, () -> d[0].dismiss());
         Ui.add(box, adv, 8);
-        TextView info = Ui.small(this, "Title ID: " + g.titleId + "\nGame: " + g.gameDir + (Nup.isNup(new File(g.gameDir)) ? " (.nup)" : "") + "\nPack: " + g.packDir
-                + "\nShaders: " + (lp == null ? "present (" + BuildConfig.NX_DMSH_VK_CHAIN + ")" + (ShaderZip.imported(new File(g.packDir)) ? getString(R.string.s2_shaders_facts_imported) : "") : lp) + "\nSaves: " + (save != null ? save.getPath() : "not set"));
+        TextView info = Ui.small(this, getString(R.string.s2l_manage_facts, g.titleId, g.gameDir + (Nup.isNup(new File(g.gameDir)) ? " (.nup)" : ""), g.packDir,
+                lp == null ? getString(R.string.s2l_shaders_present, BuildConfig.NX_DMSH_VK_CHAIN) + (ShaderZip.imported(new File(g.packDir)) ? getString(R.string.s2_shaders_facts_imported) : "") : lp,
+                save != null ? save.getPath() : getString(R.string.s2l_not_set)));
         info.setTextIsSelectable(true);
         info.setTextSize(12);
         info.setPadding(dp(4), 0, dp(4), 0);
         Ui.add(box, info, 16);
         Ui.add(box, Ui.divider(this), 16, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
-        Ui.add(box, Ui.button(this, "Remove from list", Ui.Kind.DANGER, v -> { d[0].dismiss(); confirmRemove(g); }), 16);
-        d[0] = Ui.sheet(this, g.name, box).setPositiveButton("Done", null).show();
+        Ui.add(box, Ui.button(this, getString(R.string.s2l_remove_from_list), Ui.Kind.DANGER, v -> { d[0].dismiss(); confirmRemove(g); }), 16);
+        d[0] = Ui.sheet(this, g.name, box).setPositiveButton(R.string.s2l_done, null).show();
     }
 
     private void openAccessSettings() {
@@ -1783,7 +1912,7 @@ public final class MainActivity extends Activity {
         }
         if (request == PICK_DLL) {
             String err = Lsfg.install(this, data.getData());
-            Toast.makeText(this, err == null ? "Lossless.dll installed" : "Lossless.dll not installed: " + err, Toast.LENGTH_LONG).show();
+            Toast.makeText(this, err == null ? getString(R.string.s2l_dll_installed) : getString(R.string.s2l_dll_not_installed, err), Toast.LENGTH_LONG).show();
             return;
         }
         String path = PathUtil.treeToPath(data.getData());
@@ -1833,6 +1962,7 @@ public final class MainActivity extends Activity {
         boolean dump;             // a dump Prepare starts from (Pack.isDump)
         PackFind.Found pack;      // a pack that plays now or after the automatic shader update (Folders.find), null: none
         String holds;             // what a game that is neither a dump nor has a pack holds (DumpLayout.describe), for the log and the message's detail
+        String holdsShown;        // holds in the interface's language (the message's detail; the log keeps holds)
         boolean code;             // it holds game code of some version (DumpLayout.versions)
         DumpCheck.Result refused; // a game with no usable pack that Prepare could not start from: Play's own check (DumpCheck.identify) made at Add, its sentence said now
         boolean incomplete;       // a .nup shorter than its header says (Nup.Incomplete): still being copied, so the library's search looks again later
@@ -1851,7 +1981,7 @@ public final class MainActivity extends Activity {
     private Pick check(File g, boolean single) {
         Pick k = new Pick(g);
         try { k.id = Pack.titleIdOf(g); } catch (IOException e) { k.error = e.getMessage(); k.incomplete = Nup.incomplete(e); return k; }
-        String why = Profile.missing(k.id, single ? "This game" : g.getName());
+        String why = PackCheck.unsupported(this, k.id, single ? getString(R.string.s2l_this_game) : g.getName());
         if (why != null) { k.unsupported = true; k.error = why; return k; }
         k.name = Profile.of(k.id).name;
         k.dump = Pack.isDump(g);
@@ -1864,7 +1994,11 @@ public final class MainActivity extends Activity {
             DumpCheck.Result r = DumpCheck.identify(g);
             if (!r.ok()) k.refused = r;
         }
-        if (k.pack == null && !k.dump) k.holds = DumpLayout.describe(g);
+        if (k.pack == null && !k.dump) {
+            k.holds = DumpLayout.describe(g);
+            k.holdsShown = DumpLayout.describe(g, getString(R.string.s2m_dump_no_code), getString(R.string.s2m_dump_base), getString(R.string.s2m_dump_update),
+                    getString(R.string.s2m_dump_no_romfs), getString(R.string.s2m_dump_and));
+        }
         android.util.Log.i("Swap2Native", "Add game: " + g + " (" + k.id + "): " + (k.pack == null ? "no usable pack" : "pack " + k.pack.dir + (k.pack.tier == PackFind.READY ? " (ready)" : " (shader update)"))
                 + (k.dump ? ", a dump" : "") + (k.holds != null ? ", holds " + k.holds : "") + (k.refused != null ? ", refused: " + k.refused.error : ""));
         return k;
@@ -1964,7 +2098,7 @@ public final class MainActivity extends Activity {
                 cardFor(k.game, k.id);
                 refresh();
                 new AlertDialog.Builder(this).setTitle(R.string.s2_add_attention_title)
-                        .setMessage(getString(R.string.s2_add_attention, k.name, k.holds == null ? "" : k.holds))
+                        .setMessage(getString(R.string.s2_add_attention, k.name, k.holdsShown == null ? "" : k.holdsShown))
                         .setPositiveButton(android.R.string.ok, null).show();
                 return;
             }
@@ -2138,7 +2272,7 @@ public final class MainActivity extends Activity {
         refresh();
         if (packDir.equals(pendingPackPick)) Folders.pickedPack(this, id, packDir.getPath());   // a pack folder the user picked is remembered for this game's next pick and updates
         String note = "";
-        String lp = Pack.libraryProblem(packDir, id);
+        String lp = PackCheck.libraryProblem(this, packDir, id);
         if (lp != null) note += " " + lp;
         String name;
         try { name = Pack.read(packDir).name; } catch (IOException e) { name = id; }
@@ -2188,13 +2322,13 @@ public final class MainActivity extends Activity {
         Pack pack;
         try { pack = Pack.read(packDir); } catch (IOException e) { return packProblem(packDir, e); }
         if (!pack.titleId.equals(id)) return getString(R.string.s2_pack_err_other_game, pack.titleId, id);
-        String why = Profile.missing(id, pack.name.isEmpty() ? null : pack.name);
+        String why = PackCheck.unsupported(this, id, pack.name.isEmpty() ? null : pack.name);
         if (why != null) return why;
         if (Nup.isNup(game)) {
             String romfs;
-            try { romfs = pack.romfsPath(game); } catch (IOException e) { return game.getName() + " cannot be used: " + e.getMessage(); }
-            if (romfs == null) return game.getName() + " has no " + pack.romfsSelector() + " with a RomFS (the pack is for version " + pack.version + ").";
-        } else if (pack.romfs(game) == null) return "No RomFS in " + game + " (looked for " + pack.romfsRel + ", romfs/ and updates/<version>/romfs).";
+            try { romfs = pack.romfsPath(game); } catch (IOException e) { return getString(R.string.s2l_add_cannot_use, game.getName(), String.valueOf(e.getMessage())); }
+            if (romfs == null) return getString(R.string.s2l_add_no_romfs_nup, game.getName(), pack.romfsSelector(), pack.version);
+        } else if (pack.romfs(game) == null) return getString(R.string.s2l_add_no_romfs, game.getPath(), pack.romfsRel);
         List<Game> list = Game.load(this);
         list.removeIf(g -> g.gameDir.equals(game.getPath()));
         list.add(new Game(id, pack.name.isEmpty() ? id : pack.name, game.getPath(), packDir.getPath()));
@@ -2205,9 +2339,9 @@ public final class MainActivity extends Activity {
     /** Remove from the list (the Manage sheet): says exactly what goes (the list entry) and what stays (the folders and the saves) */
     private void confirmRemove(Game g) {
         File save = Folders.save(this, g);
-        Ui.confirmDanger(this, "Remove " + g.name + "?",
-                "Only the list entry goes. Your dump, its pack and your saves" + (save != null ? " (" + save.getPath() + ")" : "") + " stay on the phone; Add game brings it back.",
-                "Remove", () -> {
+        Ui.confirmDanger(this, getString(R.string.s2l_remove_title, g.name),
+                save != null ? getString(R.string.s2l_remove_text_save, save.getPath()) : getString(R.string.s2l_remove_text),
+                getString(R.string.s2l_remove), () -> {
                     List<Game> list = Game.load(this);
                     list.removeIf(x -> x.gameDir.equals(g.gameDir));
                     Game.save(this, list);
@@ -2227,7 +2361,7 @@ public final class MainActivity extends Activity {
     void launch(Game g, boolean fix) {
         File gd = new File(g.gameDir);
         if (needAccess(gd)) return;
-        if (Profile.of(g.titleId) == null) { ProblemSheet.show(this, g, GameFlow.Why.NO_PROFILE, false, Profile.missing(g.titleId, g.name)); return; }
+        if (Profile.of(g.titleId) == null) { ProblemSheet.show(this, g, GameFlow.Why.NO_PROFILE, false, PackCheck.unsupported(this, g.titleId, g.name)); return; }
         if (playBusy(g)) return;
         boolean dump = Ondevice.isDump(gd);
         Pack p;
@@ -2249,7 +2383,7 @@ public final class MainActivity extends Activity {
                 else Ondevice.fixCodeThenPlay(this, gd, new File(g.packDir), false);
                 return;
             }
-            ProblemSheet.show(this, g, unfinished ? GameFlow.Why.UNFINISHED : PackCheck.build(p, gd) != null ? GameFlow.Why.BUILD : GameFlow.Why.MODS, dump, bad);
+            ProblemSheet.show(this, g, unfinished ? GameFlow.Why.UNFINISHED : PackCheck.build(this, p, gd) != null ? GameFlow.Why.BUILD : GameFlow.Why.MODS, dump, bad);
             return;
         }
         // The host loads <pack>/shaders/v-<its DMSH_VK_CHAIN>/dmsh_vk.lib: without it the game runs but draws nothing
@@ -2268,7 +2402,7 @@ public final class MainActivity extends Activity {
         if (lp != null) {
             android.util.Log.i("Swap2Native", g.titleId + ": " + lp);
             if (dump && fix) { Ondevice.play(this, gd); return; }
-            ProblemSheet.show(this, g, GameFlow.Why.SHADERS, dump, lp);
+            ProblemSheet.show(this, g, GameFlow.Why.SHADERS, dump, PackCheck.libraryProblem(this, new File(g.packDir), g.titleId));
             return;
         }
         start(g);
@@ -2334,7 +2468,7 @@ public final class MainActivity extends Activity {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         Overlay.rows(this, box, null);
-        Ui.sheet(this, "Overlay", box).setPositiveButton("Done", null).setOnDismissListener(d -> refreshSettings()).show();
+        Ui.sheet(this, getString(R.string.s2_overlay), box).setPositiveButton(R.string.s2l_done, null).setOnDismissListener(d -> refreshSettings()).show();
     }
 
     private String resLabel() { return Prefs.windowName(Prefs.window(this), true); }
@@ -2342,11 +2476,18 @@ public final class MainActivity extends Activity {
     /** Game resolution: the window size the host gives the game (DM_WINDOW), from the next start */
     private void gameRes() {
         int i = Math.max(0, java.util.Arrays.asList(Prefs.WINDOWS).indexOf(Prefs.window(this)));
-        new AlertDialog.Builder(this).setTitle("Game resolution").setSingleChoiceItems(Prefs.WINDOW_NAMES, i, (d, w) -> { Prefs.window(this, Prefs.WINDOWS[w]); refreshSettings(); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show();
+        new AlertDialog.Builder(this).setTitle(R.string.s2_game_resolution).setSingleChoiceItems(Prefs.WINDOW_NAMES, i, (d, w) -> { Prefs.window(this, Prefs.WINDOWS[w]); refreshSettings(); d.dismiss(); })
+                .setNegativeButton(R.string.s2l_cancel, null).show();
     }
 
-    static String capLabel(int v) { return v < 0 ? "Default" : v == 0 ? "The game's own" : v + " fps"; }
+    /** The application's context, for capLabel's words (set in onCreate; GameSettings calls capLabel without one) */
+    private static android.content.Context appContext;
+
+    static String capLabel(int v) {
+        android.content.Context c = appContext;
+        if (c == null) return v < 0 ? "Default" : v == 0 ? "The game's own" : v + " fps";
+        return v < 0 ? c.getString(R.string.s2l_default) : v == 0 ? c.getString(R.string.s2l_cap_own) : c.getString(R.string.s2l_cap_fps, v);
+    }
 
     /** The frame rate cap the next start uses (Prefs.fpsCap, DM_FPS_TARGET); the in-game panel changes it while the game runs */
     private void fpsCap() {
@@ -2359,9 +2500,9 @@ public final class MainActivity extends Activity {
             labels[k + 1] = capLabel(v);
             if (v == cur) checked = k + 1;
         }
-        new AlertDialog.Builder(this).setTitle("Frame rate cap")
+        new AlertDialog.Builder(this).setTitle(R.string.s2_frame_cap)
                 .setSingleChoiceItems(labels, checked, (d, w) -> { Prefs.fpsCap(this, w == 0 ? -1 : Prefs.FPS_CAPS[w - 1]); refreshSettings(); d.dismiss(); })
-                .setNegativeButton("Cancel", null).show();
+                .setNegativeButton(R.string.s2l_cancel, null).show();
     }
 
     /** Frame generation's settings and the Lossless.dll found (or a manual pick when it is in none of the known places) */
@@ -2369,10 +2510,10 @@ public final class MainActivity extends Activity {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         File dll = Lsfg.find(this);
-        Lsfg.rows(this, box, Lsfg.note + (dll != null ? "" : ". Put it in Documents/Emulation/bios or Switch2, or pick it."), () -> {});
-        Ui.add(box, Ui.small(this, "Ported from Eden (GPL-3.0-or-later). Lossless.dll is yours; it is never part of the app."), 10);
-        Ui.sheet(this, "Frame generation", box).setPositiveButton("Done", null).setOnDismissListener(d -> refreshSettings())
-                .setNeutralButton("Pick Lossless.dll", (d, w) -> {
+        Lsfg.rows(this, box, Lsfg.note + (dll != null ? "" : ". " + getString(R.string.s2l_lsfg_put_it)), () -> {});
+        Ui.add(box, Ui.small(this, getString(R.string.s2l_lsfg_credit)), 10);
+        Ui.sheet(this, getString(R.string.s2_frame_generation), box).setPositiveButton(R.string.s2l_done, null).setOnDismissListener(d -> refreshSettings())
+                .setNeutralButton(R.string.s2l_lsfg_pick_dll, (d, w) -> {
                     Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
                     startActivityForResult(i, PICK_DLL);
                 }).show();
@@ -2383,7 +2524,7 @@ public final class MainActivity extends Activity {
     /** The newest log of a game (titleId), or of any run (null) */
     void shareLog(String titleId) {
         File log = LogProvider.newest(this, titleId);
-        if (log == null) { error(titleId == null ? "No log yet." : "No log of this game yet."); return; }
+        if (log == null) { error(getString(titleId == null ? R.string.s2l_no_log : R.string.s2l_no_log_game)); return; }
         shareLog(log);
     }
 
@@ -2404,13 +2545,13 @@ public final class MainActivity extends Activity {
         if (digest != null) clip.addItem(new ClipData.Item(LogProvider.uri(digest)));
         send.setClipData(clip);
         send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        startActivity(Intent.createChooser(send, "Share " + log.getName()));
+        startActivity(Intent.createChooser(send, getString(R.string.s2l_share_file, log.getName())));
     }
 
     /** A web page (a rule's doc from ExitWatch's notice) in the phone's browser */
     void openLink(String url) {
         try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); }
-        catch (android.content.ActivityNotFoundException e) { error("No app can open " + url); }
+        catch (android.content.ActivityNotFoundException e) { error(getString(R.string.s2l_no_app_opens, url)); }
     }
 
     void error(String msg) {

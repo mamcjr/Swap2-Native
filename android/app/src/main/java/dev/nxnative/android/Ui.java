@@ -160,8 +160,8 @@ final class Ui {
         t.setPadding(dp(a, 10), dp(a, 5), dp(a, 12), dp(a, 5));
         t.setSingleLine(true);
         t.setEllipsize(TextUtils.TruncateAt.END);
-        t.setContentDescription(s + ": tap for details");
-        t.setOnClickListener(v -> new AlertDialog.Builder(a).setTitle(title).setMessage(message).setPositiveButton("OK", null).show());
+        t.setContentDescription(a.getString(R.string.s2s_tap_for_details, s));
+        t.setOnClickListener(v -> new AlertDialog.Builder(a).setTitle(title).setMessage(message).setPositiveButton(android.R.string.ok, null).show());
         return t;
     }
 
@@ -656,7 +656,7 @@ final class Ui {
      */
     static void confirmDanger(Activity a, String title, CharSequence message, String yes, Runnable r) {
         AlertDialog d = new AlertDialog.Builder(a).setTitle(title).setMessage(message)
-                .setPositiveButton(yes, (x, w) -> r.run()).setNegativeButton("Cancel", null).create();
+                .setPositiveButton(yes, (x, w) -> r.run()).setNegativeButton(android.R.string.cancel, null).create();
         d.setOnShowListener(x -> {
             Button b = d.getButton(AlertDialog.BUTTON_POSITIVE);
             if (b != null) b.setTextColor(col(a, R.color.bn_danger));

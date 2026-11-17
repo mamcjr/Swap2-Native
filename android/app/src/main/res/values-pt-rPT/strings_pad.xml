@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">Separadores</string>
+    <string name="s2_pad_nintendo">Botões no esquema Nintendo</string>
+    <string name="s2_pad_nintendo_note">Nos menus da aplicação, A (à direita) confirma e B (em baixo) volta, como na Switch; desligado, o botão de baixo confirma. Os controlos dos jogos não mudam.</string>
+</resources>

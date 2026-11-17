@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_app_lang">앱 언어</string>
+    <string name="s2_app_lang_note">이 메뉴의 언어</string>
+    <string name="s2_app_lang_system">휴대폰 언어</string>
+</resources>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app's languages: the Switch 2's system languages (dm/tools/tests/test_android_strings.py LANGUAGES), offered by Android 13+ in the system's
+     per-app language setting and by Settings › App language. English (US) is res/values/ -->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="en-US" />
+    <locale android:name="en-GB" />
+    <locale android:name="ja" />
+    <locale android:name="fr" />
+    <locale android:name="fr-CA" />
+    <locale android:name="de" />
+    <locale android:name="it" />
+    <locale android:name="es" />
+    <locale android:name="es-419" />
+    <locale android:name="nl" />
+    <locale android:name="pt-BR" />
+    <locale android:name="pt-PT" />
+    <locale android:name="ru" />
+    <locale android:name="ko" />
+    <locale android:name="zh-Hans" />
+    <locale android:name="zh-Hant" />
+</locale-config>

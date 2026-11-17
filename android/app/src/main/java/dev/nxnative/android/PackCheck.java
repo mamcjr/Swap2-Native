@@ -122,16 +122,16 @@ final class PackCheck {
      */
     static String blocking(Context c, Pack p, File game) {
         String m = p.unfinishedModule();
-        if (m != null) return "The pack's game code is unfinished (" + m + ".android.key is missing: an update of the pack was stopped part way). Prepare again finishes it.";
+        if (m != null) return c.getString(R.string.s2l_check_unfinished, m);
         Job j = rewriting(c, p.dir, game, p.titleId);
-        if (j != null) return "The pack's game code is being rewritten (" + j.name() + ": " + j.statusText(false) + "). Let preparing finish first.";
-        return build(p, game);
+        if (j != null) return c.getString(R.string.s2l_check_rewriting, j.name(), j.statusText(c, false));
+        return build(c, p, game);
     }
 
     /** blocking, then mods: null when the pack's code can be started as the game and its mods are now (Play, a launch, Prepare's choice to rewrite the code) */
     static String playBlocking(Context c, Pack p, File game) {
         String b = blocking(c, p, game);
-        return b != null ? b : mods(p, game);
+        return b != null ? b : mods(c, p, game);
     }
 
     /** The mods folder the rewrite step reads (PackService: DM_MODS_DIR): &lt;Switch2&gt;/Mods beside the profiles (ExefsMods.root) */
@@ -142,7 +142,7 @@ final class PackCheck {
      * else why not: a mod added, removed, turned off or changed since. The old code would play without the mod (or with the old one), so Prepare again rewrites
      * the modules whose mods changed. Cheap (the NSO headers and the patch files): no tools needed
      */
-    static String mods(Pack p, File game) {
+    static String mods(Context c, Pack p, File game) {
         File root = modsRoot();
         for (String m : p.modules) {
             File kf = new File(p.dir, m + ".android.key");
@@ -151,11 +151,12 @@ final class PackCheck {
             try {
                 String have = ExefsMods.keyPart(new String(Files.readAllBytes(kf.toPath()), StandardCharsets.UTF_8).trim());
                 String want = ExefsMods.digest(ExefsMods.find(root, p.titleId, DumpCheck.nsoBuildId(nso.head(0x60), m)));
+                String name = p.name.isEmpty() ? p.titleId : p.name;
                 if (!have.equals(want))
-                    return "The mods for " + (p.name.isEmpty() ? p.titleId : p.name) + " changed (" + m + (want.isEmpty() ? ": its code was rewritten with a mod that is gone or turned off"
-                            : have.isEmpty() ? ": " + root + "/" + p.titleId + " has a mod its code does not have yet" : ": a mod of it changed") + "). Prepare again applies them.";
+                    return want.isEmpty() ? c.getString(R.string.s2l_check_mods_gone, name, m)
+                            : have.isEmpty() ? c.getString(R.string.s2l_check_mods_new, name, m, root + "/" + p.titleId) : c.getString(R.string.s2l_check_mods_changed, name, m);
             } catch (IOException e) {
-                return "The mods for " + m + " cannot be read: " + e.getMessage();
+                return c.getString(R.string.s2l_check_mods_unreadable, m, String.valueOf(e.getMessage()));
             }
         }
         return null;
@@ -177,7 +178,7 @@ final class PackCheck {
     }
 
     /** null when the pack's code is of the game build in the folder and of a build this APK supports, else why not (one or two sentences) */
-    static String build(Pack p, File game) {
+    static String build(Context c, Pack p, File game) {
         Map<String, String> want = builds(p);
         if (want.isEmpty()) return null;   // a pack from before the build rows: nothing to compare
         String name = p.name.isEmpty() ? p.titleId : p.name;
@@ -185,16 +186,15 @@ final class PackCheck {
             Mod nso = mod(game, p.version, e.getKey());
             if (nso.error != null) return nso.error;
             if (!nso.exists())
-                return "The pack is for " + name + " update " + p.version + ", but the game " + (nso.nup != null ? ".nup" : "folder") + " has no " + nso.label + ". Pick the dump that has that update, or Prepare again from this one.";
+                return c.getString(nso.nup != null ? R.string.s2l_check_no_module_nup : R.string.s2l_check_no_module_folder, name, p.version, nso.label);
             String id;
             try {
                 id = DumpCheck.nsoBuildId(nso.head(0x60), e.getKey());
             } catch (IOException ex) {
-                return nso.label + " cannot be read: " + ex.getMessage();
+                return c.getString(R.string.s2l_check_unreadable, nso.label, String.valueOf(ex.getMessage()));
             }
             if (!id.startsWith(e.getValue()))
-                return "The pack was made from another build of " + name + " (" + e.getKey() + " " + e.getValue().substring(0, 12) + "…) than the one in the game folder ("
-                        + id.substring(0, 12) + "…, update " + p.version + "). Its code would crash with this game: Prepare again makes a pack from this folder.";
+                return c.getString(R.string.s2l_check_other_build, name, e.getKey(), e.getValue().substring(0, 12), id.substring(0, 12), p.version);
         }
         Profile prof = Profile.of(p.titleId);
         Map<Long, Map<String, String>> sup = prof == null ? Map.of() : prof.buildMap();
@@ -213,7 +213,7 @@ final class PackCheck {
             if (!ok) {
                 StringBuilder s = new StringBuilder();
                 for (Long v : sup.keySet()) s.append(s.length() == 0 ? "" : ", ").append(v);
-                return "The pack is for " + name + " update " + p.version + "; this app supports update " + s + " only. Dump the game with that update and Prepare it.";
+                return c.getString(R.string.s2l_check_unsupported_update, name, p.version, s.toString());
             }
         }
         return null;
@@ -226,6 +226,26 @@ final class PackCheck {
 
     /** null when the pack has this APK's shader library, else why not */
     static String shaders(File packDir, String titleId) { return Pack.libraryProblem(packDir, titleId); }
+
+    /** Pack.libraryProblem in the interface's language: null when the pack has this APK's shader library, else why not */
+    static String libraryProblem(Context c, File packDir, String titleId) {
+        String[] p = Pack.libraryIssue(packDir, titleId);
+        if (p == null) return null;
+        switch (p[0]) {
+            case Pack.LIB_UNREADABLE: return c.getString(R.string.s2l_lib_unreadable, p[1], p[2]);
+            case Pack.LIB_INPUTS: return c.getString(R.string.s2l_lib_inputs, p[1], p[2]);
+            case Pack.LIB_NONE: return c.getString(R.string.s2l_lib_none, p[1], p[2]);
+            default: return c.getString(R.string.s2l_lib_version, p[1], p[2], p[3]);
+        }
+    }
+
+    /** Profile.missing in the interface's language: null when this APK has the title's profile, else why the game (what: its name, null for none) is refused */
+    static String unsupported(Context c, String titleId, String what) {
+        if (Profile.of(titleId) != null) return null;
+        java.util.List<String> ids = new java.util.ArrayList<>();
+        for (Profile p : Profile.all()) ids.add(p.titleId);
+        return c.getString(R.string.s2l_unsupported, what == null ? titleId : what + " (" + titleId + ")", String.join(", ", ids), Profile.userDir() + "/" + titleId);
+    }
 
     // ---- The rewriter's key (slow: off the main thread) ----
 

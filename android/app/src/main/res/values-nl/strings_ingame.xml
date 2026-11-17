@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- SidePanel -->
+    <string name="s2g_panel_note">De game loopt door achter dit paneel; elke wijziging geldt meteen en blijft bewaard.</string>
+    <string name="s2g_panel_fps_cap">Framerate-limiet</string>
+    <string name="s2g_panel_fps_own">Die van de game</string>
+    <string name="s2g_panel_overlay">Overlay</string>
+    <string name="s2g_panel_controls">Schermbediening</string>
+    <string name="s2g_panel_pause">Game pauzeren</string>
+    <string name="s2g_panel_pause_return">Pauzeren als de game terugkomt uit de achtergrond</string>
+    <string name="s2g_panel_stop">Game stoppen</string>
+    <string name="s2g_panel_stop_title">Game stoppen?</string>
+    <string name="s2g_panel_stop_message">De game wordt beëindigd; niet-opgeslagen voortgang gaat verloren. Het logboek blijft bewaard voor Logboek delen.</string>
+    <string name="s2g_panel_stop_yes">Stoppen</string>
+    <string name="s2g_panel_keep_running">Laten draaien</string>
+    <string name="s2g_panel_back">Terug naar de game</string>
+    <string name="s2g_fps_no_cap">Deze build heeft geen framerate-limiet.</string>
+    <string name="s2g_fps_starting">Starten…</string>
+    <string name="s2g_fps_own_rate">Deze game kiest zijn eigen framerate.</string>
+    <string name="s2g_fps_now_capped">Nu %1$d fps, beperkt tot %2$d.</string>
+    <string name="s2g_fps_now_own">Nu %1$d fps, die van de game.</string>
+    <string name="s2g_fps_now_paced">Nu %1$d fps, beperkt tot %2$d. Het is niet bekend of de snelheid van deze game de limiet volgt: waar hij sneller zou kunnen, loopt hij mogelijk trager dan normaal.</string>
+    <string name="s2g_lsfg_now">Nu: %1$s</string>
+
+    <!-- Lsfg -->
+    <string name="s2g_lsfg_head">Framegeneratie (Lossless Scaling, je eigen Lossless.dll)</string>
+    <string name="s2g_lsfg_not_built">Niet in deze build (gebouwd met -PnxLsfg=false).</string>
+    <string name="s2g_lsfg_on">Framegeneratie (LSFG)</string>
+    <string name="s2g_lsfg_mult">Frames per gameframe</string>
+    <string name="s2g_lsfg_target">Doel-framerate (de vermenigvuldiger volgt die)</string>
+    <string name="s2g_lsfg_fixed">Vast</string>
+    <string name="s2g_lsfg_flow">Resolutie van bewegingsschatting (lager is sneller; Auto = die van de game)</string>
+    <string name="s2g_lsfg_auto">Auto</string>
+    <string name="s2g_lsfg_mode">Modus: prestaties (de enige shaderset die Edens LSFG gebruikt)</string>
+    <string name="s2g_lsfg_cannot_open">kan %1$s niet openen</string>
+    <string name="s2g_lsfg_not_dll">dat bestand is geen Windows-DLL</string>
+
+    <!-- Overlay -->
+    <string name="s2g_ov_show">Overlay over de game tonen</string>
+    <string name="s2g_ov_item_fps">Framerate en frametijd</string>
+    <string name="s2g_ov_item_throttle">Throttle-stip (groen / geel / rood)</string>
+    <string name="s2g_ov_item_gpu">GPU-tijd per frame</string>
+    <string name="s2g_ov_item_cpu">CPU-kloklimieten</string>
+    <string name="s2g_ov_item_battery">Batterijtemperatuur en -niveau</string>
+    <string name="s2g_ov_item_memory">Geheugen: van de game en van de telefoon</string>
+    <string name="s2g_ov_item_tag">Buildnaam (linksboven; standaard uit)</string>
+    <string name="s2g_ov_no_lsfg">geen LSFG</string>
+    <string name="s2g_ov_cpu_unknown">CPU-limiet ?</string>
+    <string name="s2g_ov_mem_low">laag</string>
+    <string name="s2g_pov_cpu_cap">CPU-limiet %1$s</string>
+    <string name="s2g_pov_free_ram">Vrij RAM %1$s</string>
+
+    <!-- TouchControls -->
+    <string name="s2g_tc_group_left_stick">linkerstick</string>
+    <string name="s2g_tc_group_dpad">D-pad</string>
+    <string name="s2g_tc_group_right_stick">rechterstick</string>
+    <string name="s2g_tc_group_steering">sturen</string>
+    <string name="s2g_tc_group_map">kaart / pauze / terugspoelen</string>
+    <string name="s2g_tc_group_pedals">pedalen</string>
+    <string name="s2g_tc_group_camera">camera</string>
+    <string name="s2g_tc_group_item">item / achteruitkijken</string>
+    <string name="s2g_tc_group_drift">driften / springen</string>
+    <string name="s2g_tc_edit_group">%1$s: sleep om te verplaatsen, tweede vinger om de grootte te wijzigen (%2$d %%)</string>
+    <string name="s2g_tc_edit_picture">beeld: sleep naar de zwarte balken</string>
+    <string name="s2g_tc_edit_hint">Sleep een knop of het beeld; knijp in een knop om de grootte te wijzigen</string>
+    <string name="s2g_tc_top">Boven</string>
+    <string name="s2g_tc_centre">Midden</string>
+    <string name="s2g_tc_bottom">Onder</string>
+    <string name="s2g_tc_reset">Resetten</string>
+    <string name="s2g_tc_done">Klaar</string>
+    <string name="s2g_tc_picture_position">Beeldpositie (dit scherm)</string>
+    <string name="s2g_tc_edit_layout">Indeling van de bediening bewerken…</string>
+    <string name="s2g_tc_vibrate">Trillen bij indrukken</string>
+    <string name="s2g_tc_show_log">Logboek over de game tonen</string>
+    <string name="s2g_tc_opacity">Dekking %1$d %%</string>
+    <string name="s2g_tc_size">Grootte %1$d %%</string>
+    <string name="s2g_tc_reset_controls">Bediening resetten</string>
+
+    <!-- GameActivity -->
+    <string name="s2g_ga_open_panel">In-gamepaneel openen</string>
+    <string name="s2g_ga_paused">Gepauzeerd\n\nTik om verder te gaan  (A of Start op een gamepad)</string>
+    <string name="s2g_ga_bg_stopped">De game is gestopt terwijl hij op de achtergrond stond (Android heeft het proces beëindigd).</string>
+    <string name="s2g_ga_bg_lost">Niet-opgeslagen voortgang is verloren; start de game opnieuw vanuit de launcher.</string>
+    <string name="s2g_ga_save_copied">Je opgeslagen data is gekopieerd naar de opslag van de app (%1$s). De oude map %2$s blijft zoals hij was.</string>
+    <string name="s2g_ga_save_not_copied">Je opgeslagen data kon niet naar de opslag van de app worden gekopieerd (%1$s). Deze start speelt hem waar hij staat, %2$s.</string>
+    <string name="s2g_ga_save_unfinished">De map met opgeslagen data heeft een onvoltooid herstel dat niet kan worden afgerond: %1$s</string>
+    <string name="s2g_ga_save_busy">De opgeslagen data %1$s is in gebruik: er loopt een back-up of herstel van. Probeer het opnieuw als dat klaar is.</string>
+    <string name="s2g_ga_checking_gpu">%1$s: GPU van deze telefoon controleren…</string>
+    <string name="s2g_ga_starting">%1$s: starten. Logboek: %2$s</string>
+    <string name="s2g_ga_ready_gpu">GPU: %1$s\nGeheugen: %2$s GiB volgens Android.</string>
+    <string name="s2g_ga_ready_missing">Ontbreekt: %1$s.\n\nDe game kan stoppen of verkeerd tekenen. Een aangepaste GPU-driver (Instellingen › GPU-driver) kan helpen.</string>
+    <string name="s2g_ga_ready_black_system">Ontbreekt: %1$s.\n\nMet deze GPU-driver (Systeem) wordt niets getekend: het scherm blijft zwart terwijl de game loopt. Kies een aangepaste driver met geplaatste geheugenmappings in Instellingen › GPU-driver, of in de Game-instellingen van deze game.</string>
+    <string name="s2g_ga_ready_black_custom">Ontbreekt: %1$s.\n\nMet deze GPU-driver (%2$s) wordt niets getekend: het scherm blijft zwart terwijl de game loopt. Kies Systeem (de eigen driver van de telefoon) in Instellingen › GPU-driver, of in de Game-instellingen van deze game.</string>
+    <string name="s2g_ga_ready_less">Werkt met minder: %1$s.</string>
+    <string name="s2g_ga_not_ready">Niet klaar voor deze game</string>
+    <string name="s2g_ga_ready_limits">Klaar, met beperkingen</string>
+    <string name="s2g_ga_start_black">Toch starten (zwart scherm)</string>
+    <string name="s2g_ga_try_anyway">Toch proberen</string>
+    <string name="s2g_ga_continue">Doorgaan</string>
+    <string name="s2g_ga_details">Details</string>
+    <string name="s2g_ga_details_where">De details staan ook in Instellingen › Gereedheidscontrole.</string>
+    <string name="s2g_ga_dont_show">Niet meer tonen</string>
+    <string name="s2g_ga_back">Terug</string>
+    <string name="s2g_ga_readiness">Gereedheidscontrole</string>
+    <string name="s2g_ga_close">Sluiten</string>
+    <string name="s2g_ga_copy_report">Rapport kopiëren</string>
+    <string name="s2g_ga_no_romfs_nup">%1$s heeft geen %2$s met een RomFS</string>
+    <string name="s2g_ga_no_romfs">geen RomFS in %1$s</string>
+    <string name="s2g_ga_host_not_started">de host is niet gestart (%1$d)</string>
+    <string name="s2g_ga_host_tried">de host is niet gestart (%1$d: in dit proces is al een start geprobeerd)</string>
+    <string name="s2g_ga_env_refused">Omgevingsregels niet overgenomen: %1$s: de launcher stelt de paden van de game in (DM_SAVE, DM_ROMFS, DM_TEMP, DM_ROOT, DM_AOC_DIR, HOME)</string>
+    <string name="s2g_ga_env_refused_test">Omgevingsregels niet overgenomen: %1$s: de launcher stelt de paden van de game in (DM_SAVE, DM_ROMFS, DM_TEMP, DM_ROOT, DM_AOC_DIR, HOME); DM_SAVE wordt alleen uit env-&lt;title ID&gt;.txt gehaald</string>
+    <string name="s2g_ga_cannot_start">Kan %1$s niet starten</string>
+    <string name="s2g_ga_running_title">%1$s draait</string>
+    <string name="s2g_ga_running_message">Stop die eerst (in-gamepaneel › Game stoppen) en start dan %1$s. Er draait één game tegelijk.</string>
+
+    <!-- Native.load -->
+    <string name="s2g_native_other_host">dit proces draait de host van %1$s, niet van %2$s</string>
+    <string name="s2g_native_load_failed">De host van %1$s kan niet worden geladen: %2$s</string>
+
+    <!-- ExitWatch -->
+    <string name="s2g_exit_title">De game is onverwacht gestopt</string>
+    <string name="s2g_exit_java">De app kreeg een fout en moest de game sluiten.</string>
+    <string name="s2g_exit_native">De game kreeg een fout en is gecrasht.</string>
+    <string name="s2g_exit_fatal">De game bereikte iets wat de app nog niet aankan en is daarom gestopt.</string>
+    <string name="s2g_exit_gpu">De GPU-driver reageerde niet meer, dus de game moest sluiten.</string>
+    <string name="s2g_exit_memory">Android heeft hem gesloten: de telefoon had geen geheugen meer. Andere apps sluiten voor het spelen kan helpen.</string>
+    <string name="s2g_exit_memory_bg">Android heeft hem op de achtergrond gesloten: de telefoon had geen geheugen meer. Niet-opgeslagen voortgang is verloren.</string>
+    <string name="s2g_exit_killed">Android heeft hem gesloten zonder reden te geven. Vaak is dat door geheugen: andere apps sluiten voor het spelen kan helpen.</string>
+    <string name="s2g_exit_anr">Android heeft hem gesloten omdat hij niet meer reageerde.</string>
+    <string name="s2g_exit_resources">Android heeft hem gesloten omdat hij te veel van de bronnen van de telefoon gebruikte.</string>
+    <string name="s2g_exit_permission">Android heeft hem gesloten omdat een van de rechten van de app is gewijzigd.</string>
+    <string name="s2g_exit_host_error">De game eindigde met een fout.</string>
+    <string name="s2g_exit_unknown">Hij is gesloten zonder reden te geven.</string>
+    <string name="s2g_exit_the_game">De game</string>
+    <string name="s2g_exit_likely">Waarschijnlijke oorzaak: %1$s</string>
+    <string name="s2g_exit_share_note">Logboek delen verstuurt het logboek van die sessie, dat meer vertelt.</string>
+    <string name="s2g_exit_share">Logboek delen</string>
+    <string name="s2g_exit_what">Wat het betekent</string>
+    <string name="s2g_panel_quick">Snelle instellingen</string>
+    <string name="s2g_panel_tab_graphics">Graphics</string>
+    <string name="s2g_panel_tab_monitor">Monitor</string>
+    <string name="s2g_panel_tab_controls">Besturing</string>
+    <string name="s2g_panel_sec_performance">Prestaties</string>
+    <string name="s2g_panel_sec_image">Beeld</string>
+    <string name="s2g_panel_sec_items">Getoonde onderdelen</string>
+    <string name="s2g_panel_pause_short">Pauzeren</string>
+    <string name="s2g_panel_stop_short">Stoppen</string>
+    <string name="s2g_panel_fps_auto">Auto</string>
+    <string name="s2g_panel_lsfg_mult">Vermenigvuldiger</string>
+    <string name="s2g_panel_lsfg_target">Doel-FPS</string>
+    <string name="s2g_panel_lsfg_flow">Bewegingsschatting</string>
+    <string name="s2g_panel_ov_compact">Compact</string>
+    <string name="s2g_panel_ov_detailed">Gedetailleerd</string>
+</resources>

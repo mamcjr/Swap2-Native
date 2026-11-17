@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2m_build_official">официальная</string>
+    <string name="s2m_build_unofficial">неофициальная сборка</string>
+    <string name="s2m_dump_no_code">нет кода игры (нет exefs/main ни в базовой версии, ни в обновлении)</string>
+    <string name="s2m_dump_base">базовая версия</string>
+    <string name="s2m_dump_update">обновление %1$s</string>
+    <string name="s2m_dump_no_romfs">%1$s (без RomFS)</string>
+    <string name="s2m_dump_and">и</string>
+</resources>

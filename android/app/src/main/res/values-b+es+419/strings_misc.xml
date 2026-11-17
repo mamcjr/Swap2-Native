@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2m_build_official">oficial</string>
+    <string name="s2m_build_unofficial">compilación no oficial</string>
+    <string name="s2m_dump_no_code">sin código del juego (no hay exefs/main en la base ni en una actualización)</string>
+    <string name="s2m_dump_base">la base</string>
+    <string name="s2m_dump_update">la actualización %1$s</string>
+    <string name="s2m_dump_no_romfs">%1$s (sin RomFS)</string>
+    <string name="s2m_dump_and">y</string>
+</resources>

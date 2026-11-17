@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">Schede</string>
+    <string name="s2_pad_nintendo">Pulsanti in stile Nintendo</string>
+    <string name="s2_pad_nintendo_note">Nei menu dell\'app, A (a destra) conferma e B (in basso) torna indietro, come su Switch; disattivato, conferma il pulsante in basso. I comandi dei giochi non cambiano.</string>
+</resources>

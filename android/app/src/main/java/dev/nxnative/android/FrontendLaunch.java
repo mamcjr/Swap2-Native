@@ -28,7 +28,7 @@ public final class FrontendLaunch extends Activity {
         if (saved != null) { finish(); return; }   // recreated after it handed the game on
         Intent i = getIntent();
         if (!Environment.isExternalStorageManager()) {
-            Toast.makeText(this, "Turn on All files access for " + getString(R.string.app_name) + ", then start the game again.", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, getString(R.string.s2l_frontend_access, getString(R.string.app_name)), Toast.LENGTH_LONG).show();
             home(null);
             return;
         }
@@ -37,13 +37,13 @@ public final class FrontendLaunch extends Activity {
         String path = pathOf(i);
         if (path == null) {
             fail(i.getData() != null
-                    ? "The frontend sent " + i.getData() + ", which is not a file on this phone's storage by a path the app can read. Set the frontend to send the file's path, or its storage (SAF) URI from the phone's own storage."
-                    : "The frontend sent no game: send the .nup (or the game folder) as the intent's data, or the extra \"game\" with its path.");
+                    ? getString(R.string.s2l_frontend_not_file, String.valueOf(i.getData()))
+                    : getString(R.string.s2l_frontend_no_game));
             return;
         }
         File game = Switch2Layout.moved(Switch2Layout.root(), new File(Frontend.normal(path)));   // a frontend set up before the move to Switch2/Games sends the old path
-        if (!game.exists()) { fail(game + " is not there (the frontend sent " + path + ")."); return; }
-        if (!game.canRead()) { fail(game + " cannot be read. Check that All files access is on."); return; }
+        if (!game.exists()) { fail(getString(R.string.s2l_frontend_missing, game.getPath(), path)); return; }
+        if (!game.canRead()) { fail(getString(R.string.s2l_frontend_unreadable, game.getPath())); return; }
         new Thread(() -> {
             String id = null, err = null;
             try { id = Pack.titleIdOf(game); } catch (IOException e) { err = e.getMessage(); }   // a .nup's TOC is hashed: off the main thread
@@ -118,7 +118,7 @@ public final class FrontendLaunch extends Activity {
             }, "nx-frontend").start();
             return;
         }
-        fail("No game with title ID " + tid + " is on Home. Add it in " + getString(R.string.app_name) + " first, or send the game's file instead.");
+        fail(getString(R.string.s2l_frontend_no_card, tid, getString(R.string.app_name)));
     }
 
     private void play(Game g) {
@@ -136,7 +136,7 @@ public final class FrontendLaunch extends Activity {
     }
 
     private void fail(String why) {
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Cannot start the game").setMessage(why)
-                .setPositiveButton("OK", null).setOnDismissListener(d -> finish()).show();
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle(R.string.s2l_frontend_cannot_start).setMessage(why)
+                .setPositiveButton(android.R.string.ok, null).setOnDismissListener(d -> finish()).show();
     }
 }

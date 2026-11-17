@@ -79,14 +79,21 @@ int main(void) {
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
     }
     // No frame step page and no engine limiter the host writes (a main the profile's
-    // stubs or limiter rows do not know): nothing makes the game follow the cap, so
-    // presentation keeps the game's own interval (Tears of the Kingdom 1.4.2 at 2x).
+    // stubs or limiter rows do not know): the cap is held by pacing presents alone
+    // (hle_fpslock.c dm_fps_lock_paced), never faster than the game's own interval
+    // (Tears of the Kingdom 1.4.2 at interval 2 ran at 2x when presented at a 60 cap).
     { win_t w={.interval=2};nvn_present_config(60,0);dm_fps_state=NULL;g_engine_stub=0;
       setenv("DM_FPS_TARGET","60",1);g_present_cap=-1;
-      EXPECT("no limiter: the 60 cap is not applied",0,fps_present_cap());
-      EXPECT("no limiter: the game's present interval stays",2,present_itv(&w));
+      EXPECT("no limiter: the 60 cap is paced",60,fps_present_cap());
+      EXPECT("no limiter: the game's longer present interval stays",2,present_itv(&w));
+      EXPECT("no limiter: the display-link target follows the game's interval",30,(present_period(&w),nvn_game_fps()));
       setenv("DM_FPS_TARGET","30",1);g_present_cap=-1;w.interval=1;
-      EXPECT("no limiter: the 30 cap is not applied",1,present_itv(&w));
+      EXPECT("no limiter: the 30 cap holds each frame for 2 vsyncs",2,present_itv(&w));
+      EXPECT("no limiter: the 30 cap's period",33333333,present_period(&w));
+      EXPECT("no limiter: the 30 cap's display-link target",30,nvn_game_fps());
+      EXPECT("a paced cap does not enable frame-step stubs",0,fstep_on());
+      setenv("DM_FPS_TARGET","0",1);g_present_cap=-1;
+      EXPECT("no limiter, no cap: the game's interval",1,present_itv(&w));
       _Alignas(8) uint8_t state[64]={0};float cap=60;memcpy(state,&cap,4);dm_fps_state=state;
       EXPECT("a frame step page needs no limiter",60,fps_present_cap());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;g_engine_stub=1;nvn_present_config(0,0);

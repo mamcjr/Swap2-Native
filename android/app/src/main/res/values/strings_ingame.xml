@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The in-game screen's texts (GameActivity, SidePanel, Overlay, PerformanceOverlay, TouchControls, Lsfg, ExitWatch, Native); values-pt/strings_ingame.xml has the Portuguese -->
+
+    <!-- SidePanel: the in-game panel -->
+    <string name="s2g_panel_note">The game runs on behind this panel; every change applies now and is kept.</string>
+    <string name="s2g_panel_fps_cap">Frame rate cap</string>
+    <string name="s2g_panel_fps_own">The game\'s own</string>
+    <string name="s2g_panel_overlay">Overlay</string>
+    <string name="s2g_panel_controls">On-screen controls</string>
+    <string name="s2g_panel_pause">Pause the game</string>
+    <string name="s2g_panel_pause_return">Pause when the game comes back from the background</string>
+    <string name="s2g_panel_stop">Stop the game</string>
+    <string name="s2g_panel_stop_title">Stop the game?</string>
+    <string name="s2g_panel_stop_message">The game ends; unsaved progress is lost. The log stays for Share log.</string>
+    <string name="s2g_panel_stop_yes">Stop</string>
+    <string name="s2g_panel_keep_running">Keep running</string>
+    <string name="s2g_panel_back">Back to the game</string>
+    <string name="s2g_fps_no_cap">This build has no frame rate cap.</string>
+    <string name="s2g_fps_starting">Starting…</string>
+    <string name="s2g_fps_own_rate">This game picks its own frame rate.</string>
+    <string name="s2g_fps_now_capped">Now %1$d fps, capped at %2$d.</string>
+    <string name="s2g_fps_now_own">Now %1$d fps, the game\'s own.</string>
+    <string name="s2g_fps_now_paced">Now %1$d fps, capped at %2$d. This game\'s speed is not known to follow the cap: where it could run faster, it may run slower than normal.</string>
+    <string name="s2g_lsfg_now">Now: %1$s</string>
+
+    <!-- Lsfg: frame generation rows -->
+    <string name="s2g_lsfg_head">Frame generation (Lossless Scaling, your own Lossless.dll)</string>
+    <string name="s2g_lsfg_not_built">Not in this build (built with -PnxLsfg=false).</string>
+    <string name="s2g_lsfg_on">Frame generation (LSFG)</string>
+    <string name="s2g_lsfg_mult">Frames per game frame</string>
+    <string name="s2g_lsfg_target">Target frame rate (the multiplier follows it)</string>
+    <string name="s2g_lsfg_fixed">Fixed</string>
+    <string name="s2g_lsfg_flow">Motion estimation resolution (lower is faster; Auto = the game\'s own)</string>
+    <string name="s2g_lsfg_auto">Auto</string>
+    <string name="s2g_lsfg_mode">Mode: performance (the only shader set Eden\'s LSFG uses)</string>
+    <string name="s2g_lsfg_cannot_open">cannot open %1$s</string>
+    <string name="s2g_lsfg_not_dll">that file is not a Windows DLL</string>
+
+    <!-- Overlay: its switches and the words of its text -->
+    <string name="s2g_ov_show">Show the overlay over the game</string>
+    <string name="s2g_ov_item_fps">Frame rate and frame time</string>
+    <string name="s2g_ov_item_throttle">Throttle dot (green / yellow / red)</string>
+    <string name="s2g_ov_item_gpu">GPU time a frame</string>
+    <string name="s2g_ov_item_cpu">CPU clock caps</string>
+    <string name="s2g_ov_item_battery">Battery temperature and level</string>
+    <string name="s2g_ov_item_memory">Memory: the game\'s and the phone\'s</string>
+    <string name="s2g_ov_item_tag">Build name (top left; off by default)</string>
+    <string name="s2g_ov_no_lsfg">no LSFG</string>
+    <string name="s2g_ov_cpu_unknown">CPU cap ?</string>
+    <string name="s2g_ov_mem_low">low</string>
+    <string name="s2g_pov_cpu_cap">CPU cap %1$s</string>
+    <string name="s2g_pov_free_ram">Free RAM %1$s</string>
+
+    <!-- TouchControls: the controls' rows and the layout editor -->
+    <string name="s2g_tc_group_left_stick">left stick</string>
+    <string name="s2g_tc_group_dpad">D-pad</string>
+    <string name="s2g_tc_group_right_stick">right stick</string>
+    <string name="s2g_tc_group_steering">steering</string>
+    <string name="s2g_tc_group_map">map / pause / rewind</string>
+    <string name="s2g_tc_group_pedals">pedals</string>
+    <string name="s2g_tc_group_camera">camera</string>
+    <string name="s2g_tc_group_item">item / rear view</string>
+    <string name="s2g_tc_group_drift">drift / jump</string>
+    <string name="s2g_tc_edit_group">%1$s: drag to move, a second finger to resize (%2$d %%)</string>
+    <string name="s2g_tc_edit_picture">picture: drag into the black bars</string>
+    <string name="s2g_tc_edit_hint">Drag a control or the picture; pinch a control to resize it</string>
+    <string name="s2g_tc_top">Top</string>
+    <string name="s2g_tc_centre">Centre</string>
+    <string name="s2g_tc_bottom">Bottom</string>
+    <string name="s2g_tc_reset">Reset</string>
+    <string name="s2g_tc_done">Done</string>
+    <string name="s2g_tc_picture_position">Picture position (this screen)</string>
+    <string name="s2g_tc_edit_layout">Edit the controls layout…</string>
+    <string name="s2g_tc_vibrate">Vibrate on press</string>
+    <string name="s2g_tc_show_log">Show the log over the game</string>
+    <string name="s2g_tc_opacity">Opacity %1$d %%</string>
+    <string name="s2g_tc_size">Size %1$d %%</string>
+    <string name="s2g_tc_reset_controls">Reset the controls</string>
+
+    <!-- GameActivity: the game's screen, its start-up notices and failures -->
+    <string name="s2g_ga_open_panel">Open the in-game panel</string>
+    <string name="s2g_ga_paused">Paused\n\nTap to continue  (A or Start on a gamepad)</string>
+    <string name="s2g_ga_bg_stopped">The game was stopped while it was in the background (Android ended its process).</string>
+    <string name="s2g_ga_bg_lost">Unsaved progress is lost; start it again from the launcher.</string>
+    <string name="s2g_ga_save_copied">Your save was copied into the app\'s storage (%1$s). The old folder %2$s is kept as it was.</string>
+    <string name="s2g_ga_save_not_copied">Your save could not be copied into the app\'s storage (%1$s). This start plays it where it is, %2$s.</string>
+    <string name="s2g_ga_save_unfinished">The save folder has an unfinished restore that cannot be finished: %1$s</string>
+    <string name="s2g_ga_save_busy">The save %1$s is in use: a backup or restore of it is working. Try again when it is done.</string>
+    <string name="s2g_ga_checking_gpu">%1$s: checking this phone\'s GPU…</string>
+    <string name="s2g_ga_starting">%1$s: starting. Log: %2$s</string>
+    <string name="s2g_ga_ready_gpu">GPU: %1$s\nMemory: %2$s GiB as Android reports it.</string>
+    <string name="s2g_ga_ready_missing">Missing: %1$s.\n\nThe game may stop or draw wrongly. A custom GPU driver (Settings › GPU driver) may help.</string>
+    <string name="s2g_ga_ready_black_system">Missing: %1$s.\n\nWith this GPU driver (System) nothing is drawn: the screen stays black while the game runs. Pick a custom driver that has placed memory maps in Settings › GPU driver, or in this game\'s Game settings.</string>
+    <string name="s2g_ga_ready_black_custom">Missing: %1$s.\n\nWith this GPU driver (%2$s) nothing is drawn: the screen stays black while the game runs. Pick System (the phone\'s own driver) in Settings › GPU driver, or in this game\'s Game settings.</string>
+    <string name="s2g_ga_ready_less">Runs with less: %1$s.</string>
+    <string name="s2g_ga_not_ready">Not ready for this game</string>
+    <string name="s2g_ga_ready_limits">Ready, with limits</string>
+    <string name="s2g_ga_start_black">Start anyway (black screen)</string>
+    <string name="s2g_ga_try_anyway">Try anyway</string>
+    <string name="s2g_ga_continue">Continue</string>
+    <string name="s2g_ga_details">Details</string>
+    <string name="s2g_ga_details_where">Details are also in Settings › Readiness check.</string>
+    <string name="s2g_ga_dont_show">Don\'t show this again</string>
+    <string name="s2g_ga_back">Back</string>
+    <string name="s2g_ga_readiness">Readiness check</string>
+    <string name="s2g_ga_close">Close</string>
+    <string name="s2g_ga_copy_report">Copy report</string>
+    <string name="s2g_ga_no_romfs_nup">%1$s has no %2$s with a RomFS</string>
+    <string name="s2g_ga_no_romfs">no RomFS in %1$s</string>
+    <string name="s2g_ga_host_not_started">the host did not start (%1$d)</string>
+    <string name="s2g_ga_host_tried">the host did not start (%1$d: a start was already tried in this process)</string>
+    <string name="s2g_ga_env_refused">Environment lines not taken: %1$s: the launcher sets the game\'s paths (DM_SAVE, DM_ROMFS, DM_TEMP, DM_ROOT, DM_AOC_DIR, HOME)</string>
+    <string name="s2g_ga_env_refused_test">Environment lines not taken: %1$s: the launcher sets the game\'s paths (DM_SAVE, DM_ROMFS, DM_TEMP, DM_ROOT, DM_AOC_DIR, HOME); DM_SAVE is taken from env-&lt;title ID&gt;.txt only</string>
+    <string name="s2g_ga_cannot_start">Cannot start %1$s</string>
+    <string name="s2g_ga_running_title">%1$s is running</string>
+    <string name="s2g_ga_running_message">Stop it first (the in-game panel › Stop the game), then start %1$s. One game runs at a time.</string>
+
+    <!-- Native.load: a host that cannot run this game -->
+    <string name="s2g_native_other_host">this process runs the host of %1$s, not %2$s</string>
+    <string name="s2g_native_load_failed">The host of %1$s cannot be loaded: %2$s</string>
+
+    <!-- ExitWatch: "The game stopped unexpectedly" (ExitNotice's sentences, shown in the player's language) -->
+    <string name="s2g_exit_title">The game stopped unexpectedly</string>
+    <string name="s2g_exit_java">The app ran into an error and had to close the game.</string>
+    <string name="s2g_exit_native">The game ran into an error and crashed.</string>
+    <string name="s2g_exit_fatal">The game reached something the app cannot handle yet, so it was stopped.</string>
+    <string name="s2g_exit_gpu">The GPU driver stopped responding, so the game had to close.</string>
+    <string name="s2g_exit_memory">Android closed it: the phone ran out of memory. Closing other apps before playing can help.</string>
+    <string name="s2g_exit_memory_bg">Android closed it while it was in the background: the phone ran out of memory. Unsaved progress is lost.</string>
+    <string name="s2g_exit_killed">Android closed it without saying why. This is often for memory: closing other apps before playing can help.</string>
+    <string name="s2g_exit_anr">Android closed it because it stopped responding.</string>
+    <string name="s2g_exit_resources">Android closed it for using too much of the phone\'s resources.</string>
+    <string name="s2g_exit_permission">Android closed it because one of the app\'s permissions changed.</string>
+    <string name="s2g_exit_host_error">The game ended with an error.</string>
+    <string name="s2g_exit_unknown">It closed without saying why.</string>
+    <string name="s2g_exit_the_game">The game</string>
+    <string name="s2g_exit_likely">Likely cause: %1$s</string>
+    <string name="s2g_exit_share_note">Share log sends the log of that run, which says more.</string>
+    <string name="s2g_exit_share">Share log</string>
+    <string name="s2g_exit_what">What it means</string>
+    <!-- The in-game panel, Console revision 6 (SidePanel; docs/SWAP2-NATIVE-SIDE-PANEL-v1.md) -->
+    <string name="s2g_panel_quick">Quick settings</string>
+    <string name="s2g_panel_tab_graphics">Graphics</string>
+    <string name="s2g_panel_tab_monitor">Monitor</string>
+    <string name="s2g_panel_tab_controls">Controls</string>
+    <string name="s2g_panel_sec_performance">Performance</string>
+    <string name="s2g_panel_sec_image">Image</string>
+    <string name="s2g_panel_sec_items">Items shown</string>
+    <string name="s2g_panel_pause_short">Pause</string>
+    <string name="s2g_panel_stop_short">Stop</string>
+    <string name="s2g_panel_fps_auto">Auto</string>
+    <string name="s2g_panel_lsfg_mult">Multiplier</string>
+    <string name="s2g_panel_lsfg_target">Target FPS</string>
+    <string name="s2g_panel_lsfg_flow">Motion estimation</string>
+    <string name="s2g_panel_ov_compact">Compact</string>
+    <string name="s2g_panel_ov_detailed">Detailed</string>
+</resources>

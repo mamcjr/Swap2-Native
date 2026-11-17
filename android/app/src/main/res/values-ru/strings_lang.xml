@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_app_lang">Язык приложения</string>
+    <string name="s2_app_lang_note">язык этих меню</string>
+    <string name="s2_app_lang_system">Язык телефона</string>
+</resources>

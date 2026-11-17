@@ -44,7 +44,7 @@ import java.util.concurrent.Executors;
  * the phone sets once warm, while the thermal status still reads 1: that reads red. The 2.50 GHz cap (69 %) the phone keeps even when cool reads yellow.
  */
 final class Overlay {
-    /** The items: the Prefs key and the switch's label */
+    /** The items: the Prefs key and the switch's label (English; LABELS has the label shown, in the player's language) */
     static final String[][] ITEMS = {
             {"fps", "Frame rate and frame time"},
             {"throttle", "Throttle dot (green / yellow / red)"},
@@ -54,11 +54,14 @@ final class Overlay {
             {"memory", "Memory: the game's and the phone's"},
             {"tag", "Build name (top left; off by default)"},
     };
+    /** The switch's label of each item of ITEMS, in the same order */
+    static final int[] LABELS = {R.string.s2g_ov_item_fps, R.string.s2g_ov_item_throttle, R.string.s2g_ov_item_gpu, R.string.s2g_ov_item_cpu,
+            R.string.s2g_ov_item_battery, R.string.s2g_ov_item_memory, R.string.s2g_ov_item_tag};
 
     /** The master switch and, below it, one switch per item (main screen dialog, in-game settings) */
     static void rows(Context c, LinearLayout box, String masterNote) {
         CheckBox master = new CheckBox(c);
-        master.setText("Show the overlay over the game" + (masterNote != null ? masterNote : ""));
+        master.setText(c.getString(R.string.s2g_ov_show) + (masterNote != null ? masterNote : ""));
         master.setChecked(Prefs.overlay(c));
         box.addView(master);
         android.widget.RadioGroup modes = new android.widget.RadioGroup(c);
@@ -75,9 +78,10 @@ final class Overlay {
         android.widget.TextView hint = new android.widget.TextView(c); hint.setText(R.string.s2_overlay_gesture); box.addView(hint);
         List<CheckBox> items = new ArrayList<>();
         int indent = Math.round(24 * c.getResources().getDisplayMetrics().density);
-        for (String[] it : ITEMS) {
+        for (int k = 0; k < ITEMS.length; k++) {
+            String[] it = ITEMS[k];
             CheckBox b = new CheckBox(c);
-            b.setText(it[1]);
+            b.setText(LABELS[k]);
             b.setChecked(Prefs.overlayItem(c, it[0]));
             b.setEnabled(master.isChecked());
             b.setOnCheckedChangeListener((v, on) -> Prefs.overlayItem(c, it[0], on));
@@ -276,7 +280,7 @@ final class Overlay {
             if (k.capKHz <= 0) continue;
             line(s, (n++ == 0 ? "CPU " : "") + String.format(Locale.ROOT, "%.1f/%.1f", k.capKHz / 1e6, k.maxKHz / 1e6));
         }
-        if (n == 0) line(s, "CPU cap ?");
+        if (n == 0) line(s, ctx.getString(R.string.s2g_ov_cpu_unknown));
         else s.append(" GHz");
     }
 
@@ -309,7 +313,7 @@ final class Overlay {
         }
         if (fps && fresh) line(s, String.format(Locale.ROOT, "%.1f ms", rate[2]));
         if (fps && (rate[3] == 1 || rate[3] == 2)) line(s, "LSFG");
-        if (fps && rate[3] < 0) line(s, "no LSFG");
+        if (fps && rate[3] < 0) line(s, ctx.getString(R.string.s2g_ov_no_lsfg));
         if (gpu && fresh && rate[5] >= 0) line(s, String.format(Locale.ROOT, "GPU %.1f ms", rate[5]));
         if (cpu) caps(s);
         if (bat && batLevel >= 0)
@@ -318,8 +322,9 @@ final class Overlay {
             line(s, MemText.app(rss));
             line(s, MemText.system(memTotal, memAvail));
             if (memLow) {
-                s.append(" low");
-                s.setSpan(new ForegroundColorSpan(DOT[2]), s.length() - 3, s.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                String low = ctx.getString(R.string.s2g_ov_mem_low);
+                s.append(" ").append(low);
+                s.setSpan(new ForegroundColorSpan(DOT[2]), s.length() - low.length(), s.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
         }
         return s;   // every line at the overlay's one size (GameActivity.OVERLAY_SP): at 8 sp a smaller second size would no longer read

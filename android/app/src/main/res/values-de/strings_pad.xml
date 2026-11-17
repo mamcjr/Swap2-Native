@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">Tabs</string>
+    <string name="s2_pad_nintendo">Nintendo-Tastenbelegung</string>
+    <string name="s2_pad_nintendo_note">In den Menüs der App bestätigt A (rechts) und B (unten) geht zurück, wie auf der Switch; ausgeschaltet bestätigt die untere Taste. Spiele behalten ihre eigene Steuerung.</string>
+</resources>

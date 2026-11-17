@@ -854,7 +854,7 @@ public final class PackService extends Service {
                 .setCategory(Notification.CATEGORY_PROGRESS).setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
                 .setContentIntent(PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT));
         String name = j == null ? getString(R.string.s2_note_a_game) : j.name();
-        String sim = engine.simulated() ? " (simulated)" : "";
+        String sim = engine.simulated() ? " " + getString(R.string.s2l_simulated) : "";
         if (j == null) return b.setContentTitle(getString(R.string.s2_note_preparing, name) + sim).setContentText(getString(R.string.s2_st_starting)).build();
         String state = j.state();
         int pct = (int) Math.round(j.overall() * 100);

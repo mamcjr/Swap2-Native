@@ -49,21 +49,21 @@ public final class SelftestActivity extends Activity implements SurfaceHolder.Ca
         root.addView(new TouchControls(this, Native.hasInput()), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
         File log = new File(LogProvider.dir(this), "selftest-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date()) + ".log");
-        if (Native.openLog(log.getPath()) != 0) { status.setText("FAIL: cannot open the log " + log); return; }
+        if (Native.openLog(log.getPath()) != 0) { status.setText(getString(R.string.s2s_selftest_no_log, log.getPath())); return; }
         Native.note("graphics selftest: Swap2-Native " + BuildConfig.VERSION_NAME + " (" + BuildConfig.NX_COMMIT + "); device " + Build.MANUFACTURER + " " + Build.MODEL
                 + ", Android " + Build.VERSION.RELEASE + " (SDK " + Build.VERSION.SDK_INT + "), " + Build.SUPPORTED_ABIS[0]);
-        status.setText(Native.hasSelftest() ? "Graphics self-test: waiting for the surface" : "FAIL: this host has no nxhost_vk_selftest");
+        status.setText(Native.hasSelftest() ? R.string.s2s_selftest_waiting : R.string.s2s_selftest_missing);
     }
 
     @Override public void surfaceCreated(SurfaceHolder h) {
         if (running || !Native.hasSelftest()) { Native.setSurface(h.getSurface()); return; }
         running = true;
-        status.setText("Graphics self-test running (" + FRAMES + " frames, about " + FRAMES / 60 + " s)");
+        status.setText(getString(R.string.s2s_selftest_running, FRAMES, FRAMES / 60));
         Thread t = new Thread(null, () -> {
             int rc = Native.selftest(h.getSurface(), FRAMES);
             ui.post(() -> {
                 status.setTextColor(rc == 0 ? Color.GREEN : Color.RED);
-                status.setText((rc == 0 ? "PASS" : "FAIL") + " (return code " + rc + ")\nBack to return; Share log sends this run's log.");
+                status.setText(getString(rc == 0 ? R.string.s2s_selftest_pass : R.string.s2s_selftest_fail, rc));
             });
         }, "nxselftest", 1 << 20);
         t.start();

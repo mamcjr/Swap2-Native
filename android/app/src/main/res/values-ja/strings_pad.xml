@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">タブ</string>
+    <string name="s2_pad_nintendo">Nintendo配置のボタン</string>
+    <string name="s2_pad_nintendo_note">アプリのメニューでは、Switchと同じくA（右）で決定、B（下）で戻ります。オフにすると下のボタンで決定します。ゲーム内の操作は変わりません。</string>
+</resources>

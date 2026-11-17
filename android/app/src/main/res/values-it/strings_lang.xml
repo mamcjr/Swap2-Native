@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_app_lang">Lingua dell\'app</string>
+    <string name="s2_app_lang_note">la lingua di questi menu</string>
+    <string name="s2_app_lang_system">Lingua del telefono</string>
+</resources>

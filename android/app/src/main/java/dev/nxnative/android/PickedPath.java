@@ -52,13 +52,16 @@ final class PickedPath {
         return k;
     }
 
+    /** nameProblem's sentence for a name that cannot be used at all (PickedNup says it in the interface's language) */
+    static final String BAD_NAME = "That file's name cannot be used.";
+
     /**
      * Why a picked document's display name cannot be used as a .nup in place, or null when it can (a safe single file name ending in {@code .nup}, with no
      * {@code .nup:} inside it).
      */
     static String nameProblem(String displayName) {
         String n = CopyPlan.safeName(displayName);
-        if (n == null || n.equalsIgnoreCase(Nup.EXT) || Nup.lastSplit(n) >= 0) return "That file's name cannot be used.";
+        if (n == null || n.equalsIgnoreCase(Nup.EXT) || Nup.lastSplit(n) >= 0) return BAD_NAME;
         if (Nup.hasExt(n)) return null;
         return n + " is not a .nup file (its name must end in .nup).";
     }

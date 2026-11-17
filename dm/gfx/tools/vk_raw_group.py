@@ -188,7 +188,7 @@ def group_cached_loads(m):
                     if lt_ is not None and lt_[0] & 0xffff == OP_ULESS_THAN and V(lt_[3]) == vl and V(lt_[4]) == b: return (b, hh, c)
             return (vl, vh, 0)
         open_ = {}   # (B, H, the cache variables) → {'c0', 'words', 'calls'}
-        def flush():
+        def flush(open_=open_, f=f):
             for g in open_.values():
                 if len(g['calls']) > 1: groups.append((f, g['calls']))
             open_.clear()

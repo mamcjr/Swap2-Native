@@ -37,6 +37,14 @@ final class Prefs {
         int i = java.util.Arrays.asList(WINDOWS).indexOf(v);
         return i < 0 ? v : (shortName ? WINDOW_SHORT : WINDOW_NAMES)[i];
     }
+    /** WINDOWS' names and short names in the user's language (WINDOW_NAMES and WINDOW_SHORT are their English) */
+    private static final int[] WINDOW_NAME_TEXTS = {R.string.s2s_window_1080p, R.string.s2s_window_original, R.string.s2s_window_720p, R.string.s2s_window_540p},
+            WINDOW_SHORT_TEXTS = {R.string.s2s_window_1080p_short, R.string.s2s_window_original_short, R.string.s2s_window_720p_short, R.string.s2s_window_540p_short};
+    static String windowName(Context c, String v, boolean shortName) {
+        int i = java.util.Arrays.asList(WINDOWS).indexOf(v);
+        return i < 0 ? v : c.getString((shortName ? WINDOW_SHORT_TEXTS : WINDOW_NAME_TEXTS)[i]);
+    }
+    static String windowName(Context c, int i) { return c.getString(WINDOW_NAME_TEXTS[i]); }
     static String window(Context c) { return of(c).getString("window", WINDOWS[0]); }
     static void window(Context c, String v) { of(c).edit().putString("window", v).commit(); }
 
@@ -234,6 +242,11 @@ final class Prefs {
      * is the first line of every game log ("[nxlaunch] build ...").
      */
     static String buildTag(Context ctx) { return Signer.tag(buildTag(), BuildConfig.NX_PLAY, signers(ctx)); }
+
+    /** buildTag with its mark in the interface's language, for the launcher's chip only (logs and reports keep buildTag) */
+    static String buildTagShown(Context ctx) {
+        return Signer.tag(buildTag(), BuildConfig.NX_PLAY, signers(ctx), ctx.getString(R.string.s2m_build_official), ctx.getString(R.string.s2m_build_unofficial));
+    }
 
     private static String[] signers;
 

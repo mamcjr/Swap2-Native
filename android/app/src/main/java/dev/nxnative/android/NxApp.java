@@ -10,5 +10,6 @@ public final class NxApp extends Application {
     @Override public void onCreate() {
         super.onCreate();
         PickedNup.install(this);
+        PadNav.install(this);   // the gamepad's A and B in every window, the dialogs' too (the Nintendo layout)
     }
 }

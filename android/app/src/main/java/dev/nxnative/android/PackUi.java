@@ -37,7 +37,7 @@ final class PackUi {
     private static boolean ready(MainActivity a, Game g) {
         if (a.needAccess()) return false;
         if (busy(g.titleId)) { a.error(a.getString(R.string.s2_err_pack_busy, g.name)); return false; }
-        if (SaveUi.gameRunning(a, g)) { a.error(g.name + " is running: stop it first (its in-game panel › Stop the game)."); return false; }
+        if (SaveUi.gameRunning(a, g)) { a.error(a.getString(R.string.s2_shaders_err_running, g.name)); return false; }
         return true;
     }
 
@@ -46,11 +46,11 @@ final class PackUi {
         try {
             Pack.read(new File(g.packDir));
         } catch (IOException e) {
-            a.error("There is no pack to export: " + e.getMessage());
+            a.error(a.getString(R.string.s2l_pack_export_none, String.valueOf(e.getMessage())));
             return;
         }
         pending = g;
-        a.pickFolder(PICK_EXPORT, "Pick the folder for the pack's .zip");
+        a.pickFolder(PICK_EXPORT, a.getString(R.string.s2l_pack_export_where));
     }
 
     static void importPick(MainActivity a, Game g) {
@@ -91,7 +91,7 @@ final class PackUi {
         pending = null;
         if (g == null) return true;
         String p = PathUtil.documentToPath(a, doc);
-        if (p == null) { a.error("That file is not on this phone's storage by a path the app can read (" + doc + "). Pick it from the phone's storage (☰ › the phone's name), not from Recent or Downloads."); return true; }
+        if (p == null) { a.error(a.getString(R.string.s2l_pack_zip_no_path, String.valueOf(doc))); return true; }
         importRun(a, g, new File(p));
         return true;
     }
@@ -118,39 +118,39 @@ final class PackUi {
     private static void exportRun(MainActivity a, Game g, File dir) {
         if (!ready(a, g)) return;
         File pack = new File(g.packDir);
-        run(a, g, "Exporting " + g.name + "'s pack…", () -> {
+        run(a, g, a.getString(R.string.s2l_pack_exporting, g.name), () -> {
             long need = size(pack);
             if (dir.isDirectory() && dir.getUsableSpace() < need + (64L << 20))
-                throw new IOException("the zip needs " + SaveStore.size(need) + ", and " + dir + " has " + SaveStore.size(dir.getUsableSpace()) + " free");
+                throw new IOException(a.getString(R.string.s2l_pack_export_space, SaveStore.size(need), dir.getPath(), SaveStore.size(dir.getUsableSpace())));
             ShaderZip.recover(pack);   // a shaders import that stopped (.import-*, .replaced-*) is not exported with the pack
             return PackZip.export(pack, dir);
         }, (r, err) -> {
-            if (err != null) { a.error("No pack was exported: " + err + "\n\nThe pack in " + pack + " was only read."); return; }
+            if (err != null) { a.error(a.getString(R.string.s2l_pack_export_failed, err, pack.getPath())); return; }
             File z = (File) r;
-            new AlertDialog.Builder(a).setTitle("Pack exported").setMessage(z + "\n\n" + SaveStore.size(z.length()) + ", checked against the pack file by file. Import pack… on another "
-                    + "phone (or after a new install) puts it back.").setPositiveButton("OK", null).show();
+            new AlertDialog.Builder(a).setTitle(R.string.s2l_pack_exported_title).setMessage(a.getString(R.string.s2l_pack_exported_text, z.getPath(), SaveStore.size(z.length())))
+                    .setPositiveButton(android.R.string.ok, null).show();
         });
     }
 
     private static void importRun(MainActivity a, Game g, File source) {
         if (!ready(a, g)) return;
         File packs = AppStorage.packs(a), target = AppStorage.pack(a, g.titleId);
-        run(a, g, "Importing " + g.name + "'s pack…", () -> {
+        run(a, g, a.getString(R.string.s2l_pack_importing, g.name), () -> {
             long need = size(source);
             if (packs.getParentFile() != null && packs.getParentFile().getUsableSpace() < need + (256L << 20))
-                throw new IOException("the pack needs " + SaveStore.size(need) + ", and the app's storage has " + SaveStore.size(packs.getParentFile().getUsableSpace()) + " free");
+                throw new IOException(a.getString(R.string.s2l_pack_import_space, SaveStore.size(need), SaveStore.size(packs.getParentFile().getUsableSpace())));
             File remembered = Job.remembered(a);
             if (remembered != null && remembered.isFile()) {
                 Job j = Job.read(remembered);
                 if (SaveStore.same(j.pack(), target) && !"done".equals(j.state()))
-                    throw new IOException("a Prepare job of this game writes to " + target + " (" + j.statusText(false) + "): let it finish, or forget it in its ⋯ Manage, first");
+                    throw new IOException(a.getString(R.string.s2l_pack_import_job, target.getPath(), j.statusText(a, false)));
             }
             Pack p = PackZip.stage(source, packs, g.titleId);
             try {
                 // blocking, not playBlocking: a pack whose mods differ is still the game's (Play rewrites its code first), and the message says so below
                 String bad = PackCheck.blocking(a, p, new File(g.gameDir));
                 if (bad != null) throw new IOException(bad);
-                if (SaveUi.gameRunning(a, g)) throw new IOException(g.name + " was started meanwhile");
+                if (SaveUi.gameRunning(a, g)) throw new IOException(a.getString(R.string.s2l_pack_started_meanwhile, g.name));
                 PackZip.swapIn(p.dir, target);
             } finally {
                 if (p.dir.exists()) SaveStore.deleteTree(p.dir);
@@ -164,7 +164,7 @@ final class PackUi {
             Folders.setPack(a, g.titleId, target);
             String lp = Pack.libraryProblem(target, g.titleId);
             String mods = null;
-            try { mods = PackCheck.mods(Pack.read(target), new File(g.gameDir)); } catch (IOException | RuntimeException e) { /* the card's check says it */ }
+            try { mods = PackCheck.mods(a, Pack.read(target), new File(g.gameDir)); } catch (IOException | RuntimeException e) { /* the card's check says it */ }
             // what Play does with it now, in the card's words (GameFlow): ready, or Play first applies the mods to its code; an older library plays while it is updated
             String shaders = lp == null ? a.getString(mods != null ? R.string.s2_pack_imported_mods : R.string.s2_pack_imported_ready)
                     : Pack.playableLibrary(target, g.titleId) != null || Pack.legacyLibrary(target, g.titleId) != null

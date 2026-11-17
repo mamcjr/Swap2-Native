@@ -120,13 +120,13 @@ final class GpuDriver {
     static Info install(Context c, InputStream zin, String fallbackName) throws IOException {
         File dir = DriverZip.install(root(c), zin, fallbackName, GpuDriver::metaFields);
         JSONObject m = meta(new File(dir, "meta.json"));
-        if (m == null) throw new IOException("cannot read the installed " + dir + "/meta.json");
+        if (m == null) throw new DriverZip.Refused("cannot_read_meta", "cannot read the installed " + dir + "/meta.json", null, dir.getPath());
         return new Info(dir, m);
     }
 
     static Info install(Context c, Uri uri) throws IOException {
         try (InputStream in = c.getContentResolver().openInputStream(uri)) {
-            if (in == null) throw new IOException("cannot open " + uri);
+            if (in == null) throw new DriverZip.Refused("cannot_open", "cannot open " + uri, null, String.valueOf(uri));
             String last = uri.getLastPathSegment();
             return install(c, in, last == null ? "driver" : last.replaceAll(".*[/:]", "").replaceAll("\\.zip$", ""));
         }
@@ -164,20 +164,50 @@ final class GpuDriver {
         return m != null && !m.isEmpty() ? m : e.getClass().getSimpleName();
     }
 
+    /** The same in the user's language: a refused install (DriverZip.Refused) worded from its key, anything else as why(e) */
+    static String why(Context c, Throwable e) {
+        if (e instanceof DriverZip.Refused) {
+            DriverZip.Refused r = (DriverZip.Refused) e;
+            int id = refusedText(r.key);
+            if (id != 0) return r.args == null || r.args.length == 0 ? c.getString(id) : c.getString(id, r.args);
+        }
+        return why(e);
+    }
+
+    private static int refusedText(String key) {
+        if (key == null) return 0;
+        switch (key) {
+            case "cannot_create": return R.string.s2s_drv_err_cannot_create;
+            case "cut_short": return R.string.s2s_drv_err_cut_short;
+            case "damaged": return R.string.s2s_drv_err_damaged;
+            case "too_many_files": return R.string.s2s_drv_err_too_many_files;
+            case "too_big": return R.string.s2s_drv_err_too_big;
+            case "no_meta": return R.string.s2s_drv_err_no_meta;
+            case "no_library": return R.string.s2s_drv_err_no_library;
+            case "library_missing": return R.string.s2s_drv_err_library_missing;
+            case "cannot_replace": return R.string.s2s_drv_err_cannot_replace;
+            case "cannot_move_kept": return R.string.s2s_drv_err_cannot_move_kept;
+            case "cannot_move": return R.string.s2s_drv_err_cannot_move;
+            case "cannot_read_meta": return R.string.s2s_drv_err_cannot_read_meta;
+            case "cannot_open": return R.string.s2s_drv_err_cannot_open;
+            default: return 0;
+        }
+    }
+
     /** Runs an install off the UI thread behind a wait dialog; picks the driver only when it is installed, then says so (or why not) and runs after (on the UI
      *  thread, also after a failure; may be null). Nothing it throws reaches the app: a failed install is a message and changes no pick. */
     static void installInBackground(Activity a, String what, Job job, Runnable after) {
         Context app = a.getApplicationContext();
-        AlertDialog wait = new AlertDialog.Builder(a).setMessage("Installing " + what + "…").setCancelable(false).create();
+        AlertDialog wait = new AlertDialog.Builder(a).setMessage(a.getString(R.string.s2s_drv_installing, what)).setCancelable(false).create();
         wait.show();
         new Thread(() -> {
             Info got = null; String fail = null;
             try { got = job.run(); select(app, got); }
-            catch (Throwable e) { fail = why(e); }   // never let an install end the app (malformed zips throw unchecked exceptions; a huge one may run out of memory)
+            catch (Throwable e) { fail = why(app, e); }   // never let an install end the app (malformed zips throw unchecked exceptions; a huge one may run out of memory)
             final Info i = got; final String f = fail;
             UI.post(() -> {
                 if (!a.isFinishing() && !a.isDestroyed()) { try { wait.dismiss(); } catch (RuntimeException ignored) { /* its window is gone */ } }
-                Toast.makeText(app, f != null ? "GPU driver not installed: " + f : "GPU driver installed and picked: " + i.label(), Toast.LENGTH_LONG).show();
+                Toast.makeText(app, f != null ? app.getString(R.string.s2s_drv_not_installed, f) : app.getString(R.string.s2s_drv_installed, i.label()), Toast.LENGTH_LONG).show();
                 if (after != null) after.run();
             });
         }, "driver-install").start();
@@ -191,7 +221,7 @@ final class GpuDriver {
             Info sel = null;
             for (Info d : installed(a)) if (d.dir.getName().equals(pick)) sel = d;
             select(a, sel);
-            Toast.makeText(a, "GPU driver: " + (sel == null ? "system" : sel.label()), Toast.LENGTH_SHORT).show();
+            Toast.makeText(a, sel == null ? a.getString(R.string.s2s_drv_picked_system) : a.getString(R.string.s2s_drv_picked, sel.label()), Toast.LENGTH_SHORT).show();
         };
         if (zip != null) installInBackground(a, new File(zip).getName(), () -> install(a, new File(zip)), doPick);
         else if (doPick != null) doPick.run();
@@ -202,30 +232,30 @@ final class GpuDriver {
         List<Info> inst = installed(a);
         Info sel = selected(a);
         List<String> labels = new ArrayList<>();
-        labels.add("System (the phone's own driver)");
+        labels.add(a.getString(R.string.s2_driver_system_long));
         int checked = 0;
-        for (int k = 0; k < inst.size(); k++) { labels.add(inst.get(k).label() + (recommended(inst.get(k)) ? " (recommended)" : "")); if (sel != null && inst.get(k).dir.equals(sel.dir)) checked = k + 1; }
-        new AlertDialog.Builder(a).setTitle("GPU driver (takes effect at the next game start)")
+        for (int k = 0; k < inst.size(); k++) { labels.add(recommended(inst.get(k)) ? a.getString(R.string.s2s_drv_recommended, inst.get(k).label()) : inst.get(k).label()); if (sel != null && inst.get(k).dir.equals(sel.dir)) checked = k + 1; }
+        new AlertDialog.Builder(a).setTitle(R.string.s2s_drv_title)
                 .setSingleChoiceItems(labels.toArray(new String[0]), checked, (d, w) -> { select(a, w == 0 ? null : inst.get(w - 1)); d.dismiss(); })
-                .setPositiveButton("Install…", (d, w) -> installDialog(a, request))
-                .setNeutralButton(sel != null ? "Remove picked…" : "Close", (d, w) -> {
+                .setPositiveButton(R.string.s2s_drv_install, (d, w) -> installDialog(a, request))
+                .setNeutralButton(sel != null ? R.string.s2s_drv_remove_picked : R.string.s2s_close, (d, w) -> {
                     if (sel == null) return;
-                    Ui.confirmDanger(a, "Remove " + sel.label() + "?", "Deleted: this driver's copy inside the app (" + sel.dir + ").\n\nKept: the zip you installed it from, "
-                            + "your games, packs and saves. The game uses the phone's own driver until you pick another.", "Remove driver", () -> {
+                    Ui.confirmDanger(a, a.getString(R.string.s2s_drv_remove_title, sel.label()), a.getString(R.string.s2s_drv_remove_message, sel.dir.getPath()),
+                            a.getString(R.string.s2s_drv_remove), () -> {
                         DriverZip.deleteTree(sel.dir); select(a, null);
-                        Toast.makeText(a, "Removed " + sel.label() + "; the system driver is used", Toast.LENGTH_LONG).show();
+                        Toast.makeText(a, a.getString(R.string.s2s_drv_removed, sel.label()), Toast.LENGTH_LONG).show();
                     });
                 })
-                .setNegativeButton("Cancel", null).show();
+                .setNegativeButton(android.R.string.cancel, null).show();
     }
 
     private static void installDialog(Activity a, int request) {
         List<File> zips = found(a);   // names only, in the app's own folder
         List<String> labels = new ArrayList<>();
-        for (File f : zips) labels.add(f.getName() + "  (the app's gpu_drivers folder)");
-        labels.add("Pick a zip…");
-        labels.add("Download…");   // DriverFetch: GitHub releases, only on a tap
-        new AlertDialog.Builder(a).setTitle("Install a driver zip (with meta.json)")
+        for (File f : zips) labels.add(f.getName() + "  " + a.getString(R.string.s2s_drv_in_app_folder));
+        labels.add(a.getString(R.string.s2s_drv_pick_zip));
+        labels.add(a.getString(R.string.s2s_drv_download));   // DriverFetch: GitHub releases, only on a tap
+        new AlertDialog.Builder(a).setTitle(R.string.s2s_drv_install_title)
                 .setItems(labels.toArray(new String[0]), (d, w) -> {
                     if (w == zips.size() + 1) { DriverFetch.dialog(a, request); return; }
                     if (w == zips.size()) {
@@ -235,12 +265,12 @@ final class GpuDriver {
                     }
                     File z = zips.get(w);
                     installInBackground(a, z.getName(), () -> install(a, z), null);
-                }).setNegativeButton("Cancel", null).show();
+                }).setNegativeButton(android.R.string.cancel, null).show();
     }
 
     /** The picker's result (MainActivity.onActivityResult) */
     static void picked(Activity a, Uri uri) {
         String last = uri.getLastPathSegment();
-        installInBackground(a, last == null ? "the driver" : last.replaceAll(".*[/:]", ""), () -> install(a, uri), null);
+        installInBackground(a, last == null ? a.getString(R.string.s2s_drv_the_driver) : last.replaceAll(".*[/:]", ""), () -> install(a, uri), null);
     }
 }

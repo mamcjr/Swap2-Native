@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">Вкладки</string>
+    <string name="s2_pad_nintendo">Кнопки как у Nintendo</string>
+    <string name="s2_pad_nintendo_note">В меню приложения A (справа) подтверждает, а B (снизу) возвращает назад, как на Switch; если выключено, подтверждает нижняя кнопка. Управление в играх не меняется.</string>
+</resources>

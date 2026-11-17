@@ -145,9 +145,9 @@ final class PerformanceOverlay extends View {
             text(c,fps()+" FPS",12,72,19,0xFF6DE6EF);text(c,number(data.ms)+" ms",175,72,15,0xFFFFFFFF);
             chart(c,0,82,0xFF50DBEB,"FPS"); chart(c,1,123,0xFFFFCE78,"ms"); chart(c,2,164,0xFFA699FF,"RAM MB");
             text(c,"GPU "+number(data.gpuMs)+" ms  |  RAM "+(data.rss<0?"--":String.format(Locale.ROOT,"%.0f MB",data.rss/1048576f)),12,212,11,0xFFE3EAF5);
-            text(c,"CPU cap "+data.cpu+(turnip ? "  |  "+(custom.isEmpty() ? "Turnip (Mesa)" : custom.length() > 26 ? custom.substring(0,25)+"…" : custom) : ""),12,229,10,turnip ? 0xFFFF9F43 : 0xFFE3EAF5);
+            text(c,getContext().getString(R.string.s2g_pov_cpu_cap,data.cpu+(turnip ? "  |  "+(custom.isEmpty() ? "Turnip (Mesa)" : custom.length() > 26 ? custom.substring(0,25)+"…" : custom) : "")),12,229,10,turnip ? 0xFFFF9F43 : 0xFFE3EAF5);
             text(c,"SoC "+number(data.soc)+"°  BAT "+number(data.battery)+"°  "+(data.batteryLevel<0?"--":data.batteryLevel+"%"),12,246,11,0xFFFFD477);
-            text(c,"Free RAM "+(data.total<=0?"--":String.format(Locale.ROOT,"%.1f / %.1f GB",data.available/1073741824f,data.total/1073741824f))+"  T:"+(data.thermal<0?"--":data.thermal),12,263,10,0xFFE3EAF5);
+            text(c,getContext().getString(R.string.s2g_pov_free_ram,data.total<=0?"--":String.format(Locale.ROOT,"%.1f / %.1f GB",data.available/1073741824f,data.total/1073741824f))+"  T:"+(data.thermal<0?"--":data.thermal),12,263,10,0xFFE3EAF5);
             text(c,getContext().getString(R.string.s2_overlay_sample_note),12,279,9,0xFF92A5BC);
         }
         raw.restore();

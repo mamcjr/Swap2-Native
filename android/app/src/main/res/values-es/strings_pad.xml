@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">Pestañas</string>
+    <string name="s2_pad_nintendo">Botones al estilo Nintendo</string>
+    <string name="s2_pad_nintendo_note">En los menús de la aplicación, A (derecha) confirma y B (abajo) vuelve, como en Switch; desactivado, confirma el botón inferior. Los controles de los juegos no cambian.</string>
+</resources>

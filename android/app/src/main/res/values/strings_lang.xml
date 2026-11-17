@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Settings › App language (MainActivity.appLang): the app's own language, Android's per-app language -->
+<resources>
+    <string name="s2_app_lang">App language</string>
+    <string name="s2_app_lang_note">the language of these menus</string>
+    <string name="s2_app_lang_system">Phone\'s language</string>
+</resources>

@@ -60,7 +60,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static Boolean overlayEnv;   // DM_OVERLAY in env.txt: overrides the setting for this run (static: a screen created again keeps it)
     private TouchControls controls;
     private SidePanel panel;
-    private final HashSet<Integer> pads = new HashSet<>();   // the gamepads connected: the on-screen controls hide while there is one
+    private final HashSet<Integer> pads = new HashSet<>();   // the gamepads connected: the on-screen controls and the panel's handle hide while there is one
+    private View panelHandle;   // the in-game panel's arrow at the right edge: for touch only (a gamepad opens the panel with Home)
     private File log;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private boolean input, started;
@@ -88,7 +89,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         AutoDiag.screen(this);
         ExitWatch.game(this, id, getIntent().getStringExtra("name"), (saved == null || diagRun != null) && !hostRunning && !diagStale);
         try {
-            Native.load(id);
+            Native.load(this, id);
         } catch (IllegalStateException e) {
             setContentView(new FrameLayout(this));
             fail(e.getMessage());
@@ -106,7 +107,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         root.addView(controls, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         // The build tag: always shown, whatever the overlay switches say, so every screenshot and recording names its build; bold, flush in the top-left corner
         tag = overlayText(Gravity.TOP | Gravity.START, 1f);
-        tag.setText(Prefs.buildTag(this));
+        tag.setText(Prefs.buildTagShown(this));
         tag.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(tag, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
         if (diagRun != null) tag.setText(getString(R.string.s2_diag_tag, diagRun.ordinal, diagRun.key));
@@ -119,7 +120,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         fps = new PerformanceOverlay(this);
         root.addView(fps, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
         stats = new Overlay(this);
-        panel = new SidePanel(this, box -> controls.controlRows(this, box));
+        panel = new SidePanel(this, (ctx, box) -> controls.controlRows(ctx, box));   // the panel's themed context (its Controls tab)
         // an open panel takes every pad key: it must never open under the curtain (the guide button, Back, the controls' settings), so the curtain leaves first
         panel.onVisibility = open -> { if (open) curtainEnd(true); controls.setSuspended(open); };
         root.addView(panel, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -148,14 +149,16 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) v.setAlpha(0.4f);
             return false;   // the click listener still opens the panel
         });
-        handle.setContentDescription("Open the in-game panel");
+        handle.setContentDescription(getString(R.string.s2g_ga_open_panel));
         handle.setOnClickListener(v -> panel.open());
         root.addView(handle, root.indexOfChild(panel), new FrameLayout.LayoutParams(Math.round(22 * dp), Math.round(56 * dp), Gravity.END | Gravity.TOP));
+        panelHandle = handle;
+        handle.setVisibility(pads.isEmpty() ? View.VISIBLE : View.GONE);   // touch only: hidden while a gamepad is connected (padsChanged)
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> handle.setTranslationY((b - t) * 0.25f - 28 * dp));
         // Paused (pause(): the in-game panel's Pause, or the screen coming back with pause-on-return on): the game is suspended until a tap, or A / Start on a gamepad.
         // Under the panel and its handle, so Stop stays reachable
         pausedView = new TextView(this);
-        pausedView.setText("Paused\n\nTap to continue  (A or Start on a gamepad)");
+        pausedView.setText(R.string.s2g_ga_paused);
         pausedView.setTextColor(Color.WHITE);
         pausedView.setTextSize(22);
         pausedView.setGravity(Gravity.CENTER);
@@ -176,7 +179,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         else if (saved == null || diagRun != null) { curtainShow(root); start(); }
         else {
             String why = ExitWatch.restoredCause(this);   // what Android said about the end, told here once (the launcher does not tell it again)
-            fail("The game was stopped while it was in the background (Android ended its process)." + (why != null ? " " + why : "") + " Unsaved progress is lost; start it again from the launcher.");
+            fail(getString(R.string.s2g_ga_bg_stopped) + (why != null ? " " + why : "") + " " + getString(R.string.s2g_ga_bg_lost));
         }
     }
 
@@ -232,7 +235,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         }
         // The save's lock first (kept while the game runs), then a restore (Restore saves…) or swap stopped part way is finished (SaveStore's journal, the host's
         // rules); one that cannot be finished stops the start: never a half save
-        holdLock(dir);
+        holdLock(dir, getString(R.string.s2g_ga_save_busy, dir));
         try {
             if (SaveStore.recoverLocked(dir)) saveNote = "a save restore or swap that was stopped was finished first";
             // A copy a stopped import or restore left beside the save (no marker names it after recover) goes before the game starts: one filled a phone, and the
@@ -240,7 +243,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             long freed = SaveStore.clearLeftoversLocked(dir);
             if (freed > 0) saveNote = (saveNote == null ? "" : saveNote + "; ") + "an unfinished save copy beside it was removed first (" + SaveStore.size(freed) + " freed)";
         } catch (IOException e) {
-            throw new IOException("The save folder has an unfinished restore that cannot be finished: " + e.getMessage());
+            throw new IOException(getString(R.string.s2g_ga_save_unfinished, e.getMessage()));
         }
         if (testSave != null) {   // a test run's own save folder (env.txt, test app only): used as it is
             if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cannot create the test save folder " + dir);
@@ -278,11 +281,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             case COPIED:
                 Prefs.migratedFrom(this, id, old.getPath());
                 saveNote = "copied once from " + old + " (" + r.copied.files + " files, " + SaveStore.size(r.copied.bytes) + ", checked); that folder is kept as it was";
-                Toast.makeText(this, "Your save was copied into the app's storage (" + app + "). The old folder " + old + " is kept as it was.", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, getString(R.string.s2g_ga_save_copied, app, old), Toast.LENGTH_LONG).show();
                 return app;
             case FAILED:
                 saveNote = "not copied into the app's storage (" + r.message + "): this start plays the save in " + old + "; the next start tries again";
-                Toast.makeText(this, "Your save could not be copied into the app's storage (" + r.message + "). This start plays it where it is, " + old + ".", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, getString(R.string.s2g_ga_save_not_copied, r.message, old), Toast.LENGTH_LONG).show();
                 return old;
             default:   // the app has a save already, or there is none to copy
                 return app;
@@ -317,7 +320,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         drv.addAll(envLines(Prefs.gameEnv(this, id)));
         drv.addAll(quietEnv(new File(files, "env-" + id + ".txt")));
         String[] denv = Readiness.driverEnv(drv);
-        overlay.setText(getIntent().getStringExtra("name") + ": checking this phone's GPU…");
+        overlay.setText(getString(R.string.s2g_ga_checking_gpu, getIntent().getStringExtra("name")));
         if (curtain != null) curtain.caption(R.string.s2_play_checking_gpu);
         final boolean[] answered = {false};
         Runnable decide = () -> {   // on the UI thread, once: with the facts, or without them after READINESS_WAIT_MS
@@ -353,27 +356,32 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         readinessDone = true;
         if (diagRun != null) { start(); return; }   // the automatic diagnosis asks nothing: a driver that lacks something is a run's result (its line is in the log)
         List<Readiness.Check> fails = Readiness.of(l, Readiness.Status.FAIL), warns = Readiness.of(l, Readiness.Status.WARNING);
-        String gpu = "GPU: " + Readiness.gpu(f) + "\nMemory: " + f.get("ram_gib") + " GiB as Android reports it.";
+        // The notice's wording in the phone's language (ReadinessActivity.words); the log line, the report and the "seen" key (warnKey) keep the English checks
+        Readiness.Words words = ReadinessActivity.words(this);
+        List<Readiness.Check> shown = new ArrayList<>();
+        Readiness.Check shownSt = Readiness.status(p != null ? p.status : null, words);
+        if (shownSt != null) shown.add(shownSt);
+        shown.addAll(Readiness.evaluate(f, Readiness.parseReqs(p != null ? p.reqs : null), words));
+        List<Readiness.Check> shownFails = Readiness.of(shown, Readiness.Status.FAIL), shownWarns = Readiness.of(shown, Readiness.Status.WARNING);
+        String gpu = getString(R.string.s2g_ga_ready_gpu, Readiness.gpu(f), f.get("ram_gib"));
         // The notice is short (what is missing, by name); Details has each item's sentence, the GPU and Copy report
         if (!fails.isEmpty()) {
-            StringBuilder m = new StringBuilder("Missing: ");
-            for (Readiness.Check c : fails) m.append(c.title).append(", ");
+            StringBuilder m = new StringBuilder();
+            for (Readiness.Check c : shownFails) m.append(c.title).append(", ");
             m.setLength(m.length() - 2);
             // Without placed memory maps the GPU sees none of the game's memory: draws are off (vka_draw.c), so the result is certain, not "may"
             boolean placed = false;
             for (Readiness.Check c : fails) placed |= "ext.VK_KHR_map_memory2".equals(c.fact) || "ext.VK_EXT_map_memory_placed".equals(c.fact) || "feature.memoryMapPlaced".equals(c.fact);
             GpuDriver.Info drv = GpuDriver.selected(this, id);
-            if (placed) m.append(".\n\nWith this GPU driver (").append(drv == null ? "System" : drv.label()).append(") nothing is drawn: the screen stays black while the game runs. ")
-                    .append(drv == null ? "Pick a custom driver that has placed memory maps" : "Pick System (the phone's own driver)")
-                    .append(" in Settings › GPU driver, or in this game's Game settings.");
-            else m.append(".\n\nThe game may stop or draw wrongly. A custom GPU driver (Settings › GPU driver) may help.");
-            readinessDialog("Not ready for this game", m.toString(), details(fails, warns, gpu), report, placed ? "Start anyway (black screen)" : "Try anyway", true);
+            String msg = !placed ? getString(R.string.s2g_ga_ready_missing, m)
+                    : drv == null ? getString(R.string.s2g_ga_ready_black_system, m) : getString(R.string.s2g_ga_ready_black_custom, m, drv.label());
+            readinessDialog(getString(R.string.s2g_ga_not_ready), msg, details(shownFails, shownWarns, gpu), report,
+                    getString(placed ? R.string.s2g_ga_start_black : R.string.s2g_ga_try_anyway), true);
         } else if (!warns.isEmpty() && !Prefs.of(this).getString(Prefs.gameKey("readiness_seen", id), "").equals(warnKey(f, warns))) {
-            StringBuilder m = new StringBuilder("Runs with less: ");
-            for (Readiness.Check c : warns) m.append(c.title).append(", ");
+            StringBuilder m = new StringBuilder();
+            for (Readiness.Check c : shownWarns) m.append(c.title).append(", ");
             m.setLength(m.length() - 2);
-            m.append('.');
-            readinessDialog("Ready, with limits", m.toString(), details(fails, warns, gpu), report, "Continue", false);
+            readinessDialog(getString(R.string.s2g_ga_ready_limits), getString(R.string.s2g_ga_ready_less, m), details(shownFails, shownWarns, gpu), report, getString(R.string.s2g_ga_continue), false);
         } else start();
     }
 
@@ -399,7 +407,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private void readinessDialog(String title, String msg, String details, String report, String go, boolean required) {
         String id = titleId();
         android.widget.CheckBox again = required ? null : new android.widget.CheckBox(this);
-        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle(title).setCancelable(false).setNeutralButton("Details", null);
+        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle(title).setCancelable(false).setNeutralButton(R.string.s2g_ga_details, null);
         if (again == null) b.setMessage(msg);
         else {
             int p = Math.round(20 * getResources().getDisplayMetrics().density);
@@ -407,10 +415,10 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             box.setOrientation(android.widget.LinearLayout.VERTICAL);
             box.setPadding(p, p / 2, p, 0);
             TextView t = new TextView(this);
-            t.setText(msg + "\n\nDetails are also in Settings › Readiness check.");
+            t.setText(msg + "\n\n" + getString(R.string.s2g_ga_details_where));
             t.setTextSize(15);
             box.addView(t);
-            again.setText("Don't show this again");
+            again.setText(R.string.s2g_ga_dont_show);
             box.addView(again);
             android.widget.ScrollView sv = new android.widget.ScrollView(this);   // a short screen with several warnings still reaches the box
             sv.addView(box);
@@ -422,11 +430,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             triedAnyway = required;
             start();
         });
-        b.setNegativeButton("Back", (d, w) -> end());
+        b.setNegativeButton(R.string.s2g_ga_back, (d, w) -> end());
         AlertDialog d = b.create();
         // Details opens over the notice and keeps it open; Copy report there keeps Details open
         d.setOnShowListener(x -> d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
-            AlertDialog dd = new AlertDialog.Builder(this).setTitle("Readiness check").setMessage(details).setPositiveButton("Close", null).setNeutralButton("Copy report", null).create();
+            AlertDialog dd = new AlertDialog.Builder(this).setTitle(R.string.s2g_ga_readiness).setMessage(details).setPositiveButton(R.string.s2g_ga_close, null).setNeutralButton(R.string.s2g_ga_copy_report, null).create();
             dd.setOnShowListener(y -> dd.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(u -> ReadinessActivity.copy(this, report)));
             dd.show();
         }));
@@ -449,7 +457,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         try {
             Pack pack = Pack.read(packDir);
             String romfs = pack.romfsPath(game);   // a folder's RomFS folder, or <file>.nup:<selector>/romfs (NUP.md)
-            if (romfs == null) throw new IOException(Nup.isNup(game) ? game.getName() + " has no " + pack.romfsSelector() + " with a RomFS" : "no RomFS in " + game);
+            if (romfs == null) throw new IOException(Nup.isNup(game) ? getString(R.string.s2g_ga_no_romfs_nup, game.getName(), pack.romfsSelector()) : getString(R.string.s2g_ga_no_romfs, game));
             if (readinessHold(id)) return;   // after the pack's own checks (a missing pack says so first), before the save is locked or anything is written
             PackMemoryUpdate.apply(this, pack);
             // A .nup used where it is (PickedNup): the host gets a descriptor of it, fd:<n>/<name>, wherever it would get the file's path (DM_ROMFS, the add-on links);
@@ -534,7 +542,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             }
             String[] args = {"nxhost", packDir.getPath()};
             int r = Native.start(args, env.toArray(new String[0]), log.getPath(), files.getPath());
-            if (r != 0) throw new IOException("the host did not start (" + r + (r == -1 ? ": a start was already tried in this process" : "") + ")");
+            if (r != 0) throw new IOException(getString(r == -1 ? R.string.s2g_ga_host_tried : R.string.s2g_ga_host_not_started, r));
             // Whether this game picks its own frame rate (the host's cap status: no rate it can hold), remembered for its Game settings, which then offer no cap.
             // Read once the game has run a while (the host finds the game's limiter after it starts); the in-game panel updates it too
             ui.postDelayed(this::noteOwnRate, 30000);
@@ -566,7 +574,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
                 String msg = "not taken: " + String.join(", ", refused) + ": the launcher sets the game's paths (DM_SAVE, DM_ROMFS, DM_TEMP, DM_ROOT, DM_AOC_DIR, HOME)"
                         + (testApp() ? "; DM_SAVE is taken from env-<title ID>.txt only" : "");
                 Native.note("[RED] env: " + msg);
-                android.widget.Toast.makeText(this, "Environment lines " + msg, android.widget.Toast.LENGTH_LONG).show();
+                android.widget.Toast.makeText(this, getString(testApp() ? R.string.s2g_ga_env_refused_test : R.string.s2g_ga_env_refused, String.join(", ", refused)), android.widget.Toast.LENGTH_LONG).show();
             }
             if (testSave != null && diagRun == null) Native.note("[nxlaunch] test app: DM_SAVE from env-" + id + ".txt: " + testSave);
             Native.note("frame generation: " + (Lsfg.on(this) ? "on" : "off") + "; " + Lsfg.note);
@@ -574,7 +582,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             input = Native.hasInput();
             started = true;
             hostSetup();
-            overlay.setText(name + ": starting. Log: " + log);
+            overlay.setText(getString(R.string.s2g_ga_starting, name, log));
             ui.postDelayed(this::tail, 500);
             ui.postDelayed(this::fpsTick, 500);
             ui.postDelayed(this::curtainPoll, CURTAIN_POLL_MS);
@@ -615,8 +623,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
      */
     private void fail(String why) {
         curtainEnd(true);
-        new AlertDialog.Builder(this).setTitle("Cannot start " + getIntent().getStringExtra("name")).setMessage(why)
-                .setPositiveButton("OK", (d, w) -> end()).setCancelable(false).show();
+        new AlertDialog.Builder(this).setTitle(getString(R.string.s2g_ga_cannot_start, getIntent().getStringExtra("name"))).setMessage(why)
+                .setPositiveButton(android.R.string.ok, (d, w) -> end()).setCancelable(false).show();
     }
 
     /** The automatic diagnosis: a run that lived its time ends as Stop does */
@@ -655,9 +663,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         super.onNewIntent(i);
         String want = i.getStringExtra("title_id"), have = getIntent().getStringExtra("title_id");
         if (want == null || want.equals(have)) return;
-        new AlertDialog.Builder(this).setTitle(getIntent().getStringExtra("name") + " is running")
-                .setMessage("Stop it first (the in-game panel › Stop the game), then start " + i.getStringExtra("name") + ". One game runs at a time.")
-                .setPositiveButton("OK", null).show();
+        new AlertDialog.Builder(this).setTitle(getString(R.string.s2g_ga_running_title, getIntent().getStringExtra("name")))
+                .setMessage(getString(R.string.s2g_ga_running_message, i.getStringExtra("name")))
+                .setPositiveButton(android.R.string.ok, null).show();
     }
 
     // ---- The save's lock (SaveStore.Lock on <save>.lock): taken before the save is recovered and kept while this process lives, so a backup or restore of this save
@@ -665,10 +673,11 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private static SaveStore.Lock saveLock;
     private static File saveLocked;
 
-    private static synchronized void holdLock(File save) throws IOException {
+    /** busy: the failure's sentence for the player (the save is in use) */
+    private static synchronized void holdLock(File save, String busy) throws IOException {
         if (saveLock != null && SaveStore.same(saveLocked, save)) return;   // this process holds it already (the game's screen opened again)
         SaveStore.Lock l = SaveStore.tryLock(save);
-        if (l == null) throw new IOException("The save " + save + " is in use: a backup or restore of it is working. Try again when it is done.");
+        if (l == null) throw new IOException(busy);
         if (saveLock != null) saveLock.close();
         saveLock = l;
         saveLocked = save;
@@ -997,18 +1006,59 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     }
     @Override public void onInputDeviceRemoved(int id) {
         Native.deviceRemoved(id); deviceAxes.remove(id);
-        if (pads.remove(id)) controls.setGamepad(!pads.isEmpty());
+        if (pads.remove(id)) padsChanged(!pads.isEmpty());
     }
-    private void padConnected(int id) { if (pads.add(id)) controls.setGamepad(true); }
+    private void padConnected(int id) { if (pads.add(id)) padsChanged(true); }
+
+    /** A gamepad connected, or the last one gone: the on-screen controls and the panel's handle hide or come back (the pad's Home opens the panel meanwhile) */
+    private void padsChanged(boolean connected) {
+        controls.setGamepad(connected);
+        if (panelHandle != null) panelHandle.setVisibility(connected ? View.GONE : View.VISIBLE);
+    }
     @Override public void onInputDeviceChanged(int id) { deviceAxes.remove(id); }
+
+    /*
+     * Minus + Plus (BUTTON_SELECT + BUTTON_START) held together for a second also opens the in-game panel: the way in for a pad whose Home never reaches the app
+     * (its key layout makes it KEYCODE_HOME, which the system keeps: a Switch Pro Controller's Home, a HID pad's consumer Home key). The game gets both presses
+     * as usual meanwhile (a short press of either is the game's); when the hold opens the panel the game gets both releases at once, and the real releases
+     * that follow are swallowed
+     */
+    private final HashSet<Integer> holdKeys = new HashSet<>();   // Minus and Plus down now
+    private boolean holdOpened;   // the hold opened the panel: Minus and Plus are swallowed until both are up
+    private int holdDevice;
+    private final Runnable holdOpen = () -> {
+        holdOpened = true;
+        if (input) { Native.key(holdDevice, KeyEvent.KEYCODE_BUTTON_SELECT, false); Native.key(holdDevice, KeyEvent.KEYCODE_BUTTON_START, false); }
+        if (panel != null && !panel.isOpen()) panel.open();
+    };
+
+    /** Minus + Plus held (holdOpen): true when the key is swallowed */
+    private boolean holdToOpen(KeyEvent e) {
+        int k = e.getKeyCode();
+        if (k != KeyEvent.KEYCODE_BUTTON_SELECT && k != KeyEvent.KEYCODE_BUTTON_START || !gamepad(e.getSource())) return false;
+        if (e.getAction() == KeyEvent.ACTION_DOWN) {
+            if (e.getRepeatCount() == 0 && holdKeys.add(k) && holdKeys.size() == 2 && !holdOpened && !panel.isOpen()) {
+                holdDevice = e.getDeviceId();
+                ui.postDelayed(holdOpen, 1000);
+            }
+            return holdOpened;
+        }
+        if (e.getAction() != KeyEvent.ACTION_UP) return false;
+        holdKeys.remove(k);
+        ui.removeCallbacks(holdOpen);
+        boolean swallow = holdOpened;
+        if (holdKeys.isEmpty()) holdOpened = false;
+        return swallow;
+    }
 
     @Override public boolean dispatchKeyEvent(KeyEvent e) {
         if (panel == null) return super.dispatchKeyEvent(e);   // no host for this game (onCreate): only the message is shown
         // A gamepad's Home / guide button opens and closes the in-game panel; while it is open the pad moves through it and the game gets no pad keys
         if (e.getKeyCode() == KeyEvent.KEYCODE_BUTTON_MODE) { if (e.getAction() == KeyEvent.ACTION_UP) panel.toggle(); return true; }
-        if (panel.isOpen() && gamepad(e.getSource())) return panel.padKey(e) || super.dispatchKeyEvent(e);
+        if (holdToOpen(e)) return true;   // or Minus + Plus held for a second
+        if (panel.isOpen() && gamepad(e.getSource())) return panel.padKey(PadNav.labelled(this, e)) || super.dispatchKeyEvent(e);   // its A and B as the launcher's (PadNav)
         if (paused && gamepad(e.getSource())) {   // paused: A or Start continues; no pad key reaches the game
-            if (e.getAction() == KeyEvent.ACTION_UP && (e.getKeyCode() == KeyEvent.KEYCODE_BUTTON_A || e.getKeyCode() == KeyEvent.KEYCODE_BUTTON_START)) unpause();
+            if (e.getAction() == KeyEvent.ACTION_UP && (PadNav.label(this, e) == KeyEvent.KEYCODE_BUTTON_A || e.getKeyCode() == KeyEvent.KEYCODE_BUTTON_START)) unpause();
             return true;
         }
         // Back from the phone and keyboard keys stay with the launcher: the host takes only pad buttons

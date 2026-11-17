@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">Onglets</string>
+    <string name="s2_pad_nintendo">Boutons façon Nintendo</string>
+    <string name="s2_pad_nintendo_note">Dans les menus de l\'application, A (à droite) confirme et B (en bas) revient, comme sur la Switch; désactivé, le bouton du bas confirme. Les commandes des jeux ne changent pas.</string>
+</resources>

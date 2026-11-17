@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">标签页</string>
+    <string name="s2_pad_nintendo">任天堂按键布局</string>
+    <string name="s2_pad_nintendo_note">在应用菜单中，与 Switch 相同，A（右）确认，B（下）返回；关闭后由下方按键确认。游戏内的操作不变。</string>
+</resources>

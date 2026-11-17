@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2m_build_official">官方</string>
+    <string name="s2m_build_unofficial">非官方构建</string>
+    <string name="s2m_dump_no_code">没有游戏代码（本体或更新中都没有 exefs/main）</string>
+    <string name="s2m_dump_base">本体</string>
+    <string name="s2m_dump_update">更新 %1$s</string>
+    <string name="s2m_dump_no_romfs">%1$s（无 RomFS）</string>
+    <string name="s2m_dump_and">和</string>
+</resources>

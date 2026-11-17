@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2l_cancel">Annuleren</string>
+    <string name="s2l_done">Klaar</string>
+    <string name="s2l_pick">Kiezen…</string>
+    <string name="s2l_default">Standaard</string>
+    <string name="s2l_allow">Toestaan</string>
+    <string name="s2l_access_needed">Nodig om je gamedump te lezen.</string>
+    <string name="s2l_this_game">Deze game</string>
+    <string name="s2l_that_packs_game">De game van dat pakket</string>
+    <string name="s2l_the_zip">de .zip</string>
+    <string name="s2l_simulated">(gesimuleerd)</string>
+    <string name="s2l_unsupported">%1$s wordt niet ondersteund door deze app: deze game, of de versie ervan voor deze regio, heeft geen gameprofiel. Ondersteunde title ID\'s: %2$s. (Een profiel kan worden toegevoegd in %3$s: game.tsv en de bijbehorende tabellen, zoals in dm/games van de repository.)</string>
+
+    <!-- Manage -->
+    <string name="s2l_manage_facts">Title ID: %1$s\nGame: %2$s\nPakket: %3$s\nShaders: %4$s\nOpgeslagen data: %5$s</string>
+    <string name="s2l_shaders_present">aanwezig (%1$s)</string>
+    <string name="s2l_not_set">niet ingesteld</string>
+    <string name="s2l_remove_from_list">Uit lijst verwijderen</string>
+    <string name="s2l_remove_title">%1$s verwijderen?</string>
+    <string name="s2l_remove_text">Alleen het item in de lijst verdwijnt. Je dump, het pakket en je opgeslagen data blijven op de telefoon; met Game toevoegen komt hij terug.</string>
+    <string name="s2l_remove_text_save">Alleen het item in de lijst verdwijnt. Je dump, het pakket en je opgeslagen data (%1$s) blijven op de telefoon; met Game toevoegen komt hij terug.</string>
+    <string name="s2l_remove">Verwijderen</string>
+    <string name="s2l_add_cannot_use">%1$s kan niet worden gebruikt: %2$s</string>
+    <string name="s2l_add_no_romfs_nup">%1$s heeft geen %2$s met een RomFS (het pakket is voor versie %3$s).</string>
+    <string name="s2l_add_no_romfs">Geen RomFS in %1$s (gezocht naar %2$s, romfs/ en updates/&lt;version&gt;/romfs).</string>
+
+    <!-- Settings -->
+    <string name="s2l_cap_own">Die van de game</string>
+    <string name="s2l_cap_fps">%1$d fps</string>
+    <string name="s2l_dll_installed">Lossless.dll geïnstalleerd</string>
+    <string name="s2l_dll_not_installed">Lossless.dll niet geïnstalleerd: %1$s</string>
+    <string name="s2l_lsfg_put_it">Zet hem in Documents/Emulation/bios of Switch2, of kies hem.</string>
+    <string name="s2l_lsfg_credit">Overgenomen van Eden (GPL-3.0-or-later). Lossless.dll is van jou; hij hoort nooit bij de app.</string>
+    <string name="s2l_lsfg_pick_dll">Lossless.dll kiezen</string>
+    <string name="s2l_no_log">Nog geen logboek.</string>
+    <string name="s2l_no_log_game">Nog geen logboek van deze game.</string>
+    <string name="s2l_share_file">%1$s delen</string>
+    <string name="s2l_no_app_opens">Geen app kan %1$s openen</string>
+
+    <!-- Folders -->
+    <string name="s2l_folders_no_games">Nog geen games: eerst + Game toevoegen. Elke game heeft zijn eigen mappen (⋯ op de kaart › Mappen…).</string>
+    <string name="s2l_folders_which_game">Mappen van welke game?</string>
+    <string name="s2l_folders_title">Mappen · %1$s</string>
+    <string name="s2l_folders_game">Gamemap</string>
+    <string name="s2l_folders_game_nup">Game (.nup-bestand)</string>
+    <string name="s2l_folders_pack">Pakket- en shadermap (pack.tsv, shaders/)</string>
+    <string name="s2l_folders_save">Map voor opgeslagen data</string>
+    <string name="s2l_folders_picked">(gekozen)</string>
+    <string name="s2l_folders_default_app">(standaard: in de opslag van de app)</string>
+    <string name="s2l_folders_default_beside">(standaard: naast de game)</string>
+    <string name="s2l_folders_library_present">Shaderbibliotheek %1$s: aanwezig.</string>
+    <string name="s2l_folders_pick_save">Kies de map voor de opgeslagen data van %1$s</string>
+    <string name="s2l_folders_kept">Deze blijven bewaard als de app wordt bijgewerkt. Een map kiezen verplaatst, kopieert of verwijdert nooit iets zonder het te vragen.</string>
+    <string name="s2l_folders_not_pack">Geen pakketmap: %1$s</string>
+    <string name="s2l_folders_other_game">Dat pakket is voor %1$s, niet voor %2$s (%3$s).</string>
+    <string name="s2l_folders_pack_set">Pakketmap ingesteld</string>
+    <string name="s2l_folders_pack_ready">Hij heeft de shaderbibliotheek van deze app (%1$s): klaar om te spelen.</string>
+    <string name="s2l_save_default_old">(standaard: je opgeslagen data van een eerdere versie, naast de game. De volgende start van de game kopieert die naar de opslag van de app, %1$s, en speelt hem vanaf daar; deze map wordt nooit gewijzigd)</string>
+    <string name="s2l_save_default_app">(standaard: in de opslag van de app). Back-up maken zet kopieën in %1$s, op gedeelde opslag: die blijven als de app wordt verwijderd.</string>
+    <string name="s2l_save_default_copied">(standaard: in de opslag van de app; gekopieerd uit %1$s, dat blijft zoals het was). Back-up maken zet kopieën in %2$s, op gedeelde opslag: die blijven als de app wordt verwijderd.</string>
+    <string name="s2l_save_copy_title">Opgeslagen data kopiëren?</string>
+    <string name="s2l_save_copy_text">De gekozen map is leeg. Je huidige opgeslagen data staat in %1$s.\n\nKopiëren naar %2$s? De huidige map blijft zoals hij is: er wordt niets verwijderd.</string>
+    <string name="s2l_save_copy_use">Kopiëren en gebruiken</string>
+    <string name="s2l_save_use_empty">Leeg gebruiken</string>
+    <string name="s2l_save_copy_failed">Het kopiëren is mislukt (%1$s); de map voor opgeslagen data is niet gewijzigd.</string>
+
+    <!-- Pack.libraryProblem -->
+    <string name="s2l_lib_unreadable">De shaderbibliotheek van het pakket (%1$s) kan niet worden gelezen: %2$s</string>
+    <string name="s2l_lib_inputs">De shaderbibliotheek van het pakket is gebouwd uit andere shadertabellen (inputs %1$s) dan die van deze app (%2$s): de shaders moeten opnieuw worden gemaakt.</string>
+    <string name="s2l_lib_none">De pakketmap %1$s heeft geen shaderbibliotheek: deze app heeft daarin shaders/v-%2$s/dmsh_vk.lib nodig.</string>
+    <string name="s2l_lib_version">De pakketmap %1$s heeft shaderbibliotheek versie %2$s, maar deze app heeft versie %3$s nodig (shaders/v-%3$s/dmsh_vk.lib).</string>
+
+    <!-- PackCheck -->
+    <string name="s2l_check_unfinished">De gamecode van het pakket is onvoltooid (%1$s.android.key ontbreekt: een update van het pakket is halverwege gestopt). Opnieuw voorbereiden maakt hem af.</string>
+    <string name="s2l_check_rewriting">De gamecode van het pakket wordt herschreven (%1$s: %2$s). Laat het voorbereiden eerst afronden.</string>
+    <string name="s2l_check_mods_gone">De mods voor %1$s zijn gewijzigd (%2$s: de code is herschreven met een mod die weg is of uitgeschakeld). Opnieuw voorbereiden past ze toe.</string>
+    <string name="s2l_check_mods_new">De mods voor %1$s zijn gewijzigd (%2$s: %3$s heeft een mod die de code nog niet heeft). Opnieuw voorbereiden past ze toe.</string>
+    <string name="s2l_check_mods_changed">De mods voor %1$s zijn gewijzigd (%2$s: een mod ervan is gewijzigd). Opnieuw voorbereiden past ze toe.</string>
+    <string name="s2l_check_mods_unreadable">De mods voor %1$s kunnen niet worden gelezen: %2$s</string>
+    <string name="s2l_check_no_module_folder">Het pakket is voor %1$s update %2$s, maar de gamemap heeft geen %3$s. Kies de dump met die update, of bereid opnieuw voor vanuit deze.</string>
+    <string name="s2l_check_no_module_nup">Het pakket is voor %1$s update %2$s, maar de .nup van de game heeft geen %3$s. Kies de dump met die update, of bereid opnieuw voor vanuit deze.</string>
+    <string name="s2l_check_unreadable">%1$s kan niet worden gelezen: %2$s</string>
+    <string name="s2l_check_other_build">Het pakket is gemaakt van een andere build van %1$s (%2$s %3$s…) dan die in de gamemap (%4$s…, update %5$s). De code zou met deze game crashen: Opnieuw voorbereiden maakt een pakket van deze map.</string>
+    <string name="s2l_check_unsupported_update">Het pakket is voor %1$s update %2$s; deze app ondersteunt alleen update %3$s. Dump de game met die update en bereid hem voor.</string>
+
+    <!-- Export / Import pack -->
+    <string name="s2l_pack_export_none">Er is geen pakket om te exporteren: %1$s</string>
+    <string name="s2l_pack_export_where">Kies de map voor de .zip van het pakket</string>
+    <string name="s2l_pack_zip_no_path">Dat bestand staat niet in de opslag van deze telefoon via een pad dat de app kan lezen (%1$s). Kies het uit de opslag van de telefoon (☰ › de naam van de telefoon), niet uit Recent of Downloads.</string>
+    <string name="s2l_pack_exporting">Pakket van %1$s exporteren…</string>
+    <string name="s2l_pack_export_space">de zip heeft %1$s nodig en %2$s heeft %3$s vrij</string>
+    <string name="s2l_pack_export_failed">Er is geen pakket geëxporteerd: %1$s\n\nHet pakket in %2$s is alleen gelezen.</string>
+    <string name="s2l_pack_exported_title">Pakket geëxporteerd</string>
+    <string name="s2l_pack_exported_text">%1$s\n\n%2$s, bestand voor bestand gecontroleerd tegen het pakket. Pakket importeren… op een andere telefoon (of na een nieuwe installatie) zet hem terug.</string>
+    <string name="s2l_pack_importing">Pakket van %1$s importeren…</string>
+    <string name="s2l_pack_import_space">het pakket heeft %1$s nodig en de opslag van de app heeft %2$s vrij</string>
+    <string name="s2l_pack_import_job">een voorbereidingstaak van deze game schrijft naar %1$s (%2$s): laat die eerst afronden, of vergeet hem eerst via ⋯ Beheren</string>
+    <string name="s2l_pack_started_meanwhile">%1$s is intussen gestart</string>
+
+    <!-- FrontendLaunch -->
+    <string name="s2l_frontend_access">Schakel Toegang tot alle bestanden in voor %1$s en start de game opnieuw.</string>
+    <string name="s2l_frontend_not_file">De frontend stuurde %1$s, dat geen bestand is in de opslag van deze telefoon via een pad dat de app kan lezen. Stel de frontend in om het pad van het bestand te sturen, of de opslag-URI (SAF) uit de eigen opslag van de telefoon.</string>
+    <string name="s2l_frontend_no_game">De frontend stuurde geen game: stuur de .nup (of de gamemap) als de data van de intent, of de extra \"game\" met het pad.</string>
+    <string name="s2l_frontend_missing">%1$s is er niet (de frontend stuurde %2$s).</string>
+    <string name="s2l_frontend_unreadable">%1$s kan niet worden gelezen. Controleer of Toegang tot alle bestanden aan staat.</string>
+    <string name="s2l_frontend_no_card">Er staat geen game met title ID %1$s in de bibliotheek. Voeg hem eerst toe in %2$s, of stuur in plaats daarvan het bestand van de game.</string>
+    <string name="s2l_frontend_cannot_start">Kan de game niet starten</string>
+
+    <!-- PickedNup -->
+    <string name="s2l_nup_none_picked">Er is geen bestand gekozen.</string>
+    <string name="s2l_nup_no_grant">Android gaf geen blijvende leestoegang tot dat bestand (%1$s). Kies het uit de opslag van de telefoon in de bestandskiezer (niet uit Recent of de deellijst van een andere app).</string>
+    <string name="s2l_nup_bad_name">De naam van dat bestand kan niet worden gebruikt.</string>
+    <string name="s2l_nup_not_nup">%1$s is geen .nup-bestand (de naam moet eindigen op .nup).</string>
+    <string name="s2l_nup_cannot_create">Kan %1$s niet maken.</string>
+    <string name="s2l_nup_too_small">%1$s is te klein voor een .nup-bestand (%2$s bytes).</string>
+    <string name="s2l_nup_unlinked">%1$s is niet meer gekoppeld in de app. Kies het opnieuw.</string>
+    <string name="s2l_nup_provider_none">De bestandsprovider van Android gaf geen bestand terug voor %1$s.</string>
+    <string name="s2l_nup_no_longer_read">De app kan %1$s niet meer lezen (%2$s). Kies het opnieuw.</string>
+    <string name="s2l_nup_cannot_open">%1$s is er niet of kan niet worden geopend (%2$s). Kies het opnieuw.</string>
+    <string name="s2l_nup_streamed">%1$s is als stream aangeleverd in plaats van als bestand op deze telefoon (%2$s), dus de game kan er niet ter plekke in zoeken. Kies het uit de opslag van de telefoon in de bestandskiezer, of kopieer het naar de app.</string>
+    <string name="s2l_nup_no_size">%1$s heeft geen leesbare grootte via deze bestandsprovider. Kies het uit de opslag van de telefoon in de bestandskiezer, of kopieer het naar de app.</string>
+</resources>

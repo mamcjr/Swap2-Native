@@ -37,6 +37,11 @@ static const lock_t k_locks[] = {
     // game's logic steps by that interval, as BotW's VFR does (docs/reference/frame-rate.md). A floor of 2 makes the game itself run at 30 and stay at the right speed.
     // The controller is at [framework+0x218] (main+0x5bfb00); the framework at [app], the app object at main+0x26cc208 (nnMain main+0x5bdff4, its GOT slot main+0x2455ca0)
     { "e25c90c1c136638885659fd55bf8a03b", "sead frame-rate controller minimum interval", 0x26cc208, 0x0, MIN_VSYNCS_I32, 1, 0, 2, {0x0, 0x218} },
+    // Mario Kart World 1.8.0 has no row: its sead GameFrameworkNx has no controller object like Bananza's. Its frame (main+0x69cbb0) reads a mode at framework+0x210 (the
+    // framework at the +8 of the app object, a static at main+0x379ae80): 0 picks 1 or 2 vsyncs from the frame time's drift, 1 or 2 fixes the interval. A fixed 2 at a 30 cap
+    // held 30.9 fps but ran the race clock at 0.84 of real time, worse than the game's own choice at the same frame rate, while presents paced to 30 with the mode left at 0
+    // ran as the game's own did (0.87-0.95 at 26-31 fps, below 30: MKW never steps more than 2 vsyncs a frame). So MKW takes the paced cap (dm_fps_lock_paced), with the
+    // front end's note (docs/reference/frame-rate.md, "A sead framework's fixed interval")
     // Pokemon Brilliant Diamond 1.3.0: Unity's Application.targetFrameRate. Its icall registration (main+0xe34e60) resolves to main+0xdc8e70 -> +0x5fa640,
     // which stores w0 at main+0x4afc868; the getter at +0x5fa630 reads the same int32. The game sets 30 when entering the field; display pacing alone does not remove that cap.
     { "94ceae325c205c4b9d6f7235552f28fd", "Unity targetFrameRate", 0, 0x4afc868, FPS_I32, 1 },
@@ -213,9 +218,11 @@ static int ue_rows(const module_t *m, lock_t *out, int *missing) {
 static lock_t ue[3]; static const lock_t *rows[NLOCKS + 3]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
 static pthread_once_t g_found = PTHREAD_ONCE_INIT;
 static void lock_find(void) {
+    const char *e = getenv("DM_FPS_ROWS"); int no_rows = e && !strcmp(e, "0");   // diagnostic: the build's k_locks rows left out (a row against the paced cap, A/B)
+    if (no_rows) LOG("main: DM_FPS_ROWS=0: this build's frame limiter rows are left out");
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
         for (int k = 0; k < (int)(sizeof k_nier_dr / sizeof *k_nier_dr); k++) if (!strcmp(g_mod[i].build_id, k_nier_dr[k].build)) { base = g_mod[i].base; nier = 1; display = k_nier_dr[k].display; }
-        for (int k = 0; k < NLOCKS; k++) if (!strcmp(g_mod[i].build_id, k_locks[k].build)) { rows[nrow++] = &k_locks[k]; base = g_mod[i].base; }
+        for (int k = 0; k < NLOCKS && !no_rows; k++) if (!strcmp(g_mod[i].build_id, k_locks[k].build)) { rows[nrow++] = &k_locks[k]; base = g_mod[i].base; }
         int nue = ue_rows(&g_mod[i], ue, &ue_missing);
         for (int k = 0; k < nue; k++) { rows[nrow++] = &ue[k]; base = g_mod[i].base; }
     }
@@ -227,11 +234,21 @@ static void lock_find(void) {
 static int floor_only(void) { for (int r = 0; r < nrow; r++) if (rows[r]->kind != MIN_VSYNCS_I32) return 0; return nrow > 0 && !nier && !fb.n; }
 int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return (nrow || nier || fb.n) && !floor_only(); }
 int dm_fps_lock_floor(void) { pthread_once(&g_found, lock_find); for (int r = 0; r < nrow; r++) if (rows[r]->kind == MIN_VSYNCS_I32) return 1; return 0; }   // the game picks its interval at or above a floor the host writes
+__attribute__((weak)) uint8_t *dm_fps_state;   // loader.c: the frame step state page (NULL without a frame step); the unit tests have no loader
+// Whether the host holds the cap by pacing presents alone (hle_nvn.c fps_present_cap): a main with no frame step and no limiter the host writes. Every game then still has a cap
+// (the user asked for one in all of them): each frame is shown for at least the cap's vsyncs, never fewer than the game's own present interval, so the cap never runs a game
+// faster than it asks. The game's logic is not told: a game that steps by the time that passed keeps real time, one that steps a fixed amount per frame runs slower than real
+// time while it could go faster than the cap (the Android launcher says so). DM_FPS_PACE=0 turns it off: no cap for such a game, as before
+int dm_fps_lock_paced(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("DM_FPS_PACE"); on = !(e && !strcmp(e, "0")); }
+    pthread_once(&g_found, lock_find);
+    return on && !dm_fps_state && !nrow && !nier && !fb.n;
+}
 // The cap: DM_FPS_TARGET or the profile's fps_target at start, then whatever the front end sets while the game runs (dm_fps_target_set: the Android launcher's in-game panel,
 // DM_CTL "fps <n>"). 0 = the game's own; else 15, 20, 30, 40, 45 or 60, each applied by the limiters that can hold it (rate_ok)
 static int target_ok(int t) { return t == 0 || t == 15 || t == 20 || t == 30 || t == 40 || t == 45 || t == 60; }
 static _Atomic int g_target = -1, g_target_gen; static const char *g_target_src;
-__attribute__((weak)) uint8_t *dm_fps_state;   // loader.c: the frame step state page (NULL without a frame step); the unit tests have no loader
 int dm_fps_target(void) {
     int t = atomic_load(&g_target);
     if (t >= 0) return t;
@@ -281,9 +298,12 @@ static int holds(int t) {
 // A frame step (the rewriter's FRAME_STEP stub, its state page dm_fps_state) holds 30 and 60 (dm_fps_target_set) without any limiter row: Ocarina of Time has only the step,
 // and with 0 here the Android panel and Game settings said "this game picks its own frame rate" and offered no cap, so the game ran at its own step, 2 vsyncs of game time
 // a frame whatever the frame took: at 21 fps about 0.7 of real time (POCO F7 Ultra, the signed 0.1.8.8-beta, 2026-11-15)
+// Paced by presents alone (dm_fps_lock_paced): the whole-vsync rates 15, 20, 30 and 60, and bit 6 (DM_FPS_RATES_PACED) so a front end can say the game is not told
 static const int k_rates[] = {15, 20, 30, 40, 45, 60};
+#define DM_FPS_RATES_PACED (1 << 6)
 int dm_fps_lock_rates(void) {
     pthread_once(&g_found, lock_find);
+    if (dm_fps_lock_paced()) return 1 << 0 | 1 << 1 | 1 << 2 | 1 << 5 | DM_FPS_RATES_PACED;
     int m = dm_fps_state ? 1 << 2 | 1 << 5 : 0;
     for (int i = 0; i < 6; i++) if (holds(k_rates[i])) m |= 1 << i;   // a floor's maximum is read each time: the panel asks again while the game runs
     return m;

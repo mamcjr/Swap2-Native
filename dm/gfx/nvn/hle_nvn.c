@@ -2116,17 +2116,21 @@ static int fstep_on(void) { return fps_step_cap() != 0; }   // the host decides 
 __attribute__((weak)) int dm_fps_target(void) { const char *e = getenv("DM_FPS_TARGET"); return e ? atoi(e) : DM_GAME_FPS_TARGET; }   // hle_fpslock.c; graphics unit tests have no host
 __attribute__((weak)) int dm_fps_target_gen(void) { return 0; }
 __attribute__((weak)) int dm_fps_lock_floor(void) { return 0; }
-static int g_present_cap = -1, g_present_gen;
+// A main with no frame step and no limiter the host writes (hle_fpslock.c dm_fps_lock_paced): the cap is held by pacing presents alone, each frame shown for at least the cap's
+// vsyncs and never fewer than the game's own interval (present_itv), so a cap never runs a game faster than it asks (Tears of the Kingdom 1.4.2 at interval 2 stays at 2 with a 60
+// cap: not the 2x that presenting at the cap gave). The game's logic is not told: one that steps by real time keeps it, one that steps per frame slows where it could go faster
+__attribute__((weak)) int dm_fps_lock_paced(void) { return !g_engine_stub; }
+static int g_present_cap = -1, g_present_gen, g_present_paced;
 static int fps_present_cap(void) {
     if (dm_fps_state) return fps_step_cap();
     int gen = dm_fps_target_gen();
     if (g_present_cap < 0 || gen != g_present_gen) {
         int t = dm_fps_target(), first = g_present_cap < 0; g_present_gen = gen;
-        g_present_cap = t > 0 && t <= 60 && 60 % t == 0 ? t : 0;
+        g_present_cap = t > 0 && t <= 60 && 60 % t == 0 ? t : 0; g_present_paced = 0;
         if (g_present_cap && !dm_fps_lock_engine()) {
-            if (dm_fps_lock_floor()) LOG("[nvn] present cap %d fps: the game's frame-rate controller holds it (a floor the host writes), so presentation follows the interval the game sets", g_present_cap);
-            else LOG("[nvn] present cap %d fps not applied: this main has neither a frame step nor an engine frame limit the host writes that fixes the rate, so the game's own present interval stays", g_present_cap);
-            g_present_cap = 0;
+            if (dm_fps_lock_floor()) { LOG("[nvn] present cap %d fps: the game's frame-rate controller holds it (a value the host writes), so presentation follows the interval the game sets", g_present_cap); g_present_cap = 0; }
+            else if (dm_fps_lock_paced()) { g_present_paced = 1; LOG("[nvn] present cap %d fps by pacing presents: this main has neither a frame step nor an engine frame limit the host writes, so each frame is shown for at least %d vsyncs, or the game's own interval when longer; the game's logic is not told (DM_FPS_PACE=0 turns this off)", g_present_cap, 60 / g_present_cap); }
+            else { LOG("[nvn] present cap %d fps not applied: this main has neither a frame step nor an engine frame limit the host writes that fixes the rate, so the game's own present interval stays (DM_FPS_PACE=0)", g_present_cap); g_present_cap = 0; }
         } else if (!first) LOG("[nvn] present cap now %d%s", g_present_cap, g_present_cap ? " fps" : " (the game's own interval)");
     }
     return g_present_cap;
@@ -2135,7 +2139,9 @@ static nvn_fstep g_fs;   // present thread only
 static nvn_fgpu g_fg;   // the GPU time at kmin and at the current hold (nvn_fstep_gpu_slowed)
 static _Atomic int g_fs_k;   // the hold presentation follows (0 = not decided yet)
 // The display link runs at 30 Hz at a 30 cap, except while the game fixes its own step at 1 (BotW's VFR override)
-int nvn_game_fps(void) { int c = fps_present_cap(); if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
+static int paced_itv(int c, int game) { int k = 60 / c; return game > k ? game : k; }   // the cap's vsyncs, or the game's own interval when longer (g_present_paced)
+int nvn_game_fps(void) { int c = fps_present_cap(); if (c && g_present_paced) return 60 / paced_itv(c, g_display_mode ? 1 : atomic_load(&g_game_itv));
+    if (c) return c == 30 && atomic_load(&g_fs_k) == 1 && fstep_on() ? 60 : c; uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // The interval mode comes from the game profile (present_interval, default game): whether frames follow the present interval the game sets depends on whether the game's logic counts frames, which differs per game. Environment variables override it, and can override the fixed 60 Hz.
@@ -2150,7 +2156,10 @@ static void present_cfg(const win_t *o) {
     LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
         m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window, fixed 60 Hz" : "no window, fixed 60 Hz");
 }
-static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : 60 / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
+static int present_itv(const win_t *o) {   // vsyncs per frame that presentation follows
+    int c = fps_present_cap(), k = atomic_load(&g_fs_k), game = g_display_mode ? 1 : o->interval > 0 ? o->interval : 1;
+    return c ? (k && fstep_on() ? k : g_present_paced ? paced_itv(c, game) : 60 / c) : game;
+}
 // The acquire's wait for the display link: the present interval's vsyncs (60 Hz units), or with present_interval display above 60 Hz (DM_PRESENT_HZ=120 on a 120 Hz link,
 // DM_PRESENT_LINK=2) one tick of the present rate, as many link ticks as that takes. Before, a 120 Hz link waited two ticks per frame there, and display mode never went past 60 fps
 static int link_wait(const win_t *o, uint64_t timeout_ns) {

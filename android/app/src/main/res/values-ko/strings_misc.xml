@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2m_build_official">공식</string>
+    <string name="s2m_build_unofficial">비공식 빌드</string>
+    <string name="s2m_dump_no_code">게임 코드 없음 (기본 게임이나 업데이트에 exefs/main이 없음)</string>
+    <string name="s2m_dump_base">기본 게임</string>
+    <string name="s2m_dump_update">업데이트 %1$s</string>
+    <string name="s2m_dump_no_romfs">%1$s (RomFS 없음)</string>
+    <string name="s2m_dump_and">및</string>
+</resources>

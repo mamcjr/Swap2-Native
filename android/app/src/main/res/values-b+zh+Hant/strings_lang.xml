@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_app_lang">應用程式語言</string>
+    <string name="s2_app_lang_note">這些選單的語言</string>
+    <string name="s2_app_lang_system">手機語言</string>
+</resources>

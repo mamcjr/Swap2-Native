@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The build tag's mark on the launcher's and the game's chips (Signer.tag with these words; logs and reports keep the English) -->
+    <string name="s2m_build_official">oficial</string>
+    <string name="s2m_build_unofficial">build não oficial</string>
+    <!-- What a dump holds, in Add game's message (DumpLayout.describe with these words; the log keeps the English) -->
+    <string name="s2m_dump_no_code">nenhum código de jogo (sem exefs/main na base ou numa atualização)</string>
+    <string name="s2m_dump_base">o jogo base</string>
+    <string name="s2m_dump_update">a atualização %1$s</string>
+    <string name="s2m_dump_no_romfs">%1$s (sem RomFS)</string>
+    <string name="s2m_dump_and">e</string>
+</resources>

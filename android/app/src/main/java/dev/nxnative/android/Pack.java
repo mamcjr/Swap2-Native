@@ -97,6 +97,21 @@ final class Pack {
 
     /** Why the game (titleId) would draw nothing with this pack folder, in one sentence; null when it has this APK's shader library built from that game's profile */
     static String libraryProblem(File dir, String titleId) {
+        String[] p = libraryIssue(dir, titleId);
+        if (p == null) return null;
+        switch (p[0]) {
+            case LIB_UNREADABLE: return "The pack's shader library (" + p[1] + ") cannot be read: " + p[2];
+            case LIB_INPUTS: return "The pack's shader library was built from other shader tables (inputs " + p[1] + ") than this app's (" + p[2] + "): its shaders need making again.";
+            case LIB_NONE: return "The pack folder " + p[1] + " has no shader library: this app needs shaders/v-" + p[2] + "/dmsh_vk.lib in it.";
+            default: return "The pack folder " + p[1] + " has the shader library version " + p[2] + ", but this app needs version " + p[3] + " (shaders/v-" + p[3] + "/dmsh_vk.lib).";
+        }
+    }
+
+    /** libraryProblem's case and its values, for a sentence in the interface's language (PackCheck.libraryProblem): null when none, else {LIB_UNREADABLE, library, error},
+     *  {LIB_INPUTS, the library's inputs, this app's}, {LIB_NONE, folder, version needed} or {LIB_VERSION, folder, versions there, version needed} */
+    static final String LIB_UNREADABLE = "unreadable", LIB_INPUTS = "inputs", LIB_NONE = "none", LIB_VERSION = "version";
+
+    static String[] libraryIssue(File dir, String titleId) {
         Profile prof = Profile.of(titleId);
         String inputs = prof == null ? "unknown" : prof.shaderInputs;
         File lib = libraryOf(dir);
@@ -117,17 +132,16 @@ final class Pack {
                     r.readFully(h);
                     st.put("inputs", new String(h, 56, 16, StandardCharsets.US_ASCII).replace("\0", "").trim());
                 } catch (IOException e2) {
-                    return "The pack's shader library (" + lib + ") cannot be read: " + e2.getMessage();
+                    return new String[] {LIB_UNREADABLE, String.valueOf(lib), String.valueOf(e2.getMessage())};
                 }
             }
             if (inputs.equals(st.get("inputs"))) return null;
-            return "The pack's shader library was built from other shader tables (inputs " + st.get("inputs") + ") than this app's (" + inputs
-                    + "): its shaders need making again.";
+            return new String[] {LIB_INPUTS, String.valueOf(st.get("inputs")), inputs};
         }
         List<String> have = libraryVersions(dir);
         String need = BuildConfig.NX_DMSH_VK_CHAIN;
-        if (have.isEmpty()) return "The pack folder " + dir + " has no shader library: this app needs shaders/v-" + need + "/dmsh_vk.lib in it.";
-        return "The pack folder " + dir + " has the shader library version " + String.join(", ", have) + ", but this app needs version " + need + " (shaders/v-" + need + "/dmsh_vk.lib).";
+        if (have.isEmpty()) return new String[] {LIB_NONE, String.valueOf(dir), need};
+        return new String[] {LIB_VERSION, String.valueOf(dir), String.join(", ", have), need};
     }
 
     private static String one(Map<String, List<String>> rows, String key) throws IOException {

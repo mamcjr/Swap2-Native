@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2m_build_official">公式</string>
+    <string name="s2m_build_unofficial">非公式ビルド</string>
+    <string name="s2m_dump_no_code">ゲームコードがありません(本体にも更新データにも exefs/main がありません)</string>
+    <string name="s2m_dump_base">本体</string>
+    <string name="s2m_dump_update">更新データ %1$s</string>
+    <string name="s2m_dump_no_romfs">%1$s(RomFS なし)</string>
+    <string name="s2m_dump_and">と</string>
+</resources>

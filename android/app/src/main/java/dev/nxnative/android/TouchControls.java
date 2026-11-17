@@ -93,7 +93,11 @@ final class TouchControls extends View {
     // the D-pad, the face buttons, the right stick with R3, the left and the right shoulders with − / +) moved by (gdx, gdy) units and scaled by gsc around its centre,
     // and where the picture sits in the free space (placeX, placeY: 0 left / top, 0.5 centred, 1 right / bottom; nxhost_picture_place)
     private static final int GROUPS = 6;
-    private static final String[] GROUP_NAME = {"left stick", "D-pad", "A B X Y", "right stick", "ZL L −", "ZR R +"};
+    // The groups' names in the editor's hint (resources; 0: the buttons' own letters, GROUP_LETTERS)
+    private static final int[] GROUP_NAME = {dev.nxnative.android.R.string.s2g_tc_group_left_stick, dev.nxnative.android.R.string.s2g_tc_group_dpad, 0, dev.nxnative.android.R.string.s2g_tc_group_right_stick, 0, 0};
+    private static final String[] GROUP_LETTERS = {"", "", "A B X Y", "", "ZL L −", "ZR R +"};
+    private static final int[] RACE_GROUP_NAME = {dev.nxnative.android.R.string.s2g_tc_group_steering, dev.nxnative.android.R.string.s2g_tc_group_map, dev.nxnative.android.R.string.s2g_tc_group_pedals, dev.nxnative.android.R.string.s2g_tc_group_camera,
+            dev.nxnative.android.R.string.s2g_tc_group_item, dev.nxnative.android.R.string.s2g_tc_group_drift};
     private String prof;
     private final float[] gdx = new float[GROUPS], gdy = new float[GROUPS], gsc = new float[GROUPS];
     private float placeX = 0.5f, placeY = 0.5f;
@@ -103,7 +107,7 @@ final class TouchControls extends View {
     private int dragG = -1, dragId = -1, pinchId = -1;   // dragG: a group, GROUPS for the picture
     private float lastX, lastY, pinchD0, pinchS0;
     private final RectF[] tool = new RectF[5];   // the editor's buttons: Top, Centre, Bottom, Reset, Done
-    private static final String[] TOOL = {"Top", "Centre", "Bottom", "Reset", "Done"};
+    private static final int[] TOOL = {dev.nxnative.android.R.string.s2g_tc_top, dev.nxnative.android.R.string.s2g_tc_centre, dev.nxnative.android.R.string.s2g_tc_bottom, dev.nxnative.android.R.string.s2g_tc_reset, dev.nxnative.android.R.string.s2g_tc_done};
 
     private final long[] pressed = new long[MAX], prev = new long[MAX];
     private final float[] sticks = new float[4];
@@ -512,24 +516,15 @@ final class TouchControls extends View {
 
     /** The rows for the layout, for the controls' settings: the picture's position and the editor (which runs onEditStart) */
     void layoutRows(Context ctx, LinearLayout box) {
-        TextView t = new TextView(ctx);
-        t.setText("Picture position (this screen)");
-        android.widget.RadioGroup rg = new android.widget.RadioGroup(ctx);
-        rg.setOrientation(LinearLayout.HORIZONTAL);
-        String[] names = {"Top", "Centre", "Bottom"};
+        LinearLayout card = SidePanel.card(ctx);
+        int[] names = {dev.nxnative.android.R.string.s2g_tc_top, dev.nxnative.android.R.string.s2g_tc_centre, dev.nxnative.android.R.string.s2g_tc_bottom};
         float[] at = {0, 0.5f, 1};
-        for (int i = 0; i < 3; i++) {
-            android.widget.RadioButton b = new android.widget.RadioButton(ctx);
-            b.setText(names[i]); b.setId(View.generateViewId());
-            rg.addView(b);
-            if (Math.abs(placeY - at[i]) < 0.01f) b.setChecked(true);
-            float y = at[i];
-            b.setOnCheckedChangeListener((v, on) -> { if (on) setPicturePosition(y); });
-        }
-        android.widget.Button ed = new android.widget.Button(ctx);
-        ed.setText("Edit the controls layout…");
-        ed.setOnClickListener(v -> startEditLayout());
-        box.addView(t); box.addView(rg); box.addView(ed);
+        String[] labels = new String[3];
+        int sel = -1;   // a picture dragged elsewhere in the editor: none
+        for (int i = 0; i < 3; i++) { labels[i] = ctx.getString(names[i]); if (Math.abs(placeY - at[i]) < 0.01f) sel = i; }
+        card.addView(SidePanel.choiceRow(ctx, dev.nxnative.android.R.drawable.s2_ic_display, ctx.getString(dev.nxnative.android.R.string.s2g_tc_picture_position), labels, sel, i -> setPicturePosition(at[i])).view);
+        card.addView(SidePanel.row(ctx, dev.nxnative.android.R.drawable.s2_ic_settings, ctx.getString(dev.nxnative.android.R.string.s2g_tc_edit_layout), null, v -> startEditLayout()).chevron(ctx).view);
+        SidePanel.add(box, card);
     }
 
     // ---- The editor's touches ----
@@ -957,14 +952,19 @@ final class TouchControls extends View {
             line.setColor(Color.argb(220, 255, 255, 255));
             c.drawRoundRect(tool[k], 8 * u, 8 * u, line);
             text.setColor(k == 4 || cur ? Color.BLACK : Color.WHITE);
-            c.drawText(TOOL[k], tool[k].centerX(), tool[k].centerY() - (text.descent() + text.ascent()) / 2, text);
+            c.drawText(getContext().getString(TOOL[k]), tool[k].centerX(), tool[k].centerY() - (text.descent() + text.ascent()) / 2, text);
         }
         text.setTextSize(13 * u);
         text.setColor(Color.argb(230, 255, 255, 255));
-        String[] groupNames = TouchProfile.RACING.equals(profile) ? new String[] {"steering", "map / pause / rewind", "pedals", "camera", "item / rear view", "drift / jump"} : GROUP_NAME;
-        String hint = dragG >= 0 && dragG < GROUPS ? groupNames[dragG] + ": drag to move, a second finger to resize (" + Math.round(gsc[dragG] * 100) + " %)"
-                : dragG == GROUPS ? "picture: drag into the black bars" : "Drag a control or the picture; pinch a control to resize it";
+        String hint = dragG >= 0 && dragG < GROUPS ? getContext().getString(dev.nxnative.android.R.string.s2g_tc_edit_group, groupName(dragG), Math.round(gsc[dragG] * 100))
+                : getContext().getString(dragG == GROUPS ? dev.nxnative.android.R.string.s2g_tc_edit_picture : dev.nxnative.android.R.string.s2g_tc_edit_hint);
         c.drawText(hint, w / 2f, y + bh + 22 * u, text);
+    }
+
+    /** A group's name in the editor's hint: the racing layout's own names, else the classic groups' (the face and shoulder groups by their letters) */
+    private String groupName(int g) {
+        if (TouchProfile.RACING.equals(profile)) return getContext().getString(RACE_GROUP_NAME[g]);
+        return GROUP_NAME[g] != 0 ? getContext().getString(GROUP_NAME[g]) : GROUP_LETTERS[g];
     }
 
     private void drawStick(Canvas c, int i) {
@@ -1022,84 +1022,57 @@ final class TouchControls extends View {
     Runnable openSettings;
     private void settings() { if (openSettings != null) openSettings.run(); }
 
-    /** The on-screen controls' rows of the in-game panel: opacity, size, the haptic tick, the log over the game, and Reset */
+    /**
+     * The on-screen controls' rows of the in-game panel's Controls tab, in its look (SidePanel's building blocks, ctx: its themed context): shown or hidden, the
+     * game's touch layout, the opacity and size, the haptic tick, the log over the game, the picture position, the layout editor, and Reset
+     */
     void controlRows(Context ctx, LinearLayout box) {
+        LinearLayout main = SidePanel.card(ctx);
         // Shown or hidden, as the show / hide button does: the way back with a gamepad connected, when that button is not on the picture
-        CheckBox showBox = new CheckBox(ctx);
-        showBox.setText(dev.nxnative.android.R.string.s2_touch_show);
-        showBox.setChecked(active());
-        showBox.setOnCheckedChangeListener((b, v) -> { if (v != active()) toggle(); });
-        box.addView(showBox);
-        TextView profileTitle = new TextView(ctx);
-        profileTitle.setText(dev.nxnative.android.R.string.s2_touch_profile);
-        box.addView(profileTitle);
-        android.widget.RadioGroup profiles = new android.widget.RadioGroup(ctx);
+        main.addView(SidePanel.toggleRow(ctx, dev.nxnative.android.R.drawable.s2_ic_gamepad, ctx.getString(dev.nxnative.android.R.string.s2_touch_show), null, active(), (b, v) -> { if (v != active()) toggle(); }).view);
         String choice = prefs().getString(setting("profile"), TouchProfile.AUTO);
         String[] choices = TouchProfile.choices(gameId);
-        for (String value : choices) {
-            android.widget.RadioButton option = new android.widget.RadioButton(ctx);
-            option.setId(View.generateViewId()); option.setTag(value);
-            option.setText(profileLabel(value));
-            profiles.addView(option); option.setChecked(value.equals(choice));
-        }
-        profiles.setOnCheckedChangeListener((group, id) -> {
-            View selected = group.findViewById(id); if (selected == null) return;
+        String[] names = new String[choices.length];
+        int at = -1;
+        for (int i = 0; i < choices.length; i++) { names[i] = ctx.getString(profileLabel(choices[i])); if (choices[i].equals(choice)) at = i; }
+        main.addView(SidePanel.choiceRow(ctx, dev.nxnative.android.R.drawable.s2_ic_grid, ctx.getString(dev.nxnative.android.R.string.s2_touch_profile), names, at, i -> {
             cancelInput();
-            String value = (String) selected.getTag();
+            String value = choices[i];
             prefs().edit().putString(setting("profile"), value).commit();
             profile = TouchProfile.resolve(gameId, value); prof = null; baseKey = null;
             relayout();
-        });
-        box.addView(profiles);
-        TextView hint = new TextView(ctx); hint.setText(dev.nxnative.android.R.string.s2_touch_per_game); box.addView(hint);
-        if (TouchProfile.DK.equals(gameId)) { TextView dkHint = new TextView(ctx); dkHint.setText(dev.nxnative.android.R.string.s2_touch_dk_hint); box.addView(dkHint); }
-        if (TouchProfile.OOT.equals(gameId)) {
-            // The anniversary skin draws the controller's own letters: the old action-symbol picker is not offered, and the symbols saved for the old
-            // artwork (zelda_icon_<action>@<title ID>) are kept, never erased
-            TextView zeldaHint = new TextView(ctx); zeldaHint.setText(dev.nxnative.android.R.string.s2_zelda40_hint); box.addView(zeldaHint);
-        }
+        }).view);
         if (TouchProfile.MKW.equals(gameId)) {
-            CheckBox automatic = new CheckBox(ctx);
-            automatic.setText(dev.nxnative.android.R.string.s2_race_auto);
-            automatic.setChecked(autoAccelerate);
-            automatic.setOnCheckedChangeListener((button, on) -> {
+            main.addView(SidePanel.toggleRow(ctx, 0, ctx.getString(dev.nxnative.android.R.string.s2_race_auto), ctx.getString(dev.nxnative.android.R.string.s2_race_hint), autoAccelerate, (button, on) -> {
                 cancelInput(); autoAccelerate = on;
                 prefs().edit().putBoolean(setting("race_auto"), on).commit();
                 prof = null; baseKey = null; relayout();
-            });
-            box.addView(automatic);
-            TextView raceHint = new TextView(ctx); raceHint.setText(dev.nxnative.android.R.string.s2_race_hint); box.addView(raceHint);
+            }).view);
         }
-        TextView ol = new TextView(ctx), sl = new TextView(ctx);
-        SeekBar os = new SeekBar(ctx), ss = new SeekBar(ctx);
-        CheckBox hb = new CheckBox(ctx), lb = new CheckBox(ctx);
-        os.setMax(90); os.setProgress(Math.round(opacity * 100) - 10);   // 10..100 %
-        ss.setMax(90); ss.setProgress(Math.round(scale * 100) - 60);     // 60..150 %
-        hb.setText("Vibrate on press"); hb.setChecked(haptics);
-        lb.setText("Show the log over the game"); lb.setChecked(showLog(ctx));
-        Runnable labels = () -> { ol.setText("Opacity " + (os.getProgress() + 10) + " %"); sl.setText("Size " + (ss.getProgress() + 60) + " %"); };
-        labels.run();
-        SeekBar.OnSeekBarChangeListener live = new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar b, int v, boolean user) {
-                labels.run();
-                opacity = (os.getProgress() + 10) / 100f;
-                float ns = (ss.getProgress() + 60) / 100f;
-                if (ns != scale) { scale = ns; layout(getWidth(), getHeight()); }
-                invalidate();
-                save();
-            }
-            @Override public void onStartTrackingTouch(SeekBar b) {}
-            @Override public void onStopTrackingTouch(SeekBar b) {}
-        };
-        os.setOnSeekBarChangeListener(live);
-        ss.setOnSeekBarChangeListener(live);
-        hb.setOnCheckedChangeListener((b, v) -> { haptics = v; save(); });
-        lb.setOnCheckedChangeListener((b, v) -> prefs().edit().putBoolean("log", v).commit());
-        android.widget.Button reset = new android.widget.Button(ctx);
-        reset.setText("Reset the controls");
-        reset.setOnClickListener(v -> { os.setProgress(skin != null ? Math.round(skin.opacity * 100) - 10 : 50); ss.setProgress(40); hb.setChecked(true); });   // 60 % opacity (a skin's own, 65 %), 100 % size, the tick on
-        box.addView(ol); box.addView(os); box.addView(sl); box.addView(ss); box.addView(hb); box.addView(lb); box.addView(reset);
+        SidePanel.add(box, main);
+        SidePanel.note(ctx, box, ctx.getString(dev.nxnative.android.R.string.s2_touch_per_game));
+        if (TouchProfile.DK.equals(gameId)) SidePanel.note(ctx, box, ctx.getString(dev.nxnative.android.R.string.s2_touch_dk_hint));
+        // The anniversary skin draws the controller's own letters: the old action-symbol picker is not offered, and the symbols saved for the old
+        // artwork (zelda_icon_<action>@<title ID>) are kept, never erased
+        if (TouchProfile.OOT.equals(gameId)) SidePanel.note(ctx, box, ctx.getString(dev.nxnative.android.R.string.s2_zelda40_hint));
+
+        LinearLayout feel = SidePanel.card(ctx);
+        SeekBar os = SidePanel.slider(ctx, feel, v -> ctx.getString(dev.nxnative.android.R.string.s2g_tc_opacity, v), 10, 100, Math.round(opacity * 100), (v, user) -> {   // 10..100 %
+            opacity = v / 100f; invalidate(); save();
+        }, null);
+        SeekBar ss = SidePanel.slider(ctx, feel, v -> ctx.getString(dev.nxnative.android.R.string.s2g_tc_size, v), 60, 150, Math.round(scale * 100), (v, user) -> {      // 60..150 %
+            float ns = v / 100f;
+            if (ns != scale) { scale = ns; layout(getWidth(), getHeight()); }
+            invalidate(); save();
+        }, null);
+        Ui.Setting hb = SidePanel.toggleRow(ctx, 0, ctx.getString(dev.nxnative.android.R.string.s2g_tc_vibrate), null, haptics, (b, v) -> { haptics = v; save(); });
+        feel.addView(hb.view);
+        feel.addView(SidePanel.toggleRow(ctx, 0, ctx.getString(dev.nxnative.android.R.string.s2g_tc_show_log), null, showLog(ctx), (b, v) -> prefs().edit().putBoolean("log", v).commit()).view);
+        SidePanel.add(box, feel);
         layoutRows(ctx, box);   // the picture position and the layout editor
+        // 60 % opacity (a skin's own, 65 %), 100 % size, the tick on
+        SidePanel.add(box, Ui.button(ctx, ctx.getString(dev.nxnative.android.R.string.s2g_tc_reset_controls), Ui.Kind.TONAL,
+                v -> { os.setProgress(skin != null ? Math.round(skin.opacity * 100) - 10 : 50); ss.setProgress(40); hb.toggle.setChecked(true); }));
     }
 
     /** Whether GameActivity keeps the newest log lines over the picture once the game draws (off by default; the settings dialog's last box) */

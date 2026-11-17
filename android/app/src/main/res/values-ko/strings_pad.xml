@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2_hint_tabs">탭</string>
+    <string name="s2_pad_nintendo">Nintendo 버튼 배치</string>
+    <string name="s2_pad_nintendo_note">앱 메뉴에서 Switch처럼 A(오른쪽)로 확인하고 B(아래)로 돌아갑니다. 끄면 아래 버튼으로 확인합니다. 게임 조작은 바뀌지 않습니다.</string>
+</resources>

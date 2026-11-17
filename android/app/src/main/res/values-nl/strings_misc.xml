@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2m_build_official">officieel</string>
+    <string name="s2m_build_unofficial">onofficiële build</string>
+    <string name="s2m_dump_no_code">geen gamecode (geen exefs/main in de basis of een update)</string>
+    <string name="s2m_dump_base">de basis</string>
+    <string name="s2m_dump_update">update %1$s</string>
+    <string name="s2m_dump_no_romfs">%1$s (geen RomFS)</string>
+    <string name="s2m_dump_and">en</string>
+</resources>

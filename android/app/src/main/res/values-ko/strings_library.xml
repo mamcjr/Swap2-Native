@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="s2l_cancel">취소</string>
+    <string name="s2l_done">완료</string>
+    <string name="s2l_pick">선택…</string>
+    <string name="s2l_default">기본값</string>
+    <string name="s2l_allow">허용</string>
+    <string name="s2l_access_needed">게임 덤프를 읽는 데 필요합니다.</string>
+    <string name="s2l_this_game">이 게임</string>
+    <string name="s2l_that_packs_game">해당 팩의 게임</string>
+    <string name="s2l_the_zip">.zip 파일</string>
+    <string name="s2l_simulated">(시뮬레이션)</string>
+    <string name="s2l_unsupported">%1$s은(는) 이 앱에서 지원하지 않습니다: 이 게임 또는 이 지역판에 게임 프로필이 없습니다. 지원되는 title ID: %2$s. (프로필은 %3$s에 추가할 수 있습니다: 저장소의 dm/games처럼 game.tsv와 그 테이블.)</string>
+
+    <string name="s2l_manage_facts">Title ID: %1$s\n게임: %2$s\n팩: %3$s\n셰이더: %4$s\n세이브 데이터: %5$s</string>
+    <string name="s2l_shaders_present">있음 (%1$s)</string>
+    <string name="s2l_not_set">설정 안 됨</string>
+    <string name="s2l_remove_from_list">목록에서 제거</string>
+    <string name="s2l_remove_title">%1$s을(를) 제거할까요?</string>
+    <string name="s2l_remove_text">목록 항목만 제거됩니다. 덤프, 팩, 세이브 데이터는 휴대폰에 그대로 남으며 게임 추가로 다시 불러올 수 있습니다.</string>
+    <string name="s2l_remove_text_save">목록 항목만 제거됩니다. 덤프, 팩, 세이브 데이터(%1$s)는 휴대폰에 그대로 남으며 게임 추가로 다시 불러올 수 있습니다.</string>
+    <string name="s2l_remove">제거</string>
+    <string name="s2l_add_cannot_use">%1$s을(를) 사용할 수 없습니다: %2$s</string>
+    <string name="s2l_add_no_romfs_nup">%1$s에 RomFS가 있는 %2$s이(가) 없습니다 (팩은 버전 %3$s용입니다).</string>
+    <string name="s2l_add_no_romfs">%1$s에 RomFS가 없습니다 (%2$s, romfs/, updates/&lt;version&gt;/romfs를 확인함).</string>
+
+    <string name="s2l_cap_own">게임 기본값</string>
+    <string name="s2l_cap_fps">%1$d fps</string>
+    <string name="s2l_dll_installed">Lossless.dll 설치됨</string>
+    <string name="s2l_dll_not_installed">Lossless.dll 설치 안 됨: %1$s</string>
+    <string name="s2l_lsfg_put_it">Documents/Emulation/bios 또는 Switch2에 넣거나 직접 선택하세요.</string>
+    <string name="s2l_lsfg_credit">Eden에서 이식됨 (GPL-3.0-or-later). Lossless.dll은 사용자 본인의 파일이며 앱에 포함되지 않습니다.</string>
+    <string name="s2l_lsfg_pick_dll">Lossless.dll 선택</string>
+    <string name="s2l_no_log">아직 로그가 없습니다.</string>
+    <string name="s2l_no_log_game">아직 이 게임의 로그가 없습니다.</string>
+    <string name="s2l_share_file">%1$s 공유</string>
+    <string name="s2l_no_app_opens">%1$s을(를) 열 수 있는 앱이 없습니다</string>
+
+    <string name="s2l_folders_no_games">아직 게임이 없습니다: 먼저 + 게임 추가를 누르세요. 게임마다 자체 폴더가 있습니다 (카드의 ⋯ › 폴더…).</string>
+    <string name="s2l_folders_which_game">어느 게임의 폴더인가요?</string>
+    <string name="s2l_folders_title">폴더 · %1$s</string>
+    <string name="s2l_folders_game">게임 폴더</string>
+    <string name="s2l_folders_game_nup">게임 (.nup 파일)</string>
+    <string name="s2l_folders_pack">팩 및 셰이더 폴더 (pack.tsv, shaders/)</string>
+    <string name="s2l_folders_save">세이브 폴더</string>
+    <string name="s2l_folders_picked">(선택됨)</string>
+    <string name="s2l_folders_default_app">(기본값: 앱 저장소)</string>
+    <string name="s2l_folders_default_beside">(기본값: 게임 옆)</string>
+    <string name="s2l_folders_library_present">셰이더 라이브러리 %1$s: 있음.</string>
+    <string name="s2l_folders_pick_save">%1$s의 세이브 데이터 폴더 선택</string>
+    <string name="s2l_folders_kept">이 설정은 앱을 업데이트해도 유지됩니다. 폴더를 선택해도 묻지 않고 파일을 이동, 복사, 삭제하는 일은 없습니다.</string>
+    <string name="s2l_folders_not_pack">팩 폴더가 아닙니다: %1$s</string>
+    <string name="s2l_folders_other_game">이 팩은 %2$s이(가) 아닌 %1$s용입니다 (%3$s).</string>
+    <string name="s2l_folders_pack_set">팩 폴더 설정됨</string>
+    <string name="s2l_folders_pack_ready">이 앱의 셰이더 라이브러리(%1$s)가 있습니다: 플레이할 준비가 되었습니다.</string>
+    <string name="s2l_save_default_old">(기본값: 게임 옆에 있는 이전 버전의 세이브 데이터. 다음에 게임을 시작하면 앱 저장소 %1$s(으)로 복사하여 그곳에서 플레이합니다. 이 폴더는 변경되지 않습니다)</string>
+    <string name="s2l_save_default_app">(기본값: 앱 저장소). 세이브 데이터 백업은 공유 저장소의 %1$s에 사본을 만들며, 앱을 제거해도 남습니다.</string>
+    <string name="s2l_save_default_copied">(기본값: 앱 저장소. %1$s에서 복사했으며 원본은 그대로 유지됨). 세이브 데이터 백업은 공유 저장소의 %2$s에 사본을 만들며, 앱을 제거해도 남습니다.</string>
+    <string name="s2l_save_copy_title">세이브 데이터를 복사할까요?</string>
+    <string name="s2l_save_copy_text">선택한 폴더가 비어 있습니다. 현재 세이브 데이터는 %1$s에 있습니다.\n\n%2$s(으)로 복사할까요? 현재 폴더는 그대로 유지되며 아무것도 삭제되지 않습니다.</string>
+    <string name="s2l_save_copy_use">복사 후 사용</string>
+    <string name="s2l_save_use_empty">빈 상태로 사용</string>
+    <string name="s2l_save_copy_failed">복사에 실패했습니다 (%1$s). 세이브 폴더는 변경되지 않았습니다.</string>
+
+    <string name="s2l_lib_unreadable">팩의 셰이더 라이브러리(%1$s)를 읽을 수 없습니다: %2$s</string>
+    <string name="s2l_lib_inputs">팩의 셰이더 라이브러리가 이 앱(%2$s)과 다른 셰이더 테이블(입력 %1$s)로 빌드되었습니다: 셰이더를 다시 만들어야 합니다.</string>
+    <string name="s2l_lib_none">팩 폴더 %1$s에 셰이더 라이브러리가 없습니다: 이 앱에는 shaders/v-%2$s/dmsh_vk.lib가 필요합니다.</string>
+    <string name="s2l_lib_version">팩 폴더 %1$s의 셰이더 라이브러리는 버전 %2$s이지만, 이 앱에는 버전 %3$s(shaders/v-%3$s/dmsh_vk.lib)가 필요합니다.</string>
+
+    <string name="s2l_check_unfinished">팩의 게임 코드가 완성되지 않았습니다 (%1$s.android.key가 없음: 팩 업데이트가 중간에 중단됨). 다시 준비하면 완료됩니다.</string>
+    <string name="s2l_check_rewriting">팩의 게임 코드를 다시 쓰는 중입니다 (%1$s: %2$s). 준비가 끝날 때까지 기다리세요.</string>
+    <string name="s2l_check_mods_gone">%1$s의 모드가 변경되었습니다 (%2$s: 삭제되었거나 꺼진 모드로 코드가 다시 쓰였음). 다시 준비하면 적용됩니다.</string>
+    <string name="s2l_check_mods_new">%1$s의 모드가 변경되었습니다 (%2$s: %3$s에 코드에 아직 반영되지 않은 모드가 있음). 다시 준비하면 적용됩니다.</string>
+    <string name="s2l_check_mods_changed">%1$s의 모드가 변경되었습니다 (%2$s: 모드 중 하나가 변경됨). 다시 준비하면 적용됩니다.</string>
+    <string name="s2l_check_mods_unreadable">%1$s의 모드를 읽을 수 없습니다: %2$s</string>
+    <string name="s2l_check_no_module_folder">팩은 %1$s 업데이트 %2$s용이지만 게임 폴더에 %3$s이(가) 없습니다. 해당 업데이트가 있는 덤프를 선택하거나 이 덤프로 다시 준비하세요.</string>
+    <string name="s2l_check_no_module_nup">팩은 %1$s 업데이트 %2$s용이지만 게임 .nup에 %3$s이(가) 없습니다. 해당 업데이트가 있는 덤프를 선택하거나 이 덤프로 다시 준비하세요.</string>
+    <string name="s2l_check_unreadable">%1$s을(를) 읽을 수 없습니다: %2$s</string>
+    <string name="s2l_check_other_build">팩이 게임 폴더에 있는 것(%4$s…, 업데이트 %5$s)과 다른 %1$s 빌드(%2$s %3$s…)로 만들어졌습니다. 이 코드는 이 게임에서 충돌합니다: 다시 준비하면 이 폴더로 팩을 만듭니다.</string>
+    <string name="s2l_check_unsupported_update">팩은 %1$s 업데이트 %2$s용입니다. 이 앱은 업데이트 %3$s만 지원합니다. 해당 업데이트가 적용된 게임을 덤프하여 준비하세요.</string>
+
+    <string name="s2l_pack_export_none">내보낼 팩이 없습니다: %1$s</string>
+    <string name="s2l_pack_export_where">팩 .zip을 저장할 폴더 선택</string>
+    <string name="s2l_pack_zip_no_path">이 파일은 앱이 읽을 수 있는 경로로 휴대폰 저장소에 있지 않습니다 (%1$s). 최근 항목이나 다운로드가 아닌 휴대폰 저장소(☰ › 휴대폰 이름)에서 선택하세요.</string>
+    <string name="s2l_pack_exporting">%1$s의 팩 내보내는 중…</string>
+    <string name="s2l_pack_export_space">zip에 %1$s이(가) 필요하지만 %2$s의 여유 공간은 %3$s입니다</string>
+    <string name="s2l_pack_export_failed">팩을 내보내지 않았습니다: %1$s\n\n%2$s의 팩은 읽기만 했습니다.</string>
+    <string name="s2l_pack_exported_title">팩 내보내기 완료</string>
+    <string name="s2l_pack_exported_text">%1$s\n\n%2$s, 팩과 파일별로 대조 확인했습니다. 다른 휴대폰에서(또는 새로 설치한 후) 팩 가져오기…를 사용하면 복원됩니다.</string>
+    <string name="s2l_pack_importing">%1$s의 팩 가져오는 중…</string>
+    <string name="s2l_pack_import_space">팩에 %1$s이(가) 필요하지만 앱 저장소의 여유 공간은 %2$s입니다</string>
+    <string name="s2l_pack_import_job">이 게임의 준비 작업이 %1$s에 쓰고 있습니다 (%2$s): 먼저 작업이 끝나기를 기다리거나 ⋯ 관리에서 작업을 삭제하세요</string>
+    <string name="s2l_pack_started_meanwhile">그동안 %1$s이(가) 시작되었습니다</string>
+
+    <string name="s2l_frontend_access">%1$s에 모든 파일 액세스를 허용한 다음 게임을 다시 시작하세요.</string>
+    <string name="s2l_frontend_not_file">프런트엔드가 %1$s을(를) 보냈지만, 이는 앱이 읽을 수 있는 경로로 휴대폰 저장소에 있는 파일이 아닙니다. 프런트엔드가 파일 경로나 휴대폰 자체 저장소의 저장소(SAF) URI를 보내도록 설정하세요.</string>
+    <string name="s2l_frontend_no_game">프런트엔드가 게임을 보내지 않았습니다: .nup(또는 게임 폴더)을 인텐트 데이터로 보내거나, extra \"game\"에 경로를 담아 보내세요.</string>
+    <string name="s2l_frontend_missing">%1$s이(가) 없습니다 (프런트엔드가 %2$s을(를) 보냄).</string>
+    <string name="s2l_frontend_unreadable">%1$s을(를) 읽을 수 없습니다. 모든 파일 액세스가 켜져 있는지 확인하세요.</string>
+    <string name="s2l_frontend_no_card">홈에 title ID %1$s인 게임이 없습니다. 먼저 %2$s에서 추가하거나 게임 파일을 대신 보내세요.</string>
+    <string name="s2l_frontend_cannot_start">게임을 시작할 수 없음</string>
+
+    <string name="s2l_nup_none_picked">선택된 파일이 없습니다.</string>
+    <string name="s2l_nup_no_grant">Android가 이 파일에 대한 지속적인 읽기 권한을 부여하지 않았습니다 (%1$s). 파일 선택기에서 휴대폰 저장소의 파일을 선택하세요 (최근 항목이나 다른 앱의 공유 목록이 아닌).</string>
+    <string name="s2l_nup_bad_name">이 파일 이름은 사용할 수 없습니다.</string>
+    <string name="s2l_nup_not_nup">%1$s은(는) .nup 파일이 아닙니다 (이름이 .nup으로 끝나야 함).</string>
+    <string name="s2l_nup_cannot_create">%1$s을(를) 만들 수 없습니다.</string>
+    <string name="s2l_nup_too_small">%1$s은(는) .nup 파일이라기에는 너무 작습니다 (%2$s바이트).</string>
+    <string name="s2l_nup_unlinked">%1$s이(가) 더 이상 앱에 연결되어 있지 않습니다. 다시 선택하세요.</string>
+    <string name="s2l_nup_provider_none">Android 파일 제공자가 %1$s에 대한 파일을 반환하지 않았습니다.</string>
+    <string name="s2l_nup_no_longer_read">앱이 더 이상 %1$s을(를) 읽을 수 없습니다 (%2$s). 다시 선택하세요.</string>
+    <string name="s2l_nup_cannot_open">%1$s이(가) 없거나 열 수 없습니다 (%2$s). 다시 선택하세요.</string>
+    <string name="s2l_nup_streamed">%1$s이(가) 이 휴대폰의 파일이 아닌 스트림으로 제공되어 (%2$s) 게임이 그 자리에서 탐색할 수 없습니다. 파일 선택기에서 휴대폰 저장소의 파일을 선택하거나 앱으로 복사하세요.</string>
+    <string name="s2l_nup_no_size">이 파일 제공자에서 %1$s의 크기를 읽을 수 없습니다. 파일 선택기에서 휴대폰 저장소의 파일을 선택하거나 앱으로 복사하세요.</string>
+</resources>

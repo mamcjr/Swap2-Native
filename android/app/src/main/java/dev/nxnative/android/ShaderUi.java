@@ -98,7 +98,7 @@ final class ShaderUi {
 
     static void importPick(MainActivity a, Game g) {
         if (!ready(a, g)) return;
-        String why = Profile.missing(g.titleId, g.name);
+        String why = PackCheck.unsupported(a, g.titleId, g.name);
         if (why != null) { a.error(why); return; }
         if (translating(a, g, target(a, g))) { a.error(a.getString(R.string.s2_shaders_err_busy, g.name)); return; }
         List<File> zips = ShaderZip.found(g.titleId, shadersDir(), Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS));
@@ -177,7 +177,7 @@ final class ShaderUi {
             // a provider without the column
         }
         String s = doc.getLastPathSegment();
-        return s == null ? "the .zip" : s;
+        return s == null ? a.getString(R.string.s2l_the_zip) : s;
     }
 
     /** MainActivity.onActivityResult: the folder picked for Export shaders… */

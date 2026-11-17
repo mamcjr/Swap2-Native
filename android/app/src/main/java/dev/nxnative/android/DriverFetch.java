@@ -2,6 +2,7 @@ package dev.nxnative.android;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.widget.Toast;
@@ -53,12 +54,15 @@ final class DriverFetch {
         String label() { return tag + "\n  " + name + String.format(Locale.US, "  (%.1f MB)", size / 1048576.0); }
     }
 
-    /** A message for the user, without a stack trace */
-    private static final class Failure extends IOException { Failure(String m) { super(m); } }
+    /** A message for the user, without a stack trace: its string resource and values, worded by why in the user's language */
+    private static final class Failure extends IOException {
+        final int text; final Object[] args;
+        Failure(String english, int text, Object... args) { super(english); this.text = text; this.args = args; }
+    }
 
     private static HttpsURLConnection open(String url, String accept) throws IOException {
         URL u = new URL(url);
-        if (!"https".equals(u.getProtocol())) throw new Failure("not an https link: " + url);
+        if (!"https".equals(u.getProtocol())) throw new Failure("not an https link: " + url, R.string.s2s_fetch_not_https, url);
         HttpsURLConnection c = (HttpsURLConnection) u.openConnection();
         c.setRequestProperty("User-Agent", "Swap2-Native-driver-fetch");
         c.setRequestProperty("Accept", accept);
@@ -66,17 +70,17 @@ final class DriverFetch {
         c.setReadTimeout(30000);
         c.setInstanceFollowRedirects(true);   // release assets redirect to GitHub's object storage (https to https)
         int code = c.getResponseCode();
-        if (code == 403 || code == 429) { c.disconnect(); throw new Failure("GitHub rate limit, try again later"); }
-        if (code != 200) { c.disconnect(); throw new Failure("GitHub answered HTTP " + code); }
+        if (code == 403 || code == 429) { c.disconnect(); throw new Failure("GitHub rate limit, try again later", R.string.s2s_fetch_rate_limit); }
+        if (code != 200) { c.disconnect(); throw new Failure("GitHub answered HTTP " + code, R.string.s2s_fetch_http, code); }
         return c;
     }
 
-    private static String why(Throwable e) {
-        if (e instanceof UnknownHostException || e instanceof ConnectException) return "No network (cannot reach GitHub)";
-        if (e instanceof SocketTimeoutException) return "No network (GitHub did not answer in time)";
-        if (e instanceof Failure) return e.getMessage();
-        if (e instanceof JSONException) return "GitHub's answer could not be read: " + e.getMessage();
-        return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();   // GpuDriver.install's reasons (no meta.json, …)
+    private static String why(Context c, Throwable e) {
+        if (e instanceof UnknownHostException || e instanceof ConnectException) return c.getString(R.string.s2s_fetch_no_network);
+        if (e instanceof SocketTimeoutException) return c.getString(R.string.s2s_fetch_timeout);
+        if (e instanceof Failure) { Failure f = (Failure) e; return f.args.length == 0 ? c.getString(f.text) : c.getString(f.text, f.args); }
+        if (e instanceof JSONException) return c.getString(R.string.s2s_fetch_bad_json, String.valueOf(e.getMessage()));
+        return GpuDriver.why(c, e);   // GpuDriver.install's reasons (no meta.json, …)
     }
 
     /** The .zip assets of a repository's releases, newest release first (network: call off the UI thread) */
@@ -104,13 +108,13 @@ final class DriverFetch {
 
     /** Downloads the asset into the cache, installs it and returns the driver (network: call off the UI thread) */
     static GpuDriver.Info fetch(Activity a, Asset as) throws IOException {
-        if (as.size > MAX_ZIP) throw new Failure("the zip is larger than 512 MB: not a driver package");
+        if (as.size > MAX_ZIP) throw new Failure("the zip is larger than 512 MB: not a driver package", R.string.s2s_fetch_zip_too_big);
         File tmp = File.createTempFile("driver-", ".zip", a.getCacheDir());
         try {
             HttpsURLConnection c = open(as.url, "application/octet-stream");
             try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(tmp)) {
                 byte[] b = new byte[1 << 16]; long n = 0; int k;
-                while ((k = in.read(b)) > 0) { if ((n += k) > MAX_ZIP) throw new Failure("the download is larger than 512 MB: not a driver package"); out.write(b, 0, k); }
+                while ((k = in.read(b)) > 0) { if ((n += k) > MAX_ZIP) throw new Failure("the download is larger than 512 MB: not a driver package", R.string.s2s_fetch_download_too_big); out.write(b, 0, k); }
             } finally { c.disconnect(); }
             try (InputStream in = new FileInputStream(tmp)) { return GpuDriver.install(a, in, as.name.replaceAll("(?i)(\\.adpkg)?\\.zip$", "")); }
         } finally { tmp.delete(); }
@@ -128,43 +132,43 @@ final class DriverFetch {
     static void dialog(Activity a, int request) {
         String[] labels = new String[REPOS.length];
         for (int k = 0; k < REPOS.length; k++) labels[k] = REPOS[k][1] + "\n  github.com/" + REPOS[k][0];
-        new AlertDialog.Builder(a).setTitle("Download a driver (GitHub releases)")
+        new AlertDialog.Builder(a).setTitle(R.string.s2s_fetch_title)
                 .setItems(labels, (d, w) -> releases(a, REPOS[w][0], request))
-                .setNegativeButton("Cancel", null).show();
+                .setNegativeButton(android.R.string.cancel, null).show();
     }
 
     private static void releases(Activity a, String repo, int request) {
-        AlertDialog wait = busy(a, "Reading the releases of " + repo + "…");
+        AlertDialog wait = busy(a, a.getString(R.string.s2s_fetch_reading, repo));
         new Thread(() -> {
             List<Asset> l = null; String err = null;
-            try { l = list(repo); } catch (Throwable e) { err = why(e); }   // nothing on this thread may end the app
+            try { l = list(repo); } catch (Throwable e) { err = why(a, e); }   // nothing on this thread may end the app
             final List<Asset> got = l; final String fail = err;
             UI.post(() -> {
                 if (gone(a)) return;
                 wait.dismiss();
-                if (fail != null) { Toast.makeText(a, repo + ": " + fail, Toast.LENGTH_LONG).show(); return; }
-                if (got.isEmpty()) { Toast.makeText(a, repo + ": no .zip assets in its releases", Toast.LENGTH_LONG).show(); return; }
+                if (fail != null) { Toast.makeText(a, a.getString(R.string.s2s_fetch_repo_failed, repo, fail), Toast.LENGTH_LONG).show(); return; }
+                if (got.isEmpty()) { Toast.makeText(a, a.getString(R.string.s2s_fetch_no_zips, repo), Toast.LENGTH_LONG).show(); return; }
                 String[] labels = new String[got.size()];
                 for (int k = 0; k < got.size(); k++) labels[k] = got.get(k).label();
                 new AlertDialog.Builder(a).setTitle(repo)
                         .setItems(labels, (d, w) -> download(a, got.get(w), request))
-                        .setNegativeButton("Back", (d, w) -> dialog(a, request)).show();
+                        .setNegativeButton(R.string.s2_hint_back, (d, w) -> dialog(a, request)).show();
             });
         }, "driver-list").start();
     }
 
     private static void download(Activity a, Asset as, int request) {
-        AlertDialog wait = busy(a, "Downloading " + as.name + "…");
+        AlertDialog wait = busy(a, a.getString(R.string.s2s_fetch_downloading, as.name));
         new Thread(() -> {
             GpuDriver.Info i = null; String err = null;
-            try { i = fetch(a, as); } catch (Throwable e) { err = why(e); }   // a damaged zip throws unchecked exceptions too (DriverZip turns them into reasons)
+            try { i = fetch(a, as); } catch (Throwable e) { err = why(a, e); }   // a damaged zip throws unchecked exceptions too (DriverZip turns them into reasons)
             final GpuDriver.Info got = i; final String fail = err;
             if (got != null) GpuDriver.select(a, got);
             UI.post(() -> {
                 if (gone(a)) return;
                 wait.dismiss();
-                if (fail != null) { Toast.makeText(a, "Not installed: " + fail, Toast.LENGTH_LONG).show(); return; }
-                Toast.makeText(a, "Installed and picked " + got.label(), Toast.LENGTH_LONG).show();
+                if (fail != null) { Toast.makeText(a, a.getString(R.string.s2s_fetch_not_installed, fail), Toast.LENGTH_LONG).show(); return; }
+                Toast.makeText(a, a.getString(R.string.s2s_fetch_installed, got.label()), Toast.LENGTH_LONG).show();
                 GpuDriver.dialog(a, request);
             });
         }, "driver-download").start();
