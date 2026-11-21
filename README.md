@@ -14,14 +14,20 @@ Forked from Banana Native v0.1.1 by moceure, itself built on nxnative by seedds 
 
 ## Games
 
-The Legend of Zelda: Ocarina of Time is the focus of this fork. Status on the phone, from each game's note:
+Status on the phone and the frame rates measured there, from each game's note (POCO F7 Ultra, Snapdragon 8 Elite; 891.14 is Qualcomm's driver the app offers, Turnip the Mesa driver from its driver download):
 
-| Game | Title ID | Version | Status on Android |
-|---|---|---|---|
-| [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md) | `0400486024DEC000` | update v131072 | **In bring-up, gets into gameplay.** Opening and title movies at 60 fps; Link's house at about 30 fps (up to about 38 fps with FSR 1 in place of the game's upscaler network). Open: some UI text missing, an occasional process exit, the phone throttling |
-| [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md) | `040074A01BF12000` | update v458752 | **Plays**: about 30 fps on the POCO F7 Ultra with Turnip |
-| [Mario Kart World](dm/games/0400C3F00006E000/README.md) | `0400C3F00006E000` | 1.8.0 | **In bring-up, not playable**: the game starts, then runs out of memory before its first frame |
-| [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md) | `0400A3A01EE4C000` | update v655360 (Ver. 2.0.1) | **Experimental**: the opening and the first walking scene, then it stops before the character comes out of a Poké Ball (open) |
+| Game | Title ID | Version | Frame rate on the POCO F7 Ultra | Status on Android |
+|---|---|---|---|---|
+| [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md) | `0400486024DEC000` | update v131072 | about 30 fps in Kokiri Forest (the 30 fps cap); 17-18 fps in its heaviest views (Qualcomm 891.14) | **In bring-up, gets into gameplay**: Link's house, Kokiri Forest, Hyrule Field. Open: heavy scenes limited by the GPU, memory pressure |
+| [Donkey Kong Bananza](dm/games/040074A01BF12000/README.md) | `040074A01BF12000` | update v458752 | about 30 fps in the first level (measured on an Adreno 840 phone; not yet measured on the POCO) | **Plays** the first level |
+| [Mario Kart World](dm/games/0400C3F00006E000/README.md) | `0400C3F00006E000` | 1.8.0 | 26-51 fps in Time Trials (Turnip Gen8 V39) | **Plays** races with Turnip; Qualcomm's 891.x drivers crash in it |
+| [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md) | `0400A3A01EE4C000` | update v655360 (Ver. 2.0.1) | 60 fps in the first area (891.14) | **Experimental**: the opening and the first area; a long pause while one shader compiles |
+| [Hyrule Warriors: Age of Imprisonment](dm/games/04003F40232DE000/README.md) | `04003F40232DE000` | update v196608 | 60 fps in the opening, 30 fps in the first field (891.14) | **In bring-up**: the opening and the first field; battles not reached |
+| [Splatoon Raiders](dm/games/0400380020056000/README.md) | `0400380020056000` | update v65536 | 60 fps in menus; 27-56 fps in the hub (Turnip Gen8 V39) | **In bring-up**: menus and the hub; use Turnip (the 3D scenes come out white on 891.14) |
+| [Fire Emblem Fortune's Weave](dm/games/04007EF01F8AE000/README.md) | `04007EF01F8AE000` | v131072 | 30 fps, the game's own rate (891.14) | **In bring-up**: the opening's dialogue scenes; the opening movie is black |
+| [Mario Tennis Fever](dm/games/0400D4201C6EA000/README.md) | `0400D4201C6EA000` | update v327680 (1.1.1) | 60 fps on the practice court (891.14) | **In bring-up**: the title and the practice court; matches not checked yet |
+| [Star Fox](dm/games/0400E88025B1A000/README.md) | `0400E88025B1A000` | update v131072 | 60 fps at the title and menus, 30 fps in cutscenes (891.14) | **In bring-up**: up to the first mission; the picture is too bright |
+| [Yoshi and the Mysterious Book](dm/games/0400245021D2C000/README.md) | `0400245021D2C000` | update v131072 (Ver. 1.0.2) | 52-60 fps at the title and the first chapter's opening (891.14 and Turnip) | **In bring-up**: the first chapter's opening; colours over-exposed |
 
 A dump of another game build is refused by the build check, with a message that says which build the app needs. The [games table](dm/games/README.md#games) lists every profile in this tree, most of them nxnative's Switch 1 games for Apple platforms.
 

@@ -50,6 +50,25 @@ final class Game {
         list.add(g);
     }
 
+    /**
+     * When each game last started: game folder (gameDir) → milliseconds, in preferences of their own ("played"), so the game's process (GameActivity, which
+     * records a new run) never writes the launcher's list. The library's sort by last played reads them (LibraryOrder)
+     */
+    private static SharedPreferences played(Context c) { return Prefs.open(c, "played"); }
+
+    /** A new run of the game in that folder starts now (GameActivity.onCreate: not a screen created again, not a diagnosis run) */
+    static void played(Context c, String gameDir) {
+        if (gameDir == null || gameDir.isEmpty()) return;
+        played(c).edit().putLong(Frontend.normal(gameDir), System.currentTimeMillis()).commit();
+    }
+
+    /** Every game folder's last start (none: never started since the app records it) */
+    static java.util.Map<String, Long> playedTimes(Context c) {
+        java.util.Map<String, Long> out = new java.util.HashMap<>();
+        for (java.util.Map.Entry<String, ?> e : played(c).getAll().entrySet()) if (e.getValue() instanceof Long) out.put(e.getKey(), (Long) e.getValue());
+        return out;
+    }
+
     static void save(Context c, List<Game> games) {
         JSONArray a = new JSONArray();
         List<Game> once = new ArrayList<>();

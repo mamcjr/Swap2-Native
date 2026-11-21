@@ -184,18 +184,19 @@ static void rot_copy(VkCommandBuffer cb, unsigned k, uint32_t idx, vka_img *im, 
 
 // ---------- FSR 1 upscale: EASU into an intermediate image, then RCAS into the swapchain image (vka_present_fsr.h) ----------
 // DM_VK_FSR=1 replaces the bilinear blit, or the rotated copy, when the picture is scaled up; DM_VK_FSR_SHARP is RCAS's sharpness in stops (0 = the most,
-// each stop halves it; AMD's default 0.25). Both are live. The intermediate image has the picture's size on the window, one per frame in flight
-static struct { int state; VkFormat fmt; VkPipeline easu, rcas; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME][2]; VkSampler samp;
+// each stop halves it; AMD's default 0.25). Both are live. DM_VK_EASU_FULL=1 (live): AMD's full EASU instead of the lighter one (fsr_easu.frag's constant FULL;
+// docs/reference/rendering.md). The intermediate image has the picture's size on the window, one per frame in flight
+static struct { int state, full; VkFormat fmt; VkPipeline easu, rcas; VkPipelineLayout lay; VkDescriptorSetLayout dsl; VkDescriptorPool pool; VkDescriptorSet set[NFRAME][2]; VkSampler samp;
                 VkImage mid[NFRAME]; VkDeviceMemory mem[NFRAME]; VkImageView view[NFRAME]; uint32_t mw[NFRAME], mh[NFRAME]; } g_fsr;
 static int fsr_wanted(void) { return VKA_ENV("DM_VK_FSR", 0) != 0; }
-static VkPipeline fsr_pipe(const uint32_t *frag, size_t fsize, VkFormat fmt) {
+static VkPipeline fsr_pipe(const uint32_t *frag, size_t fsize, VkFormat fmt, const VkSpecializationInfo *spec) {
     VkShaderModule sm[2] = {0}; VkPipeline p = VK_NULL_HANDLE;
     VkShaderModuleCreateInfo mv = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof vka_fsr_vert, .pCode = vka_fsr_vert}, mf = mv;
     mf.codeSize = fsize; mf.pCode = frag;
     VkResult r = rk.vkCreateShaderModule(V.dev, &mv, NULL, &sm[0]);
     if (!r) r = rk.vkCreateShaderModule(V.dev, &mf, NULL, &sm[1]);
     VkPipelineShaderStageCreateInfo st[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = sm[0], .pName = "main"},
-                                             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = sm[1], .pName = "main"}};
+                                             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = sm[1], .pName = "main", .pSpecializationInfo = spec}};
     VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
     VkPipelineViewportStateCreateInfo vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
@@ -213,10 +214,23 @@ static VkPipeline fsr_pipe(const uint32_t *frag, size_t fsize, VkFormat fmt) {
     if (r) VRED("FSR: pipeline for format %d: %d", fmt, r);
     return r ? VK_NULL_HANDLE : p;
 }
-// The layout, sets, sampler and the EASU pipeline once, the RCAS pipeline per swapchain format: 1 = ready. A failure is logged once and leaves the bilinear blit
+// fsr_easu.frag's pipeline, the lighter EASU or (full) AMD's: its constant FULL (constant_id 0)
+static VkPipeline fsr_easu_pipe(int full) {
+    int32_t v = full; VkSpecializationMapEntry se = {0, 0, 4}; VkSpecializationInfo si = {1, &se, sizeof v, &v};
+    return fsr_pipe(vka_fsr_easu_frag, sizeof vka_fsr_easu_frag, VK_FORMAT_R8G8B8A8_UNORM, &si);
+}
+// The layout, sets, sampler and the EASU pipeline once (again when DM_VK_EASU_FULL changes), the RCAS pipeline per swapchain format: 1 = ready. A failure is
+// logged once and leaves the bilinear blit
 static int fsr_ready(VkFormat fmt) {
-    if (g_fsr.state > 0 && g_fsr.fmt == fmt) return 1;
     if (g_fsr.state < 0) return 0;
+    int full = VKA_ENV("DM_VK_EASU_FULL", 0) != 0;
+    if (g_fsr.state > 0 && full != g_fsr.full) {   // (no pass in flight reads the old pipeline)
+        vka_queue_idle(); rk.vkDestroyPipeline(V.dev, g_fsr.easu, NULL);
+        if (!(g_fsr.easu = fsr_easu_pipe(full))) { g_fsr.state = -1; return 0; }
+        g_fsr.full = full;
+        VLOG("FSR 1: %s EASU", full ? "AMD's full" : "the lighter");
+    }
+    if (g_fsr.state > 0 && g_fsr.fmt == fmt) return 1;
     if (!g_fsr.state) {
         if (!rk_load()) { g_fsr.state = -1; return 0; }
         VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
@@ -235,12 +249,13 @@ static int fsr_ready(VkFormat fmt) {
         if (!r) r = vk.vkAllocateDescriptorSets(V.dev, &ai, &g_fsr.set[0][0]);
         if (!r) r = vk.vkCreateSampler(V.dev, &si, NULL, &g_fsr.samp);
         if (r) { VRED("FSR: descriptor set, layout or sampler: %d; the picture is blitted", r); g_fsr.state = -1; return 0; }
-        if (!(g_fsr.easu = fsr_pipe(vka_fsr_easu_frag, sizeof vka_fsr_easu_frag, VK_FORMAT_R8G8B8A8_UNORM))) { g_fsr.state = -1; return 0; }
+        if (!(g_fsr.easu = fsr_easu_pipe(full))) { g_fsr.state = -1; return 0; }
+        g_fsr.full = full;
     }
     if (g_fsr.rcas) { vka_queue_idle(); rk.vkDestroyPipeline(V.dev, g_fsr.rcas, NULL); g_fsr.rcas = VK_NULL_HANDLE; }   // a new swapchain format: no pass in flight
-    if (!(g_fsr.rcas = fsr_pipe(vka_fsr_rcas_frag, sizeof vka_fsr_rcas_frag, fmt))) { g_fsr.state = -1; return 0; }
+    if (!(g_fsr.rcas = fsr_pipe(vka_fsr_rcas_frag, sizeof vka_fsr_rcas_frag, fmt, NULL))) { g_fsr.state = -1; return 0; }
     g_fsr.state = 1; g_fsr.fmt = fmt;
-    VLOG("FSR 1 upscale on (RCAS sharpness %.2f stops)", VKA_ENVF("DM_VK_FSR_SHARP", 0.25));
+    VLOG("FSR 1 upscale on (%s EASU, RCAS sharpness %.2f stops)", g_fsr.full ? "AMD's full" : "the lighter", VKA_ENVF("DM_VK_FSR_SHARP", 0.25));
     return 1;
 }
 // Frame k's intermediate image freed: only frame k's submissions use it, so the caller has waited for frame k's fence (or the queue idle). Its descriptor set

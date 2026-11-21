@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">Adicionar à tela inicial</string>
+    <string name="s2_shortcut_add_note">Um atalho na tela inicial do celular que abre este jogo</string>
+    <string name="s2_shortcut_unsupported">O app de tela inicial deste celular não aceita atalhos.</string>
+    <string name="s2_shortcut_gone">%1$s não está mais no %2$s. Adicione o jogo de novo para usar este atalho.</string>
+    <string name="s2_shortcut_missing">%1$s não foi encontrado: %2$s</string>
+    <string name="s2_shortcut_blocked_title">O atalho não apareceu na tela inicial?</string>
+    <string name="s2_shortcut_blocked">Nos celulares Xiaomi, Redmi e POCO, a tela inicial só adiciona atalhos com a permissão Atalhos na tela inicial. Permita-a para o %1$s nas permissões do app (Outras permissões) e adicione o atalho de novo.</string>
+    <string name="s2_shortcut_permissions">Permissões do app</string>
+</resources>

@@ -28,6 +28,8 @@ VkDeviceSize vcap_sub_off(const cap_tsub *subs, uint32_t i);
 void vcap_img_copy(VkCommandBuffer cb, vka_img *im, const cap_tsub *subs, uint32_t nsub, VkBuffer b, int to_image);
 // Level 0, layer 0, plane 0 of im, rows packed, into a malloc'd buffer; *n its size. NULL = not readable
 uint8_t *vcap_img_level0(vka_img *im, size_t *n);
+// The 64-bit hash the capture takes of pool blocks and, with DM_NVN_CAPTURE_IMAGES, of each image subresource before each submit (CAP_LHSH)
+uint64_t vcap_hash(const uint8_t *p, size_t n);
 // The presented texture's digest, as the capture and the replayer take it: SHA-256 of level 0 slice 0 with rows packed; pix (optional) gets the bytes, png (optional) a picture
 int vcap_digest(const tex_t *t, uint8_t md[32], uint64_t *bytes, uint32_t *w, uint32_t *h, uint32_t *fmt, const char *png, int flip, cap_buf *pix);
 // A PNG (8-bit RGBA) of rows packed in format f (the common colour formats; 0 = a format it cannot show). flip: bottom row first (a lower-left origin)
@@ -42,6 +44,19 @@ int vka_cap_treg(int id, tex_t *t, view_t *v, uint8_t *has_v, uint8_t *img, int 
 int vka_cap_sreg(int id, samp_par *p, int *n);
 int vka_cap_cpuw(uint64_t serial);
 vka_img *vka_cap_shared(const tex_t *t);
+// Whether a registered texture ID's pool slot names its image (the capture's cap_treg pad bit 1), and the replayer's ask for that image (vka_tex.c "Texture pool reads")
+int vka_cap_slot_named(int id);
+int vka_cap_slot_want(int id);
+// vka_worker.c: the queue and window origin of the submission being made; the GPU idle for the work handed to it, a park left parked (mtl_finish_handed)
+void vka_worker_active_queue(uint64_t *serial, int *origin_ll);
+void mtl_finish_handed(void);
+void vka_worker_park_hold(int on);   // a park waits for its producer however long the capture's or replay's steps take, and the parked queues are looked at only at their steps (on)
+void vka_worker_poll_now(void);
+// vka_exec.c: the render-condition decisions of a captured frame (CAP_RCND), recorded in recording order and replayed in it
+void vka_rc_record(int on);
+size_t vka_rc_recorded(const cap_rcnd **out);
+void vka_rc_replay(const cap_rcnd *d, size_t n);
+void vka_rc_replay_stats(uint64_t *same, uint64_t *off, uint64_t *left);      // that look, at a step: after its state, before its submission (the capture and the replayer alike)
 int vka_pools(uint64_t *lo, uint64_t *size, int max);
 int vka_placed_ranges(uint64_t *lo, uint64_t *size, int max);
 uint64_t vka_frame(void);

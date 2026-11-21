@@ -88,6 +88,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         }
         AutoDiag.screen(this);
         ExitWatch.game(this, id, getIntent().getStringExtra("name"), (saved == null || diagRun != null) && !hostRunning && !diagStale);
+        if (saved == null && !hostRunning && !diagIntent) Game.played(this, getIntent().getStringExtra("game"));   // the library's Last played (a player's run, not a diagnosis)
         try {
             Native.load(this, id);
         } catch (IllegalStateException e) {
@@ -520,6 +521,15 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             GameGraphics.env(this, id, env);   // per-title choices, before the player's environment overrides
             String lang = Prefs.gameLangCode(Prefs.gameLang(this, id));   // Game language (Game settings): the system language the host gives the game, else its default (US English)
             if (lang != null) env.add("DM_LANG=" + lang);
+            // the shared-font stand-in (dm/third_party/fonts, GameFonts): without a standard font the host has none on a phone (hle_sdk16.c looks for macOS's), and a game that
+            // reads the shared font crashes in its font code (Splatoon Raiders at boot); a DM_FONT_DIR line of the user's comes later and wins
+            try (java.io.InputStream fin = getAssets().open(GameFonts.ASSET)) {
+                File fontDir = new File(getFilesDir(), "fonts");
+                java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream(); byte[] b = new byte[65536]; int n;
+                while ((n = fin.read(b)) > 0) buf.write(b, 0, n);
+                GameFonts.place(fontDir, GameFonts.STANDARD, buf.toByteArray());
+                env.add(GameFonts.envLine(fontDir));
+            } catch (java.io.IOException e) { android.util.Log.w("Swap2Native", "the shared font stand-in is not placed: " + e.getMessage()); }
             // The frame hold of the APK's profile (fps_hold; DM_FPS_HOLD): a pack's game_profile.tsv is written once, when it is prepared, so a pack made before the row
             // changed would keep the old one. env.txt and the game's own lines still override it (they come after)
             if (prof != null && !prof.fpsHold.isEmpty()) env.add("DM_FPS_HOLD=" + prof.fpsHold);

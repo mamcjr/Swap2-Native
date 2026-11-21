@@ -344,12 +344,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             Operand[] offsets = new Operand[offsetsCount];
             Operand[] sources = new Operand[texOp.SourcesCount - offsetsCount];
 
-            int copyCount = 0;
+            // nxnative: the sources before the coordinates: the handle or the texture's array index, then, for a separate sampler that is an array too, its index
+            // (BindlessElimination's pool arrays: texture ID, then sampler ID; the SPIR-V generator reads them in that order, GenerateSampledImageLoad). Counting only
+            // the first left the sample built below one source short, a null (Fire Emblem Fortune's Weave: 79 pixel shaders whose register offsets are lowered here)
+            int leadCount = (isBindless || isIndexed ? 1 : 0) + (texOp.SamplerBinding >= 0 && resourceManager.IsArrayOfTexturesOrImages(texOp.SamplerBinding, isImage: false) ? 1 : 0);
 
-            if (isBindless || isIndexed)
-            {
-                copyCount++;
-            }
+            int copyCount = leadCount;
 
             Operand[] lodSources = new Operand[copyCount + coordsCount];
 
@@ -426,7 +426,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                 sources[dstIndex++] = texOp.GetSource(srcIndex++);
             }
 
-            int coordsIndex = isBindless || isIndexed ? 1 : 0;
+            int coordsIndex = leadCount;
 
             int componentIndex = texOp.Index;
 
@@ -437,7 +437,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                 dests[i] = texOp.GetDest(i);
             }
 
-            Operand bindlessHandle = isBindless || isIndexed ? sources[0] : null;
+            Operand[] bindlessHandle = sources[..leadCount];
 
             LinkedListNode<INode> oldNode = node;
 
@@ -479,13 +479,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                         newSources[coordsIndex + index] = coordPlusOffset;
                     }
 
-                    TextureOperation newTexOp = new(
+                    TextureOperation newTexOp = Derived(
+                        texOp,
                         Instruction.TextureSample,
-                        texOp.Type,
-                        texOp.Format,
                         texOp.Flags & ~(TextureFlags.Offset | TextureFlags.Offsets),
-                        texOp.Set,
-                        texOp.Binding,
                         1 << 3, // W component: i=0, j=0
                         [dests[destIndex++]],
                         newSources);
@@ -536,13 +533,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                     }
                 }
 
-                TextureOperation newTexOp = new(
+                TextureOperation newTexOp = Derived(
+                    texOp,
                     Instruction.TextureSample,
-                    texOp.Type,
-                    texOp.Format,
                     texOp.Flags & ~(TextureFlags.Offset | TextureFlags.Offsets),
-                    texOp.Set,
-                    texOp.Binding,
                     componentIndex,
                     dests,
                     sources);
@@ -560,10 +554,27 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             return node;
         }
 
+        // nxnative: an operation on texOp's texture that keeps its separate sampler: the constructor leaves SamplerBinding unset, which made a separate texture
+        // (BindlessElimination's pool arrays) read as a combined one, its sampler index source left over. A texture with no separate sampler is built as before
+        private static TextureOperation Derived(TextureOperation texOp, Instruction inst, TextureFlags flags, int index, Operand[] dests, Operand[] sources)
+        {
+            TextureOperation op = new(inst, texOp.Type, texOp.Format, flags, texOp.Set, texOp.Binding, index, dests, sources);
+
+            if (texOp.SamplerBinding >= 0)
+            {
+                op.TurnIntoArray(new SetBindingPair(texOp.Set, texOp.Binding), new SetBindingPair(texOp.SamplerSet, texOp.SamplerBinding));
+            }
+
+            return op;
+        }
+
+        // The sources before the coordinates (bindlessHandle: the handle or the array indexes, none for a bound texture), then rest
+        private static Operand[] Lead(Operand[] bindlessHandle, params Operand[] rest) => [.. bindlessHandle, .. rest];
+
         private static Operand[] InsertTextureBaseSize(
             LinkedListNode<INode> node,
             TextureOperation texOp,
-            Operand bindlessHandle,
+            Operand[] bindlessHandle,
             int coordsCount)
         {
             Operand[] texSizes = new Operand[coordsCount];
@@ -572,27 +583,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             {
                 texSizes[index] = Local();
 
-                Operand[] texSizeSources;
-
-                if (bindlessHandle != null)
-                {
-                    texSizeSources = [bindlessHandle, Const(0)];
-                }
-                else
-                {
-                    texSizeSources = [Const(0)];
-                }
-
-                node.List.AddBefore(node, new TextureOperation(
+                node.List.AddBefore(node, Derived(
+                    texOp,
                     Instruction.TextureQuerySize,
-                    texOp.Type,
-                    texOp.Format,
                     texOp.Flags,
-                    texOp.Set,
-                    texOp.Binding,
                     index,
                     [texSizes[index]],
-                    texSizeSources));
+                    Lead(bindlessHandle, Const(0))));
             }
 
             return texSizes;
@@ -602,7 +599,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             LinkedListNode<INode> node,
             TextureOperation texOp,
             Operand[] lodSources,
-            Operand bindlessHandle,
+            Operand[] bindlessHandle,
             int coordsCount,
             ShaderStage stage,
             Operand explicitLod)
@@ -619,16 +616,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                 // sampled. Not known here, and open: the sampler's LOD bias and min/max LOD, and a linear mipmap mode blending two levels
                 Operand levels = Local();
 
-                node.List.AddBefore(node, new TextureOperation(
+                node.List.AddBefore(node, Derived(
+                    texOp,
                     Instruction.TextureQuerySize,
-                    texOp.Type,
-                    texOp.Format,
                     texOp.Flags,
-                    texOp.Set,
-                    texOp.Binding,
                     3,
                     [levels],
-                    bindlessHandle != null ? [bindlessHandle, Const(0)] : [Const(0)]));
+                    Lead(bindlessHandle, Const(0))));
 
                 Operand lastLevel = Local();
                 Operand lodHalf = Local();
@@ -649,13 +643,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             {
                 lod = Local();
 
-                node.List.AddBefore(node, new TextureOperation(
+                node.List.AddBefore(node, Derived(
+                    texOp,
                     Instruction.Lod,
-                    texOp.Type,
-                    texOp.Format,
                     texOp.Flags,
-                    texOp.Set,
-                    texOp.Binding,
                     0,
                     [lod],
                     lodSources));
@@ -669,29 +660,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             {
                 texSizes[index] = Local();
 
-                Operand[] texSizeSources;
-
                 Operand sizeLevel = level ?? GenerateF2i(node, lod);
 
-                if (bindlessHandle != null)
-                {
-                    texSizeSources = [bindlessHandle, sizeLevel];
-                }
-                else
-                {
-                    texSizeSources = [sizeLevel];
-                }
-
-                node.List.AddBefore(node, new TextureOperation(
+                node.List.AddBefore(node, Derived(
+                    texOp,
                     Instruction.TextureQuerySize,
-                    texOp.Type,
-                    texOp.Format,
                     texOp.Flags,
-                    texOp.Set,
-                    texOp.Binding,
                     index,
                     [texSizes[index]],
-                    texSizeSources));
+                    Lead(bindlessHandle, sizeLevel)));
             }
 
             return texSizes;

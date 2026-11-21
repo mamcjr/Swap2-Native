@@ -247,8 +247,107 @@ OpFunctionEnd
 '''
 
 
+# A compute shader with the translator's TexelFetchScale (HelperFunctionManager.cs, the compute form: the coordinate and the texture's index, both through the
+# caller's Function variables; the scale from the support buffer's RenderScale member, member 5), called once; its result written to workgroup memory
+CS_SCALE = '''OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpName %support_buffer "support_buffer"
+OpName %out "out"
+OpDecorate %arr ArrayStride 16
+OpMemberDecorate %sb 0 Offset 0
+OpMemberDecorate %sb 1 Offset 16
+OpMemberDecorate %sb 2 Offset 144
+OpMemberDecorate %sb 3 Offset 160
+OpMemberDecorate %sb 4 Offset 176
+OpMemberDecorate %sb 5 Offset 192
+OpDecorate %sb Block
+OpDecorate %support_buffer DescriptorSet 0
+OpDecorate %support_buffer Binding 0
+%void = OpTypeVoid
+%fnv = OpTypeFunction %void
+%int = OpTypeInt 32 1
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%bool = OpTypeBool
+%v4 = OpTypeVector %float 4
+%u73 = OpConstant %uint 73
+%arr = OpTypeArray %v4 %u73
+%sb = OpTypeStruct %uint %v4 %v4 %v4 %int %arr
+%psb = OpTypePointer Uniform %sb
+%support_buffer = OpVariable %psb Uniform
+%pf = OpTypePointer Function %int
+%pff = OpTypePointer Function %float
+%pfb = OpTypePointer Function %bool
+%pu = OpTypePointer Uniform %float
+%pw = OpTypePointer Workgroup %int
+%out = OpVariable %pw Workgroup
+%fni = OpTypeFunction %int %pf %pf
+%i0 = OpConstant %int 0
+%i1 = OpConstant %int 1
+%i5 = OpConstant %int 5
+%i7 = OpConstant %int 7
+%one = OpConstant %float ONE
+%main = OpFunction %void None %fnv
+%m0 = OpLabel
+%a0 = OpVariable %pf Function
+%a1 = OpVariable %pf Function
+%r = OpVariable %pf Function
+OpStore %a0 %i7
+OpStore %a1 %i0
+%c = OpFunctionCall %int %scale %a0 %a1
+OpStore %r %c
+%rv = OpLoad %int %r
+OpStore %out %rv
+OpReturn
+OpFunctionEnd
+%scale = OpFunction %int None %fni
+%p0 = OpFunctionParameter %pf
+%p1 = OpFunctionParameter %pf
+%h0 = OpLabel
+%vi = OpVariable %pf Function
+%vs = OpVariable %pff Function
+%vb = OpVariable %pfb Function
+%x1 = OpLoad %int %p1
+%x2 = OpIAdd %int %i1 %x1
+OpStore %vi %x2
+%x3 = OpLoad %int %vi
+%x4 = OpAccessChain %pu %support_buffer %i5 %x3 %i0
+%x5 = OpLoad %float %x4
+OpStore %vs %x5
+%x6 = OpLoad %float %vs
+%x7 = OpFOrdEqual %bool %x6 %one
+OpStore %vb %x7
+%x8 = OpLoad %bool %vb
+OpSelectionMerge %h2 None
+OpBranchConditional %x8 %h1 %h2
+%h1 = OpLabel
+%y0 = OpLoad %int %p0
+OpReturnValue %y0
+%h2 = OpLabel
+%y1 = OpLoad %int %p0
+%y2 = OpConvertSToF %float %y1
+%y3 = OpLoad %float %vs
+%y4 = OpFMul %float %y2 %y3
+%y5 = OpConvertFToS %int %y4
+OpReturnValue %y5
+OpFunctionEnd
+'''
+
+
 @unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val'), 'SPIRV-Tools not installed')
 class Rewrites(unittest.TestCase):
+    def test_unit_render_scale(self):
+        m = self.module(CS_SCALE.replace('ONE', '1'))
+        self.assertEqual(spv.unit_render_scale(m), 1)
+        self.assertEqual(sum(1 for x in m.ins if x[0] & 0xffff == spv.OP_FUNCTION), 1)   # the helper is gone
+        self.assertEqual(spv.promote_locals(m), (3, 0))   # the call's two temporaries and its result
+        text = self.valid(m)
+        if text: self.assertNotIn('OpFunctionCall', text); self.assertIn('OpStore %out %int_7', text)
+        self.assertEqual(spv.unit_render_scale(self.module(CS_SCALE.replace('ONE', '2'))), 0)   # a comparison with another scale: not the helper
+
+
     def module(self, text):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / 'a.spvasm').write_text(text)

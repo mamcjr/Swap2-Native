@@ -36,9 +36,14 @@ enum {
     CAP_TPIX = CAP_TAG('T', 'P', 'I', 'X'),   // contents of one texture whose content lives only in Metal: cap_tpix + cap_tsub + bytes per level and slice
     CAP_SEGM = CAP_TAG('S', 'E', 'G', 'M'),   // one command segment of submit k: {u32 index, u32 length, bytes}
     CAP_SUBM = CAP_TAG('S', 'U', 'B', 'M'),   // submit k: {u32 n, u32 segment[n]}
+    CAP_CSIG = CAP_TAG('C', 'S', 'I', 'G'),   // Android: step k is the game's CPU signal of an event (nvnEventSignal, cap_csig) between submits, which a parked GPU wait may be waiting for
+    CAP_RCND = CAP_TAG('R', 'C', 'N', 'D'),   // Android: the frame's render-condition decisions in recording order (cap_rcnd[]), which depend on when the GPU finished each report
+    CAP_SUBQ = CAP_TAG('S', 'U', 'B', 'Q'),   // Android: submit k's NVN queue and its window origin (cap_subq), so the replay parks a GPU wait on the queue it parked on live
     CAP_PRES = CAP_TAG('P', 'R', 'E', 'S'),   // the present: cap_pres
     CAP_PHSH = CAP_TAG('P', 'H', 'S', 'H'),   // after the frame: every region's 4 KiB block hashes as the live run left them ({u32 region, u32 blocks, u64 hash[blocks]}...), for the replayer to compare
     CAP_LPIX = CAP_TAG('L', 'P', 'I', 'X'),   // the presented frame's pixels as the live run read them (level 0, rows packed, the format and size of cap_pres), for a pixel comparison; optional
+    CAP_LIMG = CAP_TAG('L', 'I', 'M', 'G'),   // Android, optional (DM_NVN_CAPTURE_IMAGES): one GPU-written image as the live run left it at the present: cap_limg + cap_tsub + bytes, for the replayer to compare
+    CAP_LHSH = CAP_TAG('L', 'H', 'S', 'H'),   // Android, optional (DM_NVN_CAPTURE_IMAGES): before submit k, a hash of each subresource of every GPU-written image ({u64 serial, u32 n, u32 0, u64 hash[n]}...)
     CAP_END_ = CAP_TAG('E', 'N', 'D', ' '),
 };
 enum { CAP_RAW = 0, CAP_LZFSE = 1 };
@@ -74,6 +79,10 @@ enum { CAP_TK_LIVE = 1, CAP_TK_CPU = 2 };
 typedef struct { tex_t t; uint32_t kind, pad; } cap_tknd;   // t: relocated
 typedef struct { tex_t t; uint32_t pixfmt, type, width, height, depth, levels, slices, samples, nsub, pad; } cap_tpix;   // t: relocated, the texture to create and fill
 typedef struct { uint32_t level, slice, w, h, d, plane; uint64_t row, img, bytes; } cap_tsub;   // plane 0: color or depth, 1: stencil
+typedef struct { uint64_t serial; uint32_t pixfmt, width, height, depth, levels, layers, nsub, kind; } cap_limg;
+typedef struct { uint64_t queue; int32_t origin_ll, pad; } cap_subq;
+typedef struct { uint64_t addr; uint32_t skip, pad; } cap_rcnd;   // addr: the condition's report address (a live address: the replay maps regions there); skip: 1 = not drawn
+typedef struct { uint64_t word; uint32_t mode, value; } cap_csig;   // word: CAP_ADDR of the event's word; mode: NVNeventSignalMode (ADD adds, otherwise writes)   // queue: the NVN queue's serial (mtl_queue_activate)   // serial: the texture the live image was made for; pixfmt a VkFormat
 typedef struct { uint64_t tex; int32_t crop[4]; uint8_t sha256[32]; uint64_t bytes; uint32_t width, height, pixfmt, frame; double capture_ms; } cap_pres;   // tex: CAP_OBJ(CAP_K_TEX)
 
 // The field walk: every pointer or address a record's payload holds, for capture (encode) and replay (decode) alike.

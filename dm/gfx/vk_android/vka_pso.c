@@ -9,6 +9,7 @@
 #include "vka_pwlist.h"
 #include "vka_compile_gate.h"
 #include "vka_psogate.h"
+#include "vka_deadly.h"
 #include "vka_cachewrite.h"
 #include "vk_prewarm_seed.h"   // the profile's seed list (dm/games/<id>/vk_prewarm.bin; dm/games/game.py seed): dm_vk_prewarm_seed, dm_vk_prewarm_seed_len (0: none)
 #include "../nvn/nvn_mtl.h"
@@ -648,50 +649,62 @@ void crash_set_fatal_hook(void (*fn)(int sig));
 // Pipelines that killed the process on this driver (<cache file>.deadly, beside the .heavy list): found 2026-11-12 on Ocarina of Time with Turnip V39 and V39-patched on the
 // Adreno 830, which both died inside libvulkan_freedreno compiling mesh shader 73dc0b90c4082e43 (V39: its compute fallback, 8.7 s; V39-patched: the native mesh pipeline,
 // 6.5 s), with the process's memory maps at 100 % of vm.max_map_count, on every run from the same place, so the game never got past it. The crash handler (crash.c,
-// crash_set_fatal_hook) writes the key of each build that had been running DM_VK_DEADLY_MS (default 2000) or more when the process died; later runs on that driver and
-// with that shader library do not compile it again: its draws or dispatches are skipped with a [RED] line, a missing object instead of a dead game. This is a workaround
-// for a driver bug (the cause is inside the driver's compiler, which we cannot fix); the file is stamped with the shader library (a changed translation is tried again),
-// and DM_VK_DEADLY=0 ignores it (an A/B, or to try a newer driver build under the same name)
+// crash_set_fatal_hook, on the crashing thread) writes the build that thread was in, whatever its length, and each other build that had been running DM_VK_DEADLY_MS
+// (default 2000) or more when the process died (vka_deadly.h: which record each leaves, how records match); later runs on that driver, host build and shader library do
+// not compile it again: its draws or dispatches are skipped with a [RED] line, a missing object instead of a dead game. The crashing thread's build is recorded at any
+// length since DroidPlay Core 1ae945d2 (MIT; a Retroid Pocket G2, Adreno 735, Qualcomm V@0762, crashed compiling Ocarina of Time's first compute pipeline
+// a039399e6336de1b at every start, a short build the 2 s rule never kept). Nothing is written while builds run (the slots in g_build are what build_begin keeps anyway):
+// the crash handler writes, so a build costs nothing more. This is a workaround for a driver bug (the cause is inside the driver's compiler, which we cannot fix); the
+// file is stamped with the shader library, the driver (vendor, device, version, pipeline cache UUID) and the host build (DM_BUILD_COMMIT), so an update of any of them
+// tries its pipelines again, and DM_VK_DEADLY=0 ignores it (an A/B). DM_VK_PIPE_CRASH=<16-hex key> crashes the builds of that shader on purpose (abort inside the build),
+// to try the guard on a phone whose driver compiles everything
 enum { NDEADLY = 256 };
-static uint64_t g_deadly[NDEADLY], g_deadly_min_ns = 2000000000ull; static _Atomic int g_deadly_n; static char g_deadly_path[1100];
-static int deadly_has(uint64_t k) { int n = atomic_load(&g_deadly_n); for (int i = 0; i < n && k; i++) if (g_deadly[i] == k) return 1; return 0; }
+static vkdl_rec g_deadly[NDEADLY]; static uint64_t g_deadly_min_ns = 2000000000ull, g_deadly_stamp; static _Atomic int g_deadly_n; static char g_deadly_path[1100];
+static uint64_t g_pipe_crash;   // DM_VK_PIPE_CRASH (build_reg)
+static int deadly_has(uint64_t pre, uint64_t fs) { return vkdl_match(g_deadly, atomic_load(&g_deadly_n), pre, fs); }
+static int deadly_has_rec(vkdl_rec r) { int n = atomic_load(&g_deadly_n); for (int i = 0; i < n; i++) if (g_deadly[i].pre == r.pre && g_deadly[i].fs == r.fs) return 1; return 0; }
 static void deadly_note(int sig) {   // signal handler context (crash.c): no locks, no allocation, open / write only
     (void)sig;
     if (!g_deadly_path[0]) return;
-    uint64_t t = now_ns(), min = g_deadly_min_ns;
+    uint64_t t = now_ns(), min = g_deadly_min_ns; pid_t me = gettid();
     int fd = -1;
     for (int i = 0; i < NBUILD; i++) {
-        if (atomic_load(&g_build[i].tid) <= 0 || t - atomic_load(&g_build[i].t0) < min) continue;
-        uint64_t k = atomic_load(&g_build[i].vs); if (!k) k = atomic_load(&g_build[i].fs);
-        if (!k || deadly_has(k)) continue;
+        pid_t id = atomic_load(&g_build[i].tid); if (id <= 0) continue;
+        uint64_t t0 = atomic_load(&g_build[i].t0); vkdl_rec r;
+        if (!vkdl_choose(id == me, t > t0 ? t - t0 : 0, min, atomic_load(&g_build[i].vs), atomic_load(&g_build[i].fs), &r) || deadly_has_rec(r)) continue;
         if (fd < 0 && (fd = open(g_deadly_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644)) < 0) return;
-        char b[18]; for (int j = 0; j < 16; j++) b[j] = "0123456789abcdef"[(k >> (60 - 4 * j)) & 15]; b[16] = '\n';
-        if (write(fd, b, 17) < 0) break;
-        static const char m[] = "[dm] [vk] [RED] the process died while the driver compiled this pipeline: its shader is left out on this driver from the next run (DM_VK_DEADLY)\n";
-        if (write(2, m, sizeof m - 1) < 0) {}
+        char b[34]; vkdl_line(&r, b);
+        if (write(fd, b, sizeof b) < 0) break;
+        static const char ms[] = "[dm] [vk] [RED] the process crashed in this thread's pipeline build: its shaders are left out on this driver from the next run (DM_VK_DEADLY)\n";
+        static const char ml[] = "[dm] [vk] [RED] the process died while the driver had been compiling this pipeline for long: its shader is left out on this driver from the next run (DM_VK_DEADLY)\n";
+        if (id == me ? write(2, ms, sizeof ms - 1) : write(2, ml, sizeof ml - 1)) {}
     }
     if (fd >= 0) close(fd);
 }
 static void deadly_load(void) {   // (pc_open_once, after the cache stamp: g_pc_lib)
     if (!g_pc_path[0]) return;
     g_deadly_min_ns = (uint64_t)VKA_ENV("DM_VK_DEADLY_MS", 2000) * 1000000ull;
+    const char *host = getenv("DM_BUILD_COMMIT");
+    g_deadly_stamp = vkdl_stamp(g_pc_lib, V.props.vendorID, V.props.deviceID, V.props.driverVersion, V.props.pipelineCacheUUID, host);
     snprintf(g_deadly_path, sizeof g_deadly_path, "%s.deadly", g_pc_path);
     FILE *f = fopen(g_deadly_path, "r");
-    char ln[64]; uint64_t lib = 0; int stamped = 0, n = 0;
-    if (f && fgets(ln, sizeof ln, f) && !strncmp(ln, "lib ", 4)) { lib = strtoull(ln + 4, NULL, 16); stamped = 1; }
-    if (f && stamped && lib != g_pc_lib) {
+    char ln[256]; uint64_t st = 0; int stamped = 0, n = 0;
+    if (f && fgets(ln, sizeof ln, f) && !strncmp(ln, "stamp ", 6)) { st = strtoull(ln + 6, NULL, 16); stamped = 1; }
+    if (f && (!stamped || st != g_deadly_stamp)) {   // (before 2026-11-17 the stamp was the library's alone, "lib <id>", with one key a line: such a file is dropped too)
         fclose(f); f = NULL; unlink(g_deadly_path);
-        VLOG("pipelines that killed the driver before: %s was of shader library %016llx, now %016llx: removed, they are compiled again", g_deadly_path, (unsigned long long)lib, (unsigned long long)g_pc_lib);
+        VLOG("pipelines that killed the driver before: %s was made under %s %016llx, now %016llx (shader library %016llx, driver %08x, host build %s): removed, they are compiled again",
+             g_deadly_path, stamped ? "stamp" : "an older format,", (unsigned long long)st, (unsigned long long)g_deadly_stamp, (unsigned long long)g_pc_lib, V.props.driverVersion, host && *host ? host : "(unknown)");
     }
-    if (f) { while (fgets(ln, sizeof ln, f)) { uint64_t k = strtoull(ln, NULL, 16); if (k && n < NDEADLY && !deadly_has(k)) { g_deadly[n++] = k; atomic_store(&g_deadly_n, n); } } fclose(f); }
-    if (!stamped || !f) {   // a new file starts with the library's stamp; an unstamped one is rewritten stamped, keeping its keys
+    if (f) { vkdl_rec r; while (fgets(ln, sizeof ln, f)) if (vkdl_parse(ln, &r) && n < NDEADLY && !deadly_has_rec(r)) { g_deadly[n++] = r; atomic_store(&g_deadly_n, n); } fclose(f); }
+    else {   // a new file starts with the stamp, and a line naming what it is made of
         FILE *w = fopen(g_deadly_path, "w");
-        if (w) { fprintf(w, "lib %016llx\n", (unsigned long long)g_pc_lib); for (int i = 0; i < n; i++) fprintf(w, "%016llx\n", (unsigned long long)g_deadly[i]); fclose(w); }
+        if (w) { fprintf(w, "stamp %016llx\n# shader library %016llx, driver %04x:%04x version %08x, host build %s\n", (unsigned long long)g_deadly_stamp, (unsigned long long)g_pc_lib,
+                         V.props.vendorID, V.props.deviceID, V.props.driverVersion, host && *host ? host : "(unknown)"); fclose(w); }
     }
     bb_open();   // (the run before, killed from outside while it compiled: its long builds join the list; then this run's own record)
     if (!VKA_ENV("DM_VK_DEADLY", 1)) { if (n) VLOG("pipelines that killed the driver before: %d in %s, compiled anyway (DM_VK_DEADLY=0)", n, g_deadly_path); atomic_store(&g_deadly_n, 0); return; }
-    for (int i = 0; i < n; i++) VRED("shader %016llx killed this driver while its pipeline was compiled in an earlier run (%s): not compiled, its draws and dispatches are skipped (DM_VK_DEADLY=0 tries it)",
-                                     (unsigned long long)g_deadly[i], g_deadly_path);
+    for (int i = 0; i < n; i++) VRED("shaders %016llx %016llx (0: any) crashed or killed this driver while their pipeline was compiled in an earlier run (%s): not compiled, their draws and dispatches are skipped (DM_VK_DEADLY=0 tries them)",
+                                     (unsigned long long)g_deadly[i].pre, (unsigned long long)g_deadly[i].fs, g_deadly_path);
 }
 // ---------- Builds in flight, kept where a kill from outside leaves them (<cache file>.building) ----------
 // deadly_note runs in the crash handler, so it sees a death the process can catch (a fault inside the driver's compiler). A SIGKILL runs no handler: Android's low-memory
@@ -704,7 +717,7 @@ static void deadly_load(void) {   // (pc_open_once, after the cache stamp: g_pc_
 // every build that had been running DM_VK_DEADLY_MS or more goes onto the .deadly list, as deadly_note's do. A run the player stopped, or one whose end is not known,
 // puts nothing on the list (a long compile under the player's own swipe is not the driver's fault). DM_VK_BUILDING=0: no file
 enum { BB_MAGIC = 0x62626c64 };
-typedef struct { uint64_t magic, lib, now_ns, wall_ms, avail_kb, rss_kb, low_avail_kb, ticks; struct { uint64_t vs, fs, t0; } b[NBUILD]; } bb_file;
+typedef struct { uint64_t magic, stamp, now_ns, wall_ms, avail_kb, rss_kb, low_avail_kb, ticks; struct { uint64_t vs, fs, t0; } b[NBUILD]; } bb_file;
 static bb_file *g_bb; static pthread_mutex_t g_bb_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_bb_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t bb_wall_ms(void) { struct timespec t; clock_gettime(CLOCK_REALTIME, &t); return (uint64_t)t.tv_sec * 1000ull + (uint64_t)t.tv_nsec / 1000000ull; }
 static void bb_mem(uint64_t *avail_kb, uint64_t *rss_kb) {
@@ -735,10 +748,10 @@ static void bb_begin(int i, uint64_t vs, uint64_t fs, uint64_t t0) {
     pthread_mutex_lock(&g_bb_mu); pthread_cond_signal(&g_bb_cv); pthread_mutex_unlock(&g_bb_mu);
 }
 static void bb_end(int i) { bb_file *f = g_bb; if (f && i >= 0) { f->b[i].vs = 0; f->b[i].fs = 0; f->now_ns = now_ns(); } }
-static void deadly_add_file(uint64_t k) {   // (deadly_load's thread: the list is not read by others yet)
-    int n = atomic_load(&g_deadly_n); if (!k || deadly_has(k) || n >= NDEADLY) return;
-    g_deadly[n] = k; atomic_store(&g_deadly_n, n + 1);
-    FILE *w = fopen(g_deadly_path, "a"); if (w) { fprintf(w, "%016llx\n", (unsigned long long)k); fclose(w); }
+static void deadly_add_file(vkdl_rec r) {   // (deadly_load's thread: the list is not read by others yet)
+    int n = atomic_load(&g_deadly_n); if ((!r.pre && !r.fs) || deadly_has_rec(r) || n >= NDEADLY) return;
+    g_deadly[n] = r; atomic_store(&g_deadly_n, n + 1);
+    FILE *w = fopen(g_deadly_path, "a"); if (w) { char b[34]; vkdl_line(&r, b); fwrite(b, 1, sizeof b, w); fclose(w); }
 }
 // The file of the run before (read, judged, logged), then this run's: called once, from deadly_load, with the cache's path and stamp known
 static void bb_open(void) {
@@ -750,7 +763,7 @@ static void bb_open(void) {
     else snprintf(path, sizeof path, "%s.building", g_pc_path);
     int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644); if (fd < 0) return;
     bb_file old; ssize_t got = read(fd, &old, sizeof old);
-    if (got == (ssize_t)sizeof old && old.magic == BB_MAGIC && old.lib == g_pc_lib) {
+    if (got == (ssize_t)sizeof old && old.magic == BB_MAGIC && old.stamp == g_deadly_stamp) {
         int nb = 0, nlong = 0; char list[600] = ""; size_t ln = 0;
         for (int i = 0; i < NBUILD; i++) {
             uint64_t k = old.b[i].vs ? old.b[i].vs : old.b[i].fs; if (!k) continue;
@@ -769,27 +782,31 @@ static void bb_open(void) {
                  (unsigned long long)(old.rss_kb >> 10), !pe || reason < 0 ? "not known" : !same ? "another run's (times apart)" : killed ? "killed by a signal from outside" : "not a kill from outside");
             if (killed && nlong)
                 for (int i = 0; i < NBUILD; i++) {
-                    uint64_t k = old.b[i].vs ? old.b[i].vs : old.b[i].fs;
-                    if (!k || old.now_ns <= old.b[i].t0 || old.now_ns - old.b[i].t0 < g_deadly_min_ns || deadly_has(k)) continue;
-                    deadly_add_file(k);
+                    uint64_t k = old.b[i].vs ? old.b[i].vs : old.b[i].fs; vkdl_rec r;
+                    if (old.now_ns <= old.b[i].t0 || !vkdl_choose(0, old.now_ns - old.b[i].t0, g_deadly_min_ns, old.b[i].vs, old.b[i].fs, &r) || deadly_has_rec(r)) continue;
+                    deadly_add_file(r);
                     VRED("shader %016llx: the process was killed from outside while the driver had been compiling its pipeline for %.1f s (%llu MiB available at the last sample): left out on this driver from this run on (%s; DM_VK_DEADLY=0 tries it)",
                          (unsigned long long)k, (old.now_ns - old.b[i].t0) / 1e9, (unsigned long long)(old.avail_kb >> 10), g_deadly_path);
                 }
         }
     }
-    bb_file z = {.magic = BB_MAGIC, .lib = g_pc_lib};
+    bb_file z = {.magic = BB_MAGIC, .stamp = g_deadly_stamp};
     if (ftruncate(fd, 0) || pwrite(fd, &z, sizeof z, 0) != (ssize_t)sizeof z) { close(fd); return; }
     void *m = mmap(NULL, sizeof z, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); close(fd);
     if (m == MAP_FAILED) return;
     g_bb = m;
     pthread_t th; if (!pthread_create(&th, NULL, bb_main, NULL)) pthread_detach(th);
 }
-static void build_reg(void) { crash_set_wait_dump(vka_pso_wait_dump); crash_set_fatal_hook(deadly_note); }
-// A pipeline whose shader is on the list: not handed to the driver (logged the first 16 times)
+static void build_reg(void) {
+    crash_set_wait_dump(vka_pso_wait_dump); crash_set_fatal_hook(deadly_note);
+    const char *pc = getenv("DM_VK_PIPE_CRASH"); g_pipe_crash = pc && *pc ? strtoull(pc, NULL, 16) : 0;
+    if (g_pipe_crash) VRED("DM_VK_PIPE_CRASH=%016llx: a build of that shader's pipelines crashes the process on purpose (a test of the .deadly list)", (unsigned long long)g_pipe_crash);
+}
+// A pipeline or part whose shaders are on the list: not handed to the driver (logged the first 16 times)
 static int deadly_skip(const char *what, uint64_t pre, uint64_t fs) {
-    uint64_t k = pre ? pre : fs;
-    if (!atomic_load(&g_deadly_n) || !deadly_has(k)) return 0;
-    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("%s of shader %016llx not compiled: it killed this driver in an earlier run (%s); its work is skipped", what, (unsigned long long)k, g_deadly_path);
+    if (!atomic_load(&g_deadly_n) || !deadly_has(pre, fs)) return 0;
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 16) VRED("%s of shaders %016llx %016llx not compiled: its build crashed or killed this driver in an earlier run (%s); its work is skipped",
+                                                                 what, (unsigned long long)pre, (unsigned long long)fs, g_deadly_path);
     return 1;
 }
 static int build_begin(const char *what, uint64_t vs, uint64_t fs) {
@@ -797,7 +814,9 @@ static int build_begin(const char *what, uint64_t vs, uint64_t fs) {
     for (int i = 0; i < NBUILD; i++) { pid_t z = 0; if (atomic_compare_exchange_strong(&g_build[i].tid, &z, -1)) {
         uint64_t t0 = now_ns();
         atomic_store(&g_build[i].what, what); atomic_store(&g_build[i].vs, vs); atomic_store(&g_build[i].fs, fs); atomic_store(&g_build[i].spec, t_spec); atomic_store(&g_build[i].t0, t0);
-        atomic_store(&g_build[i].tid, gettid()); bb_begin(i, vs, fs, t0); return i; } }
+        atomic_store(&g_build[i].tid, gettid()); bb_begin(i, vs, fs, t0);
+        if (g_pipe_crash && (vs == g_pipe_crash || fs == g_pipe_crash)) { VRED("%s of shaders %016llx %016llx: crashing on purpose (DM_VK_PIPE_CRASH)", what, (unsigned long long)vs, (unsigned long long)fs); abort(); }
+        return i; } }
     return -1;
 }
 // Shaders (pre-rasterization, compute or, for a fragment library part, fragment keys) whose build took DM_VK_PREWARM_HEAVY_MS (default 1000; 0 = none remembered) or
@@ -987,7 +1006,7 @@ static VkPipeline lib_make(int kind, const void *key, size_t klen, VkGraphicsPip
     if (slot) *slot = p ? (void *)p : LIB_REFUSED;
     pthread_cond_broadcast(&g_lib_cv);
     pthread_mutex_unlock(&g_mu);
-    if (r == VK_ERROR_INITIALIZATION_FAILED && deadly_has(vs ? vs : fs)) {}   // (left out on purpose: not a refusal, which would start the probe and count toward turning GPL off)
+    if (r == VK_ERROR_INITIALIZATION_FAILED && deadly_has(vs, fs)) {}   // (left out on purpose: not a refusal, which would start the probe and count toward turning GPL off)
     else if (r) { if (refused) *refused = r; static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("graphics pipeline library (%s): %d; the whole pipeline is made instead", g_lib_name[kind], r); }
     else if (ms_ > 50) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 100) VLOG("graphics pipeline library (%s) took %.0f ms", g_lib_name[kind], ms_); }
     return p;
@@ -1124,6 +1143,7 @@ static VkPipeline gpl_link(pstate *P, const vka_gkey *k) {
         if (!(part[nparts++] = lib_make(L_FO, &key, sizeof key, &ci, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT, NULL, 0, 0))) return VK_NULL_HANDLE; }
     VkPipelineLibraryCreateInfoKHR libs = {VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = nparts, .pLibraries = part};
     VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &libs, .layout = P->ci.layout};   // no LINK_TIME_OPTIMIZATION: the fast link
+    if (deadly_skip("graphics pipeline link", P->vs_key, P->fs_key)) return VK_NULL_HANDLE;   // (a link that crashed: the whole pipeline is skipped too)
     uint64_t t0 = now_ns();
     int bs = build_begin("graphics pipeline (no cache)", P->vs_key, P->fs_key);
     VkPipeline p = VK_NULL_HANDLE; VkResult r = vk.vkCreateGraphicsPipelines(V.dev, VK_NULL_HANDLE, 1, &ci, NULL, &p);
@@ -1414,11 +1434,13 @@ static int pw_save(void) {
 
     char tmp[1120]; snprintf(tmp, sizeof tmp, "%s.tmp", g_pw_path);
     FILE *f = fopen(tmp, "wb");
-    int ok = f && fwrite(out, 1, w_off, f) == w_off && !fclose(f) && !rename(tmp, g_pw_path);
+    // The stream is closed exactly once: fclose ends it even when it fails, so closing it again on the failure path (a failed fclose or rename) was undefined behaviour
+    // (the same bug Banana Native v0.3.44 fixed in its pc_write_atomic)
+    int wrote = f && fwrite(out, 1, w_off, f) == w_off, closed = f ? fclose(f) == 0 : 0;
+    int ok = wrote && closed && !rename(tmp, g_pw_path);
     free(out);
     if (ok && g_pw_import[0]) unlink(g_pw_import);   // the imported keys are in g_pw_path now
     if (!ok) {
-        if (f) fclose(f);
         unlink(tmp);
         static _Atomic int k; if (atomic_fetch_add(&k, 1) < 2) VRED("prewarm list not written to %s", g_pw_path);
         pthread_mutex_lock(&g_pw_mu); g_pw_dirty = 1; pthread_mutex_unlock(&g_pw_mu);
@@ -1796,9 +1818,11 @@ static gval *gfx_obtain(const gkey_full *fk, uint64_t h, size_t len, vka_shader 
         if (P && gpl_on() && pstate_fill(P, sh, lay, k)) {   // (the cache-only try needs pipelineCreationCacheControl, which GPL is on with)
             P->ci.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
             uint64_t t0 = now_ns();
-            int bs = build_begin("graphics pipeline (cache probe)", 0, 0);
-            VkResult r = vk.vkCreateGraphicsPipelines(V.dev, g_pc, 1, &P->ci, NULL, &p);
-            build_end(bs);
+            VkResult r = VK_PIPELINE_COMPILE_REQUIRED;   // (a pipeline on the .deadly list: not tried, a miss; its build is refused too)
+            if (!deadly_skip("graphics pipeline (cache probe)", P->vs_key, P->fs_key)) {
+                int bs = build_begin("graphics pipeline (cache probe)", P->vs_key, P->fs_key);
+                r = vk.vkCreateGraphicsPipelines(V.dev, g_pc, 1, &P->ci, NULL, &p);
+                build_end(bs); }
             uint64_t dns = now_ns() - t0;
             if (r != VK_SUCCESS) p = VK_NULL_HANDLE;
             pthread_mutex_lock(&g_mu);
@@ -1835,9 +1859,11 @@ static void gfx_build(gval *g, size_t len, vka_shader *const sh[VKA_NSTAGE], con
             // The pipeline cache may already hold the optimized one (made in an earlier run): then it is made at once (a fraction of a millisecond), else linked from parts
             P->ci.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
             uint64_t t0 = now_ns();
-            int bs = build_begin("graphics pipeline (cache probe)", 0, 0);
-            VkResult r = vk.vkCreateGraphicsPipelines(V.dev, g_pc, 1, &P->ci, NULL, &p);
-            build_end(bs);
+            VkResult r = VK_PIPELINE_COMPILE_REQUIRED;   // (a pipeline on the .deadly list: not tried, a miss; its build is refused too)
+            if (!deadly_skip("graphics pipeline (cache probe)", P->vs_key, P->fs_key)) {
+                int bs = build_begin("graphics pipeline (cache probe)", P->vs_key, P->fs_key);
+                r = vk.vkCreateGraphicsPipelines(V.dev, g_pc, 1, &P->ci, NULL, &p);
+                build_end(bs); }
             P->ci.flags &= ~VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
             uint64_t dns = now_ns() - t0;
             if (r == VK_SUCCESS && p) { pthread_mutex_lock(&g_mu); g_ngfx++; __atomic_fetch_add(&g_made, 1, __ATOMIC_RELAXED); g_frame_made++; g_probe_hit++; g_create_ms += dns / 1e6; g_create_ns += dns; pthread_mutex_unlock(&g_mu); }

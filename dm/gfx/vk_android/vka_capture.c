@@ -282,7 +282,7 @@ static nvn_hmap g_cap_seg = {.klen = 8}, g_cap_read = {.klen = 8}, g_cap_img = {
 static int g_cap_no_read;
 static uint32_t g_cap_ntex, g_cap_nprog, g_cap_ndpol, g_cap_nsync, g_cap_npool;
 static cap_buf g_cap_tobj, g_cap_pobj, g_cap_progb, g_cap_dpolb, g_cap_kind;
-typedef struct { uint8_t ok, has_v, img; tex_t t; view_t v; } treg_seen;
+typedef struct { uint8_t ok, has_v, img, named; tex_t t; view_t v; } treg_seen;
 static treg_seen *g_cap_treg0; static int g_cap_ntreg0; static samp_par *g_cap_sreg0; static uint8_t *g_cap_sreg0_ok; static int g_cap_nsreg0;
 static char g_cap_where[96]; static const uint8_t *g_cap_where_base, *g_cap_orig;
 static pthread_mutex_t g_cap_req_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -354,6 +354,7 @@ static uint64_t cap_hash_block(const uint8_t *p, size_t n) {
     for (; i < n; i++) h = (h ^ p[i]) * 0x100000001b3ull;
     return h;
 }
+uint64_t vcap_hash(const uint8_t *p, size_t n) { return cap_hash_block(p, n); }
 static void cap_fail(const char *why) { if (!g_cap_failed++) CRED("%s: the capture is incomplete", why); }
 
 // ---------- Regions ----------
@@ -496,10 +497,12 @@ static void cap_seg_write(uint32_t idx) {
 }
 
 // ---------- Images whose content only the GPU has ----------
-// The images of textures the frame can reach (registered, or named by a record: rec). An image that follows its storage (tracked, not written by the GPU) is made again from
-// the pools at replay, as the live run made it; one the CPU wrote is marked so (CAP_TK_CPU) to take the same path. Every other image's content is read back now (CAP_TPIX,
-// pixfmt a VkFormat, pad bit 0 = the GPU wrote it): render targets, copy destinations, images filled once from storage. A texture without an image that would share a live
-// one's (same storage and shape, vka_tex_get) takes that image's content
+// The images of textures the frame can reach (registered, or named by a record: rec), read back now (CAP_TPIX, pixfmt a VkFormat, pad bit 0 = the GPU wrote it): render
+// targets, copy destinations, images filled once from storage, and also those that follow their storage (tracked, not written by the GPU). Until 2026-11-21 these were
+// made again from the pools at replay, assuming a live image equals what its storage gives: Ocarina of Time's 3D lookup tables of its sky and fog (256x32x16 RGBA16F) did
+// not, and the fog its replay drew was white blobs over the whole scene (docs/reference/rendering.md, Frame replays that diverged from the live frame). About 0.7 GB more
+// in its Kokiri Forest frame. DM_NVN_CAPTURE_READ=storage leaves them to their storage, as before. One the CPU wrote is marked so (CAP_TK_CPU). A texture without an image
+// that would share a live one's (same storage and shape, vka_tex_get) takes that image's content
 static void cap_tex_read(const tex_t *t, int rec) {
     if (g_cap_no_read || !t || !t->serial || t->magic != MAGIC('T', 'E', 'X', 0)) return;
     uintptr_t seen = (uintptr_t)nvn_hm_get(&g_cap_read, &t->serial);
@@ -513,7 +516,8 @@ static void cap_tex_read(const tex_t *t, int rec) {
         if (k.kind) { cap_tex_enc(&k.t, "texture kind"); cap_buf_put(&g_cap_kind, &k, sizeof k); }
     }
     if (!im) return;
-    if (!im->inited || (im->track && !im->gpu_owned)) { vka_tex_drop(im); return; }
+    static int follow = -1; if (follow < 0) { const char *fr = getenv("DM_NVN_CAPTURE_READ"); follow = fr && !strcmp(fr, "storage"); }
+    if (!im->inited || (follow && im->track && !im->gpu_owned)) { vka_tex_drop(im); return; }
     uint64_t key = (uint64_t)(uintptr_t)im;
     if (nvn_hm_get(&g_cap_img, &key)) { vka_tex_drop(im); return; }
     nvn_hm_put(&g_cap_img, &key, (void *)1);
@@ -546,9 +550,12 @@ static void cap_registries(uint32_t submit) {
     for (int i = 0; i < nt; i++) {
         memset(&t, 0, sizeof t); memset(&v, 0, sizeof v); has_v = img = 0;
         int ok = vka_cap_treg(i, &t, &v, &has_v, &img, NULL); treg_seen *o = &g_cap_treg0[i];
-        if (ok == o->ok && (!ok || (has_v == o->has_v && img == o->img && !memcmp(&t, &o->t, sizeof t) && (!has_v || !memcmp(&v, &o->v, sizeof v))))) continue;
-        *o = (treg_seen){(uint8_t)ok, has_v, img, t, v};
-        cap_treg e = {i, (uint8_t)ok, has_v, 0, img, t, v};   // pad: 1 = RegisterImage
+        uint8_t named = ok && vka_cap_slot_named(i) ? 1 : 0;
+        if (ok == o->ok && (!ok || (has_v == o->has_v && img == o->img && named == o->named && !memcmp(&t, &o->t, sizeof t) && (!has_v || !memcmp(&v, &o->v, sizeof v))))) continue;
+        *o = (treg_seen){(uint8_t)ok, has_v, img, named, t, v};
+        // pad: bit 0 = RegisterImage; bit 1 = its pool slot names its image (made: vka_cap_slot_named), which the replayer asks for, so a texture read only through the
+        // pool reads its image in the first replay as in the live frame, not the null view of a texture never read before
+        cap_treg e = {i, (uint8_t)ok, has_v, 0, (uint8_t)(img | named << 1), t, v};
         // Storage in no live pool: the ID was registered before its pool was finalized (the Vulkan replay keeps such entries and their images, where nvn_mtl.m drops their views:
         // treg_drop_pool_views). gone = 1 says so; the entry stays registered at replay, without storage
         if (ok && !cap_in_pool(&t)) { e.gone = 1; g_cap_gone++; }   // kept registered (its image's content is captured by serial), without storage (cap_tex_enc)
@@ -680,31 +687,35 @@ static void mkdir_p(const char *path) {   // the capture's folder
     mkdir(d, 0777);
 }
 
+static void cap_image_hashes(uint32_t submit);   // (DM_NVN_CAPTURE_IMAGES, below)
 // Hook: nvnQueueSubmitCommands, under the submit lock, before the submission is replayed
 void nvn_cap_submit(int n, const uint64_t *h) {
     if (!nvn_cap_enabled()) return;
     if (g_cap_rt_min && !g_cap_frame) {   // passes>=n: this submission starts the capture when it renders enough
-        if ((now_ns() - g_t0_ns) / 1e9 < g_cap_rt_after_s) return;
+        if ((now_ns() - g_host_t0_ns) / 1e9 < g_cap_rt_after_s) return;
         uint32_t budget = 1u << 22; int rt = 0;
         for (int i = 0; i < n; i++) rt += cap_rt_count((const uint8_t *)(uintptr_t)h[i], 0, &budget);
         if (rt > g_cap_rt_most) { g_cap_rt_most = rt; CLOG("a submission before present %llu has %d render target bindings, the most so far (the capture starts at %d)", (unsigned long long)g_cap_presents + 1, rt, g_cap_rt_min); }
         if (rt < g_cap_rt_min) return;
         g_cap_frame = (int)g_cap_presents + 1;
-        CLOG("%d render target bindings in a submission (%.1f s into the run): capturing frame %d from this submission", rt, (now_ns() - g_t0_ns) / 1e9, g_cap_frame);
+        CLOG("%d render target bindings in a submission (%.1f s into the run): capturing frame %d from this submission", rt, (now_ns() - g_host_t0_ns) / 1e9, g_cap_frame);
     }
     if (!g_cap_frame || g_cap_presents + 1 != (uint64_t)g_cap_frame) return;
     uint64_t t0 = now_ns();
-    mtl_finish();
+    // What the GPU was handed, done; a submission parked at a GPU wait (vka_qsched.h) stays parked and runs after its producer, as without the capture (mtl_finish_handed)
+    vka_worker_park_hold(1);   // (until the present: the capture's steps would run the park time out)
+    mtl_finish_handed();
     g_cap_cur_submit = ++g_cap_submit;
     if (!g_cap_active) {
         mkdir_p(g_cap_path);
         if (!cap_open(&g_cap_w, g_cap_path)) { CRED("cannot write %s (errno %d): capture off", g_cap_path, errno); g_cap_done = 1; return; }
         setvbuf(g_cap_w.f, NULL, _IOFBF, 8u << 20);
-        g_cap_active = 1;
-        CLOG("frame %d: capture starts (%.1f s into the run)", g_cap_frame, (t0 - g_t0_ns) / 1e9);
+        g_cap_active = 1; vka_rc_record(1);   // (the worker is idle: what it records from here is the frame's)
+        CLOG("frame %d: capture starts (%.1f s into the run)", g_cap_frame, (t0 - g_host_t0_ns) / 1e9);
         cap_head();
     }
     cap_pools(g_cap_cur_submit);
+    if (g_cap_cur_submit > 1) cap_image_hashes(g_cap_cur_submit);   // (before submit 1 every image the frame reaches is captured whole: TPIX)
     uint64_t t1 = now_ns(); cap_registries(g_cap_cur_submit);
     uint64_t t2 = now_ns(); nvn_hm_clear(&g_cap_seg, NULL); g_cap_nseg = 0;
     uint32_t *top = malloc((size_t)MAX(n, 1) * 4);
@@ -714,9 +725,92 @@ void nvn_cap_submit(int n, const uint64_t *h) {
     uint64_t t3 = now_ns(); cap_mem(g_cap_cur_submit);
     CLOG("submit %u: registries and their textures %.1f s, records and their textures %.1f s, pool bytes %.1f s", g_cap_cur_submit, (t2 - t1) / 1e9, (t3 - t2) / 1e9, (now_ns() - t3) / 1e9);
     if (g_cap_nsync) { uint32_t ns = g_cap_nsync; cap_put(&g_cap_w, CAP_SYNC, g_cap_cur_submit, &ns, 4, 0); }
+    { cap_subq q = {0}; vka_worker_active_queue(&q.queue, &q.origin_ll); cap_put(&g_cap_w, CAP_SUBQ, g_cap_cur_submit, &q, sizeof q, 0); }
     cap_buf s = {0}; uint32_t nn = (uint32_t)n; cap_buf_put(&s, &nn, 4); cap_buf_put(&s, top, (size_t)n * 4);
     cap_put(&g_cap_w, CAP_SUBM, g_cap_cur_submit, s.p, s.n, 0); cap_buf_free(&s); free(top);
+    vka_worker_poll_now();   // the parked queues whose waits hold now go on, before this submission (the replayer polls at the same point)
     g_cap_ns += now_ns() - t0;
+}
+
+// DM_NVN_CAPTURE_IMAGES=1 (or a size in MB, the largest image taken; 1 = 128): at the present, every GPU-written image alive (level and layer each) as the live run left it, so
+// the replayer can say which images its replay leaves different (vka_replay.c live_images), not only whether the presented picture differs. Images larger than the limit and
+// those the capture cannot read back (multisampled) are left out and counted
+static void cap_live_images(uint32_t submit) {
+    const char *e = getenv("DM_NVN_CAPTURE_IMAGES"); long mb = e ? atol(e) : 0; if (mb <= 0) return; if (mb == 1) mb = 128;
+    enum { MAXI = 16384 }; vka_img **ims = malloc(MAXI * sizeof *ims); int n = ims ? vka_tex_live_refs(ims, MAXI) : 0;
+    uint64_t nimg = 0, bytes = 0, big = 0, unread = 0, t0 = now_ns();
+    for (int i = 0; i < n; i++) {
+        vka_img *im = ims[i]; cap_tsub *subs = NULL; uint64_t total = 0; uint32_t ns = 0;
+        if (im->gpu_owned && im->inited && im->serial) { ns = vcap_subs(im, &subs, &total); if (!ns) unread++; else if (total > ((uint64_t)mb << 20)) { big++; ns = 0; } }
+        vcap_hbuf hb; VkCommandBuffer cb;
+        if (ns && vcap_hbuf_make(&hb, vcap_sub_off(subs, ns) + 16)) {
+            if ((cb = vcap_cb_begin())) {
+                vcap_img_copy(cb, im, subs, ns, hb.b, 0);
+                if (vcap_cb_run(cb)) {   // written straight to the file (an image of up to the limit is not copied again in memory)
+                    cap_limg h = {im->serial, (uint32_t)im->f.vk, im->w, im->h, im->depth, im->levels, im->layers, ns, (uint32_t)im->f.kind};
+                    uint64_t raw = sizeof h + (uint64_t)ns * sizeof *subs + total;
+                    cap_chunk c = {CAP_LIMG, CAP_RAW, raw, raw, submit, 0};
+                    if (fwrite(&c, sizeof c, 1, g_cap_w.f) != 1 || fwrite(&h, sizeof h, 1, g_cap_w.f) != 1 || fwrite(subs, sizeof *subs, ns, g_cap_w.f) != ns) g_cap_w.err = 1;
+                    VkDeviceSize off = 0;
+                    for (uint32_t k = 0; k < ns; k++) { if (fwrite(hb.p + off, 1, (size_t)subs[k].bytes, g_cap_w.f) != subs[k].bytes) g_cap_w.err = 1; off += (subs[k].bytes + 15) & ~15ull; }
+                    g_cap_w.raw += raw; g_cap_w.stored += raw + sizeof c; nimg++; bytes += total;
+                } else unread++;
+            }
+            vcap_hbuf_free(&hb);
+        }
+        free(subs); vka_tex_drop(im);
+    }
+    free(ims);
+    CLOG("%llu GPU-written images as the live run left them at the present (%.1f MB in %.0f ms), for the replayer's comparison; %llu larger than %ld MB and %llu not readable left out",
+         (unsigned long long)nimg, bytes / 1048576.0, (now_ns() - t0) / 1e6, (unsigned long long)big, mb, (unsigned long long)unread);
+}
+
+// With DM_NVN_CAPTURE_IMAGES, before each submit (the GPU idle: what the previous submits left), a hash of each subresource of every GPU-written image (CAP_LHSH), so the
+// replayer can name the first submit after which an image of its replay stops matching the live one; the present's contents (above) then show how it differs
+static void cap_image_hashes(uint32_t submit) {
+    const char *e = getenv("DM_NVN_CAPTURE_IMAGES"); long mb = e ? atol(e) : 0; if (mb <= 0) return; if (mb == 1) mb = 128;
+    enum { MAXI = 16384 }; vka_img **ims = malloc(MAXI * sizeof *ims); int n = ims ? vka_tex_live_refs(ims, MAXI) : 0;
+    cap_buf b = {0}; uint64_t nimg = 0, t0 = now_ns();
+    for (int i = 0; i < n; i++) {
+        vka_img *im = ims[i]; cap_tsub *subs = NULL; uint64_t total = 0; uint32_t ns = 0;
+        if (im->gpu_owned && im->inited && im->serial) { ns = vcap_subs(im, &subs, &total); if (total > ((uint64_t)mb << 20)) ns = 0; }
+        vcap_hbuf hb; VkCommandBuffer cb;
+        if (ns && vcap_hbuf_make(&hb, vcap_sub_off(subs, ns) + 16)) {
+            if ((cb = vcap_cb_begin())) {
+                vcap_img_copy(cb, im, subs, ns, hb.b, 0);
+                if (vcap_cb_run(cb)) {
+                    uint32_t hd[2] = {ns, 0}; cap_buf_put(&b, &im->serial, 8); cap_buf_put(&b, hd, 8);
+                    for (uint32_t k = 0; k < ns; k++) { uint64_t h = vcap_hash(hb.p + vcap_sub_off(subs, k), (size_t)subs[k].bytes); cap_buf_put(&b, &h, 8); }
+                    nimg++;
+                }
+            }
+            vcap_hbuf_free(&hb);
+        }
+        free(subs); vka_tex_drop(im);
+    }
+    free(ims);
+    if (b.n) cap_put(&g_cap_w, CAP_LHSH, submit, b.p, b.n, 0);
+    cap_buf_free(&b);
+    CLOG("submit %u: %llu GPU-written images hashed in %.0f ms (DM_NVN_CAPTURE_IMAGES)", submit, (unsigned long long)nimg, (now_ns() - t0) / 1e6);
+}
+
+// Hook: nvnEventSignal on the CPU while a frame is being captured (hle_nvn.c, under the submit lock, before the word is written). Ocarina of Time submits its ambient
+// lighting's consumers on three queues that wait for an event, and its CPU signals that event after the frame's last submit: without this step the replay saw no signal,
+// and its parked consumers ran only at the last wait, before what the CPU wrote for them. A step of its own: the GPU's handed work done, what changed since the last
+// step (pools, registries, pool bytes), then the signal (CAP_CSIG); the replayer writes the word at that point and the parked queues look at it
+int nvn_cap_event_on(void) { return g_cap_active; }
+void nvn_cap_event_signal(volatile uint32_t *word, int mode, uint32_t value) {
+    if (!g_cap_active || !word) return;
+    uint64_t t0 = now_ns();
+    mtl_finish_handed();
+    g_cap_cur_submit = ++g_cap_submit;
+    cap_pools(g_cap_cur_submit); cap_image_hashes(g_cap_cur_submit); cap_registries(g_cap_cur_submit);
+    cap_csig c = {(uint64_t)(uintptr_t)word, (uint32_t)mode, value}; CAP_WHERE(NULL, "the event word of a CPU signal"); cap_enc_addr(NULL, &c.word, 4, 1);
+    cap_flush_objs(g_cap_cur_submit); cap_mem(g_cap_cur_submit);
+    cap_put(&g_cap_w, CAP_CSIG, g_cap_cur_submit, &c, sizeof c, 0);
+    vka_worker_poll_now();   // (before the word is written: what this signal releases goes on at the next step)
+    g_cap_ns += now_ns() - t0;
+    CLOG("step %u: a CPU signal of event %p (%s %u; the word holds %u)", g_cap_cur_submit, (const void *)word, mode == NVN_EVENT_SIGNAL_MODE_ADD ? "add" : "write", value, *word);
 }
 
 // Hook: nvnQueuePresentTexture, before the present is queued
@@ -725,7 +819,7 @@ void nvn_cap_present(const tex_t *t, const int crop[4]) {
     if (!nvn_cap_enabled()) return;
     g_cap_presents++;
     if (!g_cap_frame) {   // @seconds: the next frame is the one (passes>=n: chosen by a submission, nvn_cap_submit)
-        if (g_cap_at_s > 0 && (now_ns() - g_t0_ns) / 1e9 >= g_cap_at_s) { g_cap_frame = (int)g_cap_presents + 1; CLOG("%.1f s: capturing frame %d (the next one)", (now_ns() - g_t0_ns) / 1e9, g_cap_frame); }
+        if (g_cap_at_s > 0 && (now_ns() - g_host_t0_ns) / 1e9 >= g_cap_at_s) { g_cap_frame = (int)g_cap_presents + 1; CLOG("%.1f s: capturing frame %d (the next one)", (now_ns() - g_host_t0_ns) / 1e9, g_cap_frame); }
         return;
     }
     if (!g_cap_active || g_cap_presents != (uint64_t)g_cap_frame) {
@@ -733,6 +827,10 @@ void nvn_cap_present(const tex_t *t, const int crop[4]) {
         return;
     }
     uint64_t t0 = now_ns();
+    // A last step before the present: what the CPU wrote since the last submit or signal (Ocarina of Time writes the event word its parked lighting consumers wait for
+    // there, with a store to pool memory, not nvnEventSignal), then a poll; the present's own wait (vcap_digest) then runs everything, as the present job does
+    { mtl_finish_handed(); uint32_t ps = g_cap_submit + 1; g_cap_cur_submit = ps;
+      cap_pools(ps); cap_image_hashes(ps); cap_registries(ps); cap_flush_objs(ps); cap_mem(ps); vka_worker_poll_now(); }
     cap_pres p = {0}; cap_buf px = {0}; char png[1100]; snprintf(png, sizeof png, "%s.live.png", g_cap_path);
     g_cap_cur_submit = g_cap_submit + 1; g_cap_no_read = 1;
     if (t) { p.tex = cap_tex_obj(t); cap_flush_objs(g_cap_cur_submit); cap_reg_write(g_cap_cur_submit); }
@@ -743,6 +841,9 @@ void nvn_cap_present(const tex_t *t, const int crop[4]) {
     cap_put(&g_cap_w, CAP_PRES, g_cap_cur_submit, &p, sizeof p, 0);
     if (px.n) cap_put(&g_cap_w, CAP_LPIX, g_cap_cur_submit, px.p, px.n, 0);
     cap_buf_free(&px);
+    cap_live_images(g_cap_cur_submit);
+    { vka_rc_record(0); const cap_rcnd *rd; size_t rn = vka_rc_recorded(&rd);   // (the frame recorded whole: vcap_digest waited for everything)
+      if (rn) cap_put(&g_cap_w, CAP_RCND, g_cap_cur_submit, rd, rn * sizeof *rd, 0); CLOG("%zu render-condition decisions of the frame recorded for its replay", rn); }
     {
         cap_buf hb = {0};
         for (uint32_t i = 0; i < g_cap_nreg; i++) {
@@ -757,6 +858,6 @@ void nvn_cap_present(const tex_t *t, const int crop[4]) {
         "%.1f MB in %.0f ms → %s%s; live digest %s (%ux%u VkFormat %u)",
         g_cap_failed || !ok ? "[RED] " : "", g_cap_frame, g_cap_submit, (unsigned long long)g_cap_segs, g_cap_nreg, g_cap_ntex, (unsigned long long)g_cap_tex_n, g_cap_tex_bytes / 1048576.0,
         (unsigned long long)g_cap_tex_skip, (unsigned long long)g_cap_unmapped, (unsigned long long)g_cap_gone, (unsigned long long)g_cap_nostore, raw / 1048576.0, p.capture_ms, g_cap_path, ok ? "" : " (write failed)", hex, p.width, p.height, p.pixfmt);
-    g_cap_active = 0; g_cap_done = 1;
+    g_cap_active = 0; g_cap_done = 1; vka_worker_park_hold(0);
 }
 #endif

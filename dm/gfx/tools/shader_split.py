@@ -29,6 +29,7 @@
 #   · data.arc (Super Smash Bros. Ultimate, smash_arc.py): GLSLC outputs in its SSBH shader databases and BNSH in its effects and UI layouts, each of its current files (zstd) scanned, see smash_arc_jobs
 #   · PKZ (PlatinumGames, Bayonetta 3): shader objects (VSO / PSO / CSO / HSO / DSO, a control section and a code area each) in the DAT archives of the PKZ entries (Oodle Kraken, decoded by the
 #       game's own decoder in the Mac host), see pkz_entries, pgdat_members and pg_shader
+#   · CRA (Camelot, Mario Tennis Fever): BNSH in the FSHA, VFXB and SARC members of the NARC containers in rom:/42, its files scrambled and listed only in the NRO the game decodes at run time, see cra.py and cra_jobs
 #   · CPK (CRI's file system, Bayonetta 2): BNSH files ('.vso' / '.pso') in the PlatinumGames DAT archives of the CPK entries (CRILAYLA entries, cpk.py), see cpk_jobs
 #       NieR:Automata's DAT members instead prefix length-delimited NVN code and control sections with a binding table (pg_sized_shader)
 #   · HNSHV002 (Needle, Persona 5 Royal): NVN section descriptors in the shader containers embedded in main and the GSC files of its CPK archives, see needle_shaders
@@ -57,7 +58,7 @@
 #   as `game.nup` or `game.nup:<selector>` is that package's romfs (the highest update's, else the base's, for a bare file)
 #   Environment DM_SPLIT_RESUME=<dir>: the scan resumes by file (ScanCache): a split stopped part way (the phone's thermal or battery pauses, a kill, a reboot) scans again only the files it had not finished
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
-import base64, collections, concurrent.futures as cf, hashlib, json, os, pickle, re, struct, subprocess, sys, time, zlib
+import base64, collections, concurrent.futures as cf, glob, hashlib, json, os, pickle, re, struct, subprocess, sys, time, zlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
 import nup
@@ -885,7 +886,101 @@ def cpk_shaders(path, rel, ents, out):
             print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
         scan_blob(d, f'/{rel}/{e[0]}', out)
 
+def runtime_nros(romfs, mainnso):
+    """[(name, bytes)] the NROs the game runs that no RomFS file holds, read like main: DM_NRO_DIR's *.nro when it is set (the desktop packer's collection, the NSP script's
+    capture), else the NROs a boot stub packs into main (dm/tools/boot_nro.py) that the RomFS's NRRs register (Mario Tennis Fever's whole game code). The phone's Prepare
+    runs the split without DM_NRO_DIR, so the split takes them from the version's own ExeFS itself; loose NROs in the RomFS are scanned as RomFS files anyway"""
+    d = os.environ.get('DM_NRO_DIR')
+    if d: return [(os.path.basename(n), open(n, 'rb').read()) for n in sorted(glob.glob(os.path.join(d, '*.nro')))]
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
+    import nro_collect
+    want = nro_collect.nrr_hashes(romfs)
+    if not want: return []
+    got = {}
+    for _, body in nro_collect.boot_stub_nros(romfs, os.path.dirname(mainnso)):
+        h = hashlib.sha256(body).digest()
+        if h in want: got.setdefault(h, body)
+    return [(f'nro{i}.nro', got[h]) for i, h in enumerate(sorted(got))]   # named as nro_collect.py names them (nro<i>, hash order): the map's source column is the desktop split's
+
+CRA = b'CRA.'
+def cra_jobs(files, parts=64, nros=()):
+    """Every file of Camelot's archive in ranges of about equal length (Mario Tennis Fever: the whole game in rom:/42, 8,671 files, 7.6 GB; cra.py). Its index is in the NRO the game decodes at run time,
+    one of nros (runtime_nros). → ([(path, rel, entries), …], the archive paths)"""
+    jobs, arcs = [], set()
+    for p, r in files:
+        with open(p, 'rb') as f: h = f.read(4)
+        if h != CRA: continue
+        import cra
+        idx = None
+        for _, body in nros:
+            try: idx = cra.Index(body); break
+            except cra.Error: continue
+        if idx is None: red(f'/{r}: a CRA archive, and none of the game\'s {len(nros)} NROs (DM_NRO_DIR {os.environ.get("DM_NRO_DIR")}, else those a boot stub packs into main) holds its file table')
+        es = idx.files()
+        step = sum(e[2] for e in es) / parts
+        cur, size = [], 0
+        for e in es:
+            cur.append(e); size += e[2]
+            if size >= step: jobs.append((p, r, tuple(cur))); cur, size = [], 0
+        if cur: jobs.append((p, r, tuple(cur)))
+        arcs.add(p)
+    return jobs, arcs
+
+def cra_shaders(path, rel, ents, out):
+    """A range of a CRA archive's files, unscrambled and scanned like loose files; sound and movies (their magics: FSTM, EBML) are left out by their first block, as unscrambling is the slow part"""
+    import cra
+    with open(path, 'rb') as f:
+        for e in ents:
+            if cra.head(f, e)[:4] in (b'FSTM', b'\x1aE\xdf\xa3'): continue
+            scan_blob(cra.undo(cra.read(f, e)), f'/{rel}/{e[1]}', out)
+
 ZIP = b'PK\x03\x04'
+VZIP = b'VZIP'   # Star Fox's data.zip: a zip archive behind the engine's own 18 MB index (its "vfs.zip.c"), which zipfile reads through its central directory as any other
+VIPER_GLSLC = b'\x91\x68\x86\x19'
+VIPER_CHUNK = 0x10000
+
+def viper_zip_member(z, info):
+    """A member of Star Fox's data.zip (its engine's vfs.zip.c): the central directory calls it stored, but a member whose size on disk differs from its file size is a chain of 64 KB chunks,
+    each a u32 length and an LZ4 block of that length, compressed against the previous chunk's output as its dictionary (a chunk whose length equals what is left is stored raw).
+    The CRC the directory keeps is the decoded data's, so zipfile's own read stops on it; 114,154 members, 33 GB, all check"""
+    import lz4.block
+    z.fp.seek(info.header_offset); h = z.fp.read(30)
+    if h[:4] != ZIP: red(f'{z.filename or "zip"}/{info.filename}: no local header at {info.header_offset:#x}')
+    nlen, xlen = struct.unpack_from('<HH', h, 26)
+    z.fp.seek(info.header_offset + 30 + nlen + xlen); d = z.fp.read(info.compress_size); u = info.file_size
+    out, off = bytearray(), 0
+    while off + 4 <= len(d) and len(out) < u:
+        n = struct.unpack_from('<I', d, off)[0]; off += 4; want = min(VIPER_CHUNK, u - len(out))
+        if not 0 < n <= len(d) - off: red(f'{info.filename}: LZ4 chunk of {n} bytes at {off - 4:#x} runs past the member ({len(d)} bytes)')
+        if n == want: out += d[off:off + n]
+        else:
+            try: out += lz4.block.decompress(d[off:off + n], uncompressed_size=want, dict=bytes(out[-VIPER_CHUNK:])) if out else lz4.block.decompress(d[off:off + n], uncompressed_size=want)
+            except lz4.block.LZ4BlockError as e: red(f'{info.filename}: LZ4 chunk at {off - 4:#x}: {e}')
+        off += n
+    if off != len(d) or len(out) != u: red(f'{info.filename}: the LZ4 chunks make {len(out)} of {u} bytes from {off} of {len(d)}')
+    if zlib.crc32(out) & 0xFFFFFFFF != info.CRC: red(f'{info.filename}: CRC mismatch after the LZ4 chunks')
+    return bytes(out)
+
+def zip_member(z, name):
+    """A zip member's data: zipfile's, or viper_zip_member's for a member the directory calls stored at another size than its file size (Star Fox)"""
+    info = z.getinfo(name)
+    if info.compress_type == 0 and info.compress_size != info.file_size: return viper_zip_member(z, info)
+    return z.read(name)
+
+def viper_shader(d, label):
+    """Star Fox's shader binaries (its engine's _vrender_shader_binary_t, one per data.zip member): the GLSLC output magic, u32 code length, u32 control length, u32 0, a 64-bit hash, then the
+    code area and the NVN2 control section (version 0xc9), nothing else: 2,828 members, 1,480 vertex, 1,300 pixel, 48 compute. One stage each, paired at draw time (separable_pairs).
+    → [(key, stage, control, code)], or None when d is not one (another file that starts with the magic is read as before)"""
+    if len(d) < 0x18 + NVN2_KEY_CTL or d[:4] != VIPER_GLSLC: return None
+    ncode, nctl = struct.unpack_from('<II', d, 4)
+    if 0x18 + ncode + nctl != len(d) or not ncode or not nctl: return None
+    code, ctl = d[0x18:0x18 + ncode], d[0x18 + ncode:]
+    if not nvn2_ctl(ctl): return None
+    st = nvn2_stage(ctl, code)
+    if not st: red(f'{label}: a shader binary of no known stage (control +0x56 {ctl[0x56] if len(ctl) > 0x56 else None}, code {code[:4].hex()})')
+    if why := check(label, st, ctl, code): red(f'{label} ({st}): {why}')
+    return [(f'{label}#VIPER', st, ctl, code)]
+
 def zip_jobs(files, parts=64):
     """Every member of every zip archive in ranges of about equal length (Portal: the whole game in game.zip, 41,416 members, 4.6 GB inflated, Deflate or stored; its GLSLC outputs are the
     221 nxcontent/nvsb/*.nvsb files, but no name is relied on). → ([(path, rel, (ZIP, members)), …], the zip paths). An archive zipfile cannot read is scanned as one file, as before"""
@@ -893,7 +988,7 @@ def zip_jobs(files, parts=64):
     zs = []
     for p, r in files:
         with open(p, 'rb') as f: h = f.read(4)
-        if h != ZIP: continue
+        if h not in (ZIP, VZIP): continue   # VZIP: Star Fox's data.zip
         try:
             with open(p, 'rb') as source, zipfile.ZipFile(source) as z: zs.append((p, r, [(i.filename, i.file_size) for i in z.infolist() if not i.is_dir()]))
         except (zipfile.BadZipFile, OSError, ValueError) as e: print(f'[RED] /{r}: the zip cannot be read ({e}); scanned as one file', flush=True)
@@ -912,7 +1007,7 @@ def zip_shaders(path, rel, names, out):
     import zipfile
     with open(path, 'rb') as source, zipfile.ZipFile(source) as z:
         for nm in names:
-            d = z.read(nm); n = len(out)
+            d = zip_member(z, nm); n = len(out)
             scan_blob(d, f'/{rel}/{nm}', out)
             if len(out) == n and d[:4] != b'MSHD' and b'\x91\x68\x86\x19' in d: out += glslc_shaders(d, f'/{rel}/{nm}', need=False)
 
@@ -2548,6 +2643,10 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:4] == b'SARC':
         for nm, m in sarc_members(d, label): scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
         return
+    if d[:4] == b'NARC':   # Camelot's containers (cra.py): each member packed by its first byte, so its size says nothing about the budget above
+        import cra
+        for i, m in enumerate(cra.narc_members(d, label)): scan_blob(cra.undo(m), f'{label}/{i}', out, depth + 1)
+        return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
     if d[:4] == b'NDSR': out.extend(ndsr_shaders(d, label)); return
     if d[:4] == b'NDVE': out.extend(ndve_shaders(d, label)); return
@@ -2559,6 +2658,11 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] in PG_STAGES and len(d) >= 0x18 and d[(o := struct.unpack_from('<I', d, 0xc)[0]):o + 4] == CTL_MAGIC: out.extend(pg_shader(d, label)); return
     if shaders := pg_sized_shader(d, label): out.extend(shaders); return
+    if (shaders := viper_shader(d, label)) is not None: out.extend(shaders); return   # Star Fox's shader binaries
+    if d[:4] == b'VIPR':   # Star Fox's resource containers: two of them wrap the engine's NDSR upscaler networks (ounce-nvn2-upper_left_ndsr.bin), 40 shaders each, as a file inside
+        for m in re.finditer(b'NDSR', d):
+            if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
+        return
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         if m.start() + 0x20 > len(d): continue   # too near the end for a BNSH header
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
@@ -2799,7 +2903,7 @@ def scan_file_in(args):
     if len(args) > 2 and head[:8] == ONEPACK:   # a range of Trinity packs (trpfs_jobs)
         trinity_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
-    if len(args) > 2 and head[:4] == ZIP and args[2][0] == ZIP:   # members of a zip archive (zip_jobs)
+    if len(args) > 2 and head[:4] in (ZIP, VZIP) and args[2][0] == ZIP:   # members of a zip archive (zip_jobs)
         zip_shaders(path, rel, args[2][1], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and args[2][0] == UE_LEGACY:   # files of a legacy Unreal pak (ue_legacy_jobs)
@@ -2810,6 +2914,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == PKZL:   # entries of a PlatinumGames PKZ (pkz_jobs)
         pkz_shaders(path, rel, args[2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2 and head[:4] == CRA:   # files of Camelot's archive (cra_jobs)
+        cra_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == CPK:   # entries of a CRI CPK (cpk_jobs)
         cpk_shaders(path, rel, args[2], found)
@@ -3044,7 +3151,7 @@ def scan_digest(argv, jobs, sources=None):
     """ScanCache's digest: the split's arguments and environment (with DM_PACKER_COMMIT, the app's commit on the phone), every job (with its file's size and
     modification time) and the content of the tools and the profile (digest_sources)"""
     h = hashlib.sha256()
-    h.update(repr((argv, [os.environ.get(k) for k in ('DM_GAME', 'DM_GLSLC_CAPTURE', 'DM_UE_SHADERS', 'DM_PACKER_COMMIT')])).encode())
+    h.update(repr((argv, [os.environ.get(k) for k in ('DM_GAME', 'DM_GLSLC_CAPTURE', 'DM_UE_SHADERS', 'DM_PACKER_COMMIT', 'DM_NRO_DIR')])).encode())
     for j in jobs:
         try: st = os.stat(j[0]); t = (st.st_size, st.st_mtime_ns)
         except OSError: t = None
@@ -3092,7 +3199,7 @@ def main():
     romfs_v, main_v = [nup.default_romfs(r) for r in romfs_l.split(',')], main_l.split(',')
     dlc_v = [nup.default_romfs(r) for r in dlc_v]
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
-    files, results, common, dumps = [], [], None, []
+    files, results, common, dumps, nros = [], [], None, [], []
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
         files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs).replace(os.sep, '/')) for dp, _, fs in os.walk(romfs) for f in fs)
@@ -3106,6 +3213,10 @@ def main():
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c for _, _, c, _ in found})
+        # NROs the game decodes at run time (Mario Tennis Fever: main is a boot stub, and the real code's data holds 11 shaders the game draws its UI and sky with): scanned like main, as no RomFS file holds them
+        if not i:
+            nros = runtime_nros(romfs, mainnso)
+            for n, body in nros: scan_blob(body, f'main/{n}', found)
         # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE. A game needs them when main holds GLSL sources and
         # calls glslcCompile in a module it loads (Fire Emblem: Three Houses; profile_guess.py shader_sources). Captain Toad: Treasure Tracker imports it with agl's GLSL sources, but no module defines it
         cap = os.environ.get('DM_GLSLC_CAPTURE') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'glslc_capture')
@@ -3138,11 +3249,12 @@ def main():
     arc_jobs, arcs = smash_arc_jobs(files)   # Super Smash Bros. Ultimate's data.arc: its current files, in ranges
     pz_jobs, pkzs = pkz_jobs(files)   # Bayonetta 3's PKZ archives, Oodle Kraken decoded by the game's own decoder in the Mac host
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
+    cr_jobs, cras = cra_jobs(files, nros=nros)   # Mario Tennis Fever's CRA archive, its index in the NRO the game decodes at run time
     zp_jobs, zips = zip_jobs(files)   # Portal's game.zip (Deflate members)
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
-    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + zp_jobs + ah_jobs + fb_jobs
-    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in zips and p not in arhs and p not in fbs]
+    big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs]
     rd = os.environ.get('DM_SPLIT_RESUME')   # the phone's split (PackService): kept results from a stopped run
     # the inputs only (RomFS, main and DLC; not the output paths), and main's size and time with the jobs: main gives Unity's common strings to every scan
     cache = ScanCache(rd, scan_digest(sys.argv[1:3] + sys.argv[8:], big + files + [(m, 'main') for m in main_v])) if rd else None

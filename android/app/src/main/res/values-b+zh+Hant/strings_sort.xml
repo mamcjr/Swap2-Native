@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home's library order (MainActivity.sortOrder, LibraryOrder) -->
+<resources>
+    <string name="s2_sort">排序</string>
+    <string name="s2_sort_title">遊戲排序</string>
+    <string name="s2_sort_name_asc">名稱（A–Z）</string>
+    <string name="s2_sort_name_desc">名稱（Z–A）</string>
+    <string name="s2_sort_release_asc">發售日期（從舊到新）</string>
+    <string name="s2_sort_release_desc">發售日期（從新到舊）</string>
+    <string name="s2_sort_played_asc">上次遊玩（最久的在前）</string>
+    <string name="s2_sort_played_desc">上次遊玩（最近的在前）</string>
+    <string name="s2_sort_now">遊戲排序：%1$s</string>
+</resources>

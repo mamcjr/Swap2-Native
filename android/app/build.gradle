@@ -108,7 +108,10 @@ def foliageOf = { String game -> tsvRows(game, 'foliage_off').collect { c ->
 // row changed takes the APK's (a pack's game_profile.tsv is written once, when it is prepared)
 def fpsHoldOf = { String game -> def v = tsvRows(game, 'fps_hold').collect { it[1].trim() }.find() ?: ''
     if (v && !(v in ['on', 'off'])) throw new GradleException("dm/games/$game/game.tsv: fps_hold must be on or off, not $v"); v }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), ndsrOf(g), sceneOf(g), ndsrDefaultOf(g), foliageOf(g), fpsHoldOf(g)].join('\\t') }.join('\\n')
+// and the first release date (Profile.release: the library's sort by release date): the profile's release row, YYYY-MM-DD, empty without one
+def releaseOf = { String game -> def v = tsvRows(game, 'release').collect { it[1].trim() }.find() ?: ''
+    if (v && !(v ==~ /\d{4}-\d{2}-\d{2}/)) throw new GradleException("dm/games/$game/game.tsv: release must be YYYY-MM-DD, not $v"); v }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), ndsrOf(g), sceneOf(g), ndsrDefaultOf(g), foliageOf(g), fpsHoldOf(g), releaseOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {
@@ -147,7 +150,7 @@ android {
             cmake {
                 arguments '-DNX_RUNTIME_PROFILE=ON', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON', "-DNX_LSFG=${nxLsfg ? 'ON' : 'OFF'}"
                 // one host and its shim for every game (the profile comes with the pack), then the custom GPU drivers' loader and hooks (DM_VK_DRIVER)
-                targets 'nxhost', 'nxlaunch', 'nxadreno', 'hook_impl', 'main_hook', 'file_redirect_hook'
+                targets 'nxhost', 'nxlaunch', 'nxadreno', 'hook_impl', 'main_hook', 'file_redirect_hook', 'binder_compat_hook'
             }
         }
     }
@@ -236,6 +239,15 @@ def nxDigest = tasks.register('nxDigestAssets', Sync) {
 }
 android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/nxdigest/assets'))
 tasks.named('preBuild') { dependsOn nxDigest }
+
+// The standard shared font's stand-in (dm/third_party/fonts: Noto Sans, SIL OFL 1.1), copied at every build into the APK's assets/fonts/; GameFonts places it as
+// <files>/fonts/standard.ttf and GameActivity points DM_FONT_DIR at it (dm/host/hle_sdk16.c), so a game's text never depends on the phone's own fonts (from upstream Banana Native)
+def nxFontAssets = tasks.register('nxFontAssets', Sync) {
+    from(new File(repo, 'dm/third_party/fonts')) { include 'NotoSans-Regular-subset.ttf', 'OFL.txt' }
+    into layout.buildDirectory.dir('generated/nxfonts/assets/fonts')
+}
+android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/nxfonts/assets'))
+tasks.named('preBuild') { dependsOn nxFontAssets }
 
 // ./gradlew apk → out/swap2-native-test.apk (-PnxPlay=true: swap2-native.apk; -PnxApp=<suffix>: swap2-native-<suffix>.apk; -PnxLive=true: swap2-native-<version>.apk)
 tasks.register('apk', Copy) {

@@ -10,6 +10,7 @@
 #include "vka_selftest_spv.h"   // SPV_MESHCOUNT_COMP (mesh_ind_args)
 #include "vka_ndsr.h"           // vka_ndsr_pipeline (vka_dispatch)
 #include "vka_ubq.h"            // inline uniform updates' ranges (ub_hazard)
+#include "vka_wbfollow.h"       // a shader image only read is not a GPU write
 #include "../nvn/nvn_mtl.h"
 #include "../../host/plat/plat.h"
 #include <math.h>
@@ -163,6 +164,7 @@ static struct {
     int swrite;                                          // a draw of the pass wrote memory (storage buffers or images, raw global stores, a geometry shader's claim)
     int bar_pending;                                     // a game barrier came inside the pass and was taken there (vka_rp_game_barrier): the draws after it are checked (bar_hazard)
     int dnone;                                           // its depth attachment ends with storeOp NONE ("Depth the pass only reads"): a draw that writes depth, or a depth clear, ends it first
+    struct { vka_img *im, *sh; uint32_t lv, l0, nl, bw, bh; } bc[8]; int nbc;   // block-compressed targets drawn through their shadows (bcrt_attach), copied back at the pass end
 } R;
 // ---------- Depth the pass only reads ----------
 // A pass that loads its depth and draws with depth writes off (a colour pass over a finished depth pre-pass, decals, transparents, many post-processing passes) stored the
@@ -238,6 +240,7 @@ static size_t rps_stats(char *b, size_t n, double frames) {   // the busiest sit
     }
     return o > n ? n : o;
 }
+static void bcrt_flush(int full);   // block-compressed render targets (below)
 void vka_rp_end_at(const char *file, int line) {
     if (PC.n) pc_flush();
     if (!R.on) return;
@@ -253,6 +256,7 @@ void vka_rp_end_at(const char *file, int line) {
     // (Erick's 9f04ea6 copied before it: a write-after-read race; the scoped barrier's source stages take in every stage that reads them); the copies' own transfer barrier
     // publishes them
     if (vka_ub_active()) vka_ub_flush_pass(g_cb);
+    bcrt_flush(full);   // block-compressed targets drawn through shadows: their blocks back (bcrt_attach)
     R.on = 0; vka_tex_feedback(NULL, NULL, 0);
     if (vka_nan_on()) vka_nan_pass(g_cb, R.cim, R.clv, R.cl0, R.nci);
 }
@@ -290,6 +294,67 @@ int vka_rp_ub_refuse(uint64_t addr, uint64_t size) {
     }
     return VKA_UBR_OK;
 }
+static void rt_range(const vka_img *im, const view_t *v, int has_v, uint32_t *lv, uint32_t *l0, uint32_t *nl);
+// Block-compressed textures as render targets. A GPU block encoder (agl's BC4 encoder; Ocarina of Time fills a 64x64x64 BC4 volume one depth plane a pass) draws into
+// a BC texture through a view in an uncompressed format of the block's size (RGBA16UI for BC4's 8-byte blocks), one texel per 4x4 block: on the Switch the view's texels are
+// the texture's blocks. Vulkan attaches no compressed image, so such a pass draws into an uncompressed shadow of blocks x blocks in the view's format (a texture of the
+// replay's own, one per format, size and layer count), filled from the texture's level (or its layers, or a 3D texture's depth planes) by a copy before the pass and copied
+// back after it (vkCmdCopyImage between size-compatible formats: a texel of one is a block of the other). Only levels whose size is a whole number of blocks; others are
+// not drawn into, as before, logged. DM_VK_BC_RT=0: none (the earlier behaviour). Ported from upstream Banana Native (eden/v0.3.42): Splatoon Raiders' run-time BC4 / BC5
+// textures (the player's arms and legs, the Yes / No bubbles' labels: docs/reference/rendering.md) were left empty
+static int bc_fmt(const vka_fmt *f) { return f->bw > 1 || f->bh > 1; }   // (vka_tex.c compressed)
+static struct { int fmt; uint32_t w, h, nl; tex_t t; } g_bcsh[16]; static int g_nbcsh;   // (the recording thread only)
+static vka_img *bcrt_shadow(int fmt, uint32_t w, uint32_t h, uint32_t nl) {
+    int k = 0; while (k < g_nbcsh && !(g_bcsh[k].fmt == fmt && g_bcsh[k].w == w && g_bcsh[k].h == h && g_bcsh[k].nl == nl)) k++;
+    if (k == g_nbcsh) {
+        if (k == 16) { VRED_ONCE("block-compressed render targets: more than 16 shadow shapes: the rest are not drawn into"); return NULL; }
+        tex_t *t = &g_bcsh[k].t; memset(t, 0, sizeof *t);
+        t->d.target = nl > 1 ? NVN_TEXTURE_TARGET_2D_ARRAY : NVN_TEXTURE_TARGET_2D; t->d.format = (uint32_t)fmt; t->d.width = w; t->d.height = h; t->d.depth = nl; t->d.levels = 1;
+        nvn_tex_layout(&t->d, &t->L); t->serial = nvn_new_serial();
+        g_bcsh[k].fmt = fmt; g_bcsh[k].w = w; g_bcsh[k].h = h; g_bcsh[k].nl = nl; g_nbcsh++;
+        VLOG("block-compressed render target: a shadow of %ux%u x%u in NVN format %#x (serial %llu)", w, h, nl, (unsigned)fmt, (unsigned long long)t->serial);
+    }
+    return vka_tex_get(&g_bcsh[k].t, g_cb);   // (looked up each time: the image may have been let go and made again)
+}
+static VkImageCopy bcrt_region(const vka_img *im, uint32_t lv, uint32_t l0, uint32_t nl, uint32_t bw, uint32_t bh, int back) {
+    int is3d = im->d.target == NVN_TEXTURE_TARGET_3D;
+    VkImageSubresourceLayers bc = {VK_IMAGE_ASPECT_COLOR_BIT, lv, is3d ? 0 : l0, is3d ? 1 : nl}, sh = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, nl};
+    VkOffset3D bo = {0, 0, is3d ? (int32_t)l0 : 0}, so = {0, 0, 0};
+    // The extent is in the source's texels: the compressed level's size copying in, the shadow's blocks copying back; a 3D texture's depth planes are the shadow's layers
+    VkExtent3D ex = back ? (VkExtent3D){bw, bh, is3d ? nl : 1} : (VkExtent3D){bw * 4, bh * 4, is3d ? nl : 1};
+    return back ? (VkImageCopy){sh, so, bc, bo, ex} : (VkImageCopy){bc, bo, sh, so, ex};
+}
+// The shadow's view for colour target i of a pass, or VK_NULL_HANDLE (not this case, or it cannot: logged); *f the view's format, *shp the shadow
+static VkImageView bcrt_attach(const p_set_rt *rt, int i, vka_img *im, const vka_fmt *f, uint32_t *w, uint32_t *h, uint32_t *nlo, vka_img **shp) {
+    if (!VKA_ENV("DM_VK_BC_RT", 1) || !(rt->has_cview[i] && rt->cview[i].set_format) || !bc_fmt(&im->f) || f->kind >= 3 || bc_fmt(f) || f->bpb != im->f.bpb) return VK_NULL_HANDLE;
+    uint32_t lv, l0, nl; rt_range(im, &rt->cview[i], rt->has_cview[i], &lv, &l0, &nl);
+    if (lv >= im->levels || !nl || R.nbc == 8) return VK_NULL_HANDLE;
+    uint32_t mw = im->w >> lv ? im->w >> lv : 1, mh = im->h >> lv ? im->h >> lv : 1;
+    if (mw % im->f.bw || mh % im->f.bh) { VRED_ONCE("block-compressed render target %ux%u (level %u) is not a whole number of blocks: not drawn into", mw, mh, lv); return VK_NULL_HANDLE; }
+    uint32_t bw = mw / im->f.bw, bh = mh / im->f.bh;
+    vka_img *sh = bcrt_shadow(rt->cview[i].format, bw, bh, nl);
+    if (!sh || !(sh->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) { VRED_ONCE("block-compressed render target: no shadow image of NVN format %#x: not drawn into", rt->cview[i].format); return VK_NULL_HANDLE; }
+    vka_tex_own(im, g_cb); vka_tex_own(sh, g_cb);
+    VkImageView v = vka_view(sh, f->view, nl > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, nl, NULL);
+    if (!v) return VK_NULL_HANDLE;
+    VkImageCopy rc = bcrt_region(im, lv, l0, nl, bw, bh, 0);   // what the texture holds, for a pass that loads it or covers only part of it
+    vka_barrier(g_cb); vk.vkCmdCopyImage(g_cb, im->img, VK_IMAGE_LAYOUT_GENERAL, sh->img, VK_IMAGE_LAYOUT_GENERAL, 1, &rc); vka_barrier(g_cb);
+    R.bc[R.nbc].im = im; R.bc[R.nbc].sh = sh; R.bc[R.nbc].lv = lv; R.bc[R.nbc].l0 = l0; R.bc[R.nbc].nl = nl; R.bc[R.nbc].bw = bw; R.bc[R.nbc++].bh = bh;
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VLOG("block-compressed render target: texture serial %llu (NVN format %#x, %ux%u level %u, layers or planes %u+%u) drawn through a %ux%u shadow in NVN format %#x",
+        (unsigned long long)im->serial, im->d.format, mw, mh, lv, l0, nl, bw, bh, rt->cview[i].format);
+    *w = bw; *h = bh; *nlo = nl; *shp = sh;
+    return v;
+}
+static void bcrt_flush(int full) {   // the shadows' blocks into their textures (after the pass's barrier; a scoped one is made full first, so the copies see the draws)
+    if (!R.nbc) return;
+    if (!full) vka_barrier(g_cb);
+    for (int k = 0; k < R.nbc; k++) {
+        VkImageCopy rc = bcrt_region(R.bc[k].im, R.bc[k].lv, R.bc[k].l0, R.bc[k].nl, R.bc[k].bw, R.bc[k].bh, 1);
+        vk.vkCmdCopyImage(g_cb, R.bc[k].sh->img, VK_IMAGE_LAYOUT_GENERAL, R.bc[k].im->img, VK_IMAGE_LAYOUT_GENERAL, 1, &rc);
+        vka_img_written(R.bc[k].im);
+    }
+    R.nbc = 0; vka_barrier(g_cb);
+}
 static void rt_range(const vka_img *im, const view_t *v, int has_v, uint32_t *lv, uint32_t *l0, uint32_t *nl) {
     *lv = has_v && v->set_levels ? v->base_level : 0;
     *l0 = has_v && v->set_layers ? v->min_layer : 0;
@@ -314,7 +379,15 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         const tex_t *t = rt->color[i]; if (!t) continue;
         vka_img *im = vka_tex_get(t, g_cb); vka_fmt f;
         if (!im || !vka_fmt_of(rt->has_cview[i] && rt->cview[i].set_format ? rt->cview[i].format : t->d.format, &f)) continue;
-        if (!(im->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || f.kind >= 3) { VRED_ONCE("colour target %d (format %#x) cannot be a Vulkan colour attachment: not drawn into", i, t->d.format); continue; }
+        if (!(im->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || f.kind >= 3) {
+            uint32_t bw, bh, bnl; vka_img *sh = NULL; VkImageView bv = f.kind < 3 ? bcrt_attach(rt, i, im, &f, &bw, &bh, &bnl, &sh) : VK_NULL_HANDLE;
+            if (bv) {   // a block-compressed texture drawn into through an uncompressed view: its shadow (bcrt_attach)
+                ca[i].imageView = bv; R.cf[i] = f.view; R.ckind[i] = f.kind; samples = 1; fb_im[nfb] = sh; fb_lv[nfb++] = 0;
+                R.cnl[i] = bnl; R.cext[i] = (VkExtent2D){bw, bh};
+                if (bw < w) w = bw; if (bh < h) h = bh; if (bnl < layers) layers = bnl;
+                continue;
+            }
+            VRED_ONCE("colour target %d (format %#x) cannot be a Vulkan colour attachment: not drawn into", i, t->d.format); continue; }
         if (im->depth > 1 && !(im->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) continue;   // its slices are drawn into through 2D-array views (img_create)
         uint32_t lv, l0, nl; rt_range(im, &rt->cview[i], rt->has_cview[i], &lv, &l0, &nl);
         if (lv >= im->levels || !nl) continue;
@@ -382,6 +455,9 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
     vka_tex_feedback(fb_im, fb_lv, nfb);
     VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = R.area, .layerCount = layers, .colorAttachmentCount = (uint32_t)n, .pColorAttachments = ca,
                           .pDepthAttachment = dp, .pStencilAttachment = sp};
+    if (layers > 8 && V.driver_id == VK_DRIVER_ID_ARM_PROPRIETARY) {   // (diagnostic) Arm's driver drops a primitive whose layer from a vertex shader is 8 or more (DroidPlay Core a72a85c5)
+        static int n; if (n < 4) { n++; VRED("a pass of %u layers (%ux%u) on Arm's driver: a vertex shader's layer of 8 or more is dropped there, a geometry shader's is not; such draws are not split by 8 layers here (open)", layers, w, h); }
+    }
     if (vka_gp_active) {   // DM_VK_GPUPROF: what the pass is, for the step it ends
         char b[96]; size_t bn = (size_t)snprintf(b, sizeof b, "%ux%ux%u", w, h, layers);
         for (int i = 0; i < n && bn < sizeof b; i++) if (ca[i].imageView) bn += (size_t)snprintf(b + bn, sizeof b - bn, " c%d:%d%s", i, R.cf[i], ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "C" : "");
@@ -389,6 +465,7 @@ static int rp_begin(const p_set_rt *rt, int has_rt, const vka_dstate *d) {
         vka_gp_pass(b);
     }
     vk.vkCmdBeginRendering(g_cb, &ri);
+    if (vka_gp_active) vka_gp_pass_begun(g_cb);   // (DM_VK_GPUPROF_DRAWS: the pass's draws timed one by one)
     R.on = 1; vka_n_rp++; if (g_dyn_filter == 2) vka_dyn_invalidate();   // DM_VK_DYN_FILTER=2: the dynamic state set again at each pass (bisect)
     for (int k = 0; k < nlate; k++) { VkClearAttachment c = {late[k]->asp, late[k]->ci >= 0 ? (uint32_t)late[k]->ci : 0, late[k]->in}; VkClearRect cr = {late[k]->rc, 0, layers}; vk.vkCmdClearAttachments(g_cb, 1, &c, 1, &cr); }
     PC.n = 0;
@@ -958,7 +1035,7 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             uint8_t dim = st == 5 ? rt_dim(r[i].binding, r[i].dim) : r[i].dim;   // (an image retyped for its integer texture: img_retype_of)
             if (r[i].desc != VK_DESCRIPTOR_TYPE_SAMPLER) {
                 int tid = r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG ? r[i].tid : 0;
-                if (tid) v = vka_tex_id_view_rec(tid, g_cb, dim, storage, &lay);
+                if (tid) v = vka_tex_id_view_rec(tid, g_cb, dim, wbf_view_of_binding(storage, r[i].flags, DMSH_VK_BF_RW), &lay);   // (a shader image only read: not a GPU write)
                 // A 2D texture in a 3D or cube slot: what the game leaves bound where a shader's branch does not sample (DKB's materials keep a 1x1 2D texture in their volume slot 12).
                 // It reads as unbound, zeros, as nvn_mtl.m's zero 3D / zero cube fallback does; noted once. Other mismatches are reported
                 int dd = r[i].dim & DMSH_VK_DIM_MASK, tt = tid && !v ? vka_tex_id_target(tid) : -1;
@@ -1111,7 +1188,7 @@ static int make_images(const vka_dstate *d, vka_shader *const sh[VKA_NSTAGE], in
         for (int i = 0; i < g_wk.n[st]; i++) if ((r[i].what == VKA_R_TEX || r[i].what == VKA_R_IMG) && r[i].tid
                                                  && (vka_tex_id_pending_rec(r[i].tid, r[i].dim) || (r[i].what == VKA_R_IMG && vka_tex_id_storage_pending(r[i].tid)))) {   // (an image remade with storage use copies its content: outside the pass)
             any = 1; if (dry) return 1;
-            vka_tex_id_view(r[i].tid, g_cb, r[i].dim, r[i].what == VKA_R_IMG, NULL);
+            vka_tex_id_view(r[i].tid, g_cb, r[i].dim, wbf_view_of_binding(r[i].what == VKA_R_IMG, r[i].flags, DMSH_VK_BF_RW), NULL);
         }
     }
     return any;
@@ -1126,6 +1203,22 @@ static int draw_writes(vka_shader *const sh[VKA_NSTAGE], const vka_dstate *d) {
         for (int i = 0; i < g_wk.n[st]; i++) if ((r[i].flags & DMSH_VK_BF_RW) || r[i].what == VKA_R_IMG || r[i].what == VKA_R_GMEM_LOG) return 1;
     }
     return 0;
+}
+// A draw whose vertex, tessellation or geometry shader writes memory on a device without vertexPipelineStoresAndAtomics (Arm's Mali drivers: Vulkan leaves those stores
+// undefined, and the driver may drop them). Logged once per vertex-stage shader (the first 16), so a Mali report names the shaders: DroidPlay Core runs such a shader's
+// writes as a fragment shader over points (4e6105e5, 81b6eb20; Xenoblade's skinned characters), not ported here (open: no Switch 2 game here is known to need it)
+static void vtx_store_note(vka_shader *const sh[VKA_NSTAGE]) {
+    static uint64_t seen[16]; static int nseen;
+    for (int st = 0; st < VKA_NSTAGE; st++) {
+        if (!sh[st] || st == 1 || st == 5 || ((st == 6 || st == 7) && !V.mesh)) continue;   // (fragment, compute, and the mesh fallback's compute: fragment / compute stores)
+        const vka_res *r = g_wk.r[st]; int w = st == 2 && sh[2]->gs_fx > 0;
+        for (int i = 0; i < g_wk.n[st] && !w; i++) w = (r[i].flags & DMSH_VK_BF_RW) || r[i].what == VKA_R_IMG || r[i].what == VKA_R_GMEM_LOG;
+        if (!w) continue;
+        int k = 0; while (k < nseen && seen[k] != sh[st]->key) k++;
+        if (k < nseen || nseen == 16) continue;
+        seen[nseen++] = sh[st]->key;
+        VRED("draw with a stage-%d shader %016llx that writes memory, on a device without vertexPipelineStoresAndAtomics: its writes may be lost (DroidPlay Core's fragment form not ported)", st, (unsigned long long)sh[st]->key);
+    }
 }
 // After a game barrier taken inside the pass (vka_rp_game_barrier): this draw needs the pass ended first when it writes memory (earlier draws of the pass may read what it
 // overwrites), reads the texture pool directly (any texture, the pass's targets among them), has bindings the walk could not read, or samples a texture whose image the
@@ -1579,6 +1672,7 @@ void vka_draw(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc
         SKIP("indirect mesh draw: its record at %#llx is not aligned placed guest RAM (or no scratch memory): skipped", (unsigned long long)dw->ind);
     if (!rp_begin(rt, has_rt, d)) SKIPQ();
     if (!R.swrite && draw_writes(sh, d)) R.swrite = 1;   // (a game barrier in this pass from now on ends it: vka_rp_game_barrier)
+    if (!V.vstores) vtx_store_note(sh);   // (Mali: vertex-pipeline stores the device has no feature for)
     d->b.samples = R.samples;
     vka_gkey k; memset(&k, 0, V.vin_dyn ? offsetof(vka_gkey, va) : sizeof k);   // (va, vb: only without vertex input dynamic state, vin_build; the pipeline lookup reads no further then)
     k.ncolor = (uint8_t)R.ncolor; k.samples = (uint8_t)R.samples; k.dfmt = R.df; k.sfmt = R.sf;

@@ -51,6 +51,22 @@ CUTS = {
     (0x37c3b0, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x37c44c, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],
+  # SDK 20.5.15 built for the Switch 2 (Yoshi and the Mysterious Book v131072, Hyrule Warriors: Age of Imprisonment v196608): the same node area cut, which upstream Banana Native applies to
+  # this SDK by its SDK-wide fingerprint (eden/v0.3.42 sdk_patches.py MATCH_CUTS, the 20.5 rule: constructor limit at +0x18, occupied range at +0xa4). Yoshi's Unreal engine region and
+  # nninitStartup's regions are capped to what the alias region has room for counting on the 62 MB (hle_svc.c alias_room); with 1 GB nninitStartup called exit(1) upstream. Bytes checked
+  # in Yoshi's sdk (2026-11-18). Hyrule Warriors ships this build and runs without it (its regions are small): the cut leaves it 1 GB more alias region
+  '820cd7d096aac448693f504400cc2375': [
+    (0x14df18, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x14dfa4, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
+  # Fire Emblem Fortune's Weave v131072 sdk (SDK 22.2.0 built for the Switch 2): the same node area cut. Without it nninitStartup's StandardAllocator::Initialize(nullptr, 36 GB) (main+0x651ef8),
+  # which the host caps to what the alias region has room for counting on the 62 MB (hle_svc.c alias_room), got a region that did not fit the 16 GB alias region after the 1 GB node area,
+  # and the game aborted (nn::diag abort at sdk+0x15d2d0, Swap2-Native, 2026-11-17). The constructor is at sdk+0x16ba30 (limit at +0x18, occupied range at +0xa4), the place upstream
+  # Banana Native's SDK-wide fingerprint for this SDK finds (eden/v0.3.42 sdk_patches.py MATCH_CUTS); gated on this build here, so no other game's sdk changes
+  '5b1602f3a2965f44ab13124cadbdf148': [
+    (0x16ba48, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x16bad4, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+  ],
   # Hollow Knight: Silksong 1.0.30000 (v655360) sdk (SDK 20.5.8, Unity 6000.0.50f1): the same node area cut. Unity 6 takes all its memory itself through nn::os::AllocateAddressRegion and
   # AllocateMemoryPages (no heap, no StandardAllocator in nninitStartup), and without the cut its regions start after the node area: the alias region's high-water mark was +1.00 GB at
   # nninitStartup and +3.00 GB in the first room of play, with 1.51 GB mapped. The constructor is at sdk+0x145bec (limit = alias start + 0x3fe00000 at +0x28, a unit heap of 0x30-byte

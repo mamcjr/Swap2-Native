@@ -31,5 +31,30 @@ class Swap(unittest.TestCase):
             self.assertFalse(st.exists())
 
 
+class CopyOnExfat(unittest.TestCase):
+    """exFAT storage under Android's FUSE (/mnt/media_rw) refuses chmod and utime, so shutil.copystat raised PermissionError at the end of Prepare
+    (Banana Native issue #360, test from eden/v0.3.43 af1ed596, MIT)"""
+
+    def setUp(self):
+        import shutil
+        self.d = tempfile.TemporaryDirectory(); self.addCleanup(self.d.cleanup)
+        self.src = Path(self.d.name) / 'src.bin'; self.src.write_bytes(os.urandom(300_000))
+        self.dst = Path(self.d.name) / 'dst.bin.partial'
+        def deny(*a, **k): raise PermissionError(1, 'Operation not permitted')
+        for mod, name in ((shutil, 'copystat'), (os, 'utime'), (os, 'chmod')):
+            old = getattr(mod, name); setattr(mod, name, deny); self.addCleanup(setattr, mod, name, old)
+
+    def test_copy_file_completes_without_metadata(self):
+        pack_android.copy_file(self.src, self.dst)
+        self.assertEqual(self.dst.read_bytes(), self.src.read_bytes())
+
+    def test_current_copy_is_judged_by_size_not_time(self):
+        pack_android.copy_file(self.src, self.dst)
+        self.assertTrue(pack_android.same_copy(self.src, self.dst))
+        self.dst.write_bytes(b'short')
+        self.assertFalse(pack_android.same_copy(self.src, self.dst))
+        self.assertFalse(pack_android.same_copy(self.src, self.dst.with_name('none')))
+
+
 if __name__ == '__main__':
     unittest.main()

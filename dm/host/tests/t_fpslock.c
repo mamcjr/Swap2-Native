@@ -11,6 +11,9 @@ module_t *g_mod = test_modules;
 int g_nmod;
 static int writes;
 void dm_guest_write_prepare(void *p, size_t n) { (void)p; assert(n == 4 || n == 8); writes++; }
+static void (*g_sead_gate)(uint64_t *, int);
+void gate_obs_set(int id, void (*fn)(uint64_t *, int)) { if (id == OBS_SEAD_RATE) g_sead_gate = fn; }
+int gate_obs_present(int id) { (void)id; return 0; }
 
 // adrp / add of a module offset into register r, at word i of the text (module offsets: the text at 0)
 static void cvar(const char *name, uint64_t off) { strcpy(g_mod[0].ue_cvar[g_mod[0].n_ue_cvar].name, name); g_mod[0].ue_cvar[g_mod[0].n_ue_cvar++].off = off; }
@@ -179,6 +182,57 @@ static void check(int which) {
     munmap(base, len);
 }
 
+// sead's frame-rate controller gate (sead_rate): the rate the sdiv yields is the measured one, the steps add up to the time that passed, 10..60
+static struct timespec at(double s) { struct timespec t = { (time_t)s, (long)((s - (time_t)s) * 1e9) }; return t; }
+static double run(double fps, int frames, int *lo, int *hi) {   // frames at a steady fps through the gate (dividend w8, divisor w21, controller x20): game seconds stepped
+    uint64_t r[30] = {0}; double game = 0, t = 1000; *lo = 1000; *hi = 0;
+    memset(&g_sr, 0, sizeof g_sr);
+    for (int i = 0; i <= frames; i++, t += 1.0 / fps) {
+        r[8] = 60; r[21] = i % 3 + 1; r[20] = 0x1234000;   // the controller's own 60 and an interval of 1 to 3
+        atomic_fetch_add(&g_presents, 1);
+        sead_rate_at(r, 8 | 21 << 5 | 20 << 10, at(t));
+        int32_t q = (int32_t)r[8] / (int32_t)r[21];   // the sdiv
+        if (!i) { assert(q == 60 / (int)r[21]); continue; }   // the first frame keeps the game's own
+        assert(q * (int32_t)r[21] == (int32_t)r[8] && g_sr.ctl == 0x1234000);
+        game += 1.0 / q; if (q < *lo) *lo = q; if (q > *hi) *hi = q;
+    }
+    return game;
+}
+static void sead_rate_check(void) {
+    int lo, hi;
+    for (double fps = 10; fps <= 60; fps += 0.7) {   // 10 to 60 at awkward rates: the game's time follows real time within one frame's step
+        double game = run(fps, 600, &lo, &hi), wall = 600 / fps;
+        assert(fabs(game - wall) < 1.0 / 60 + 1e-9 && lo >= 10 && hi <= 60 && hi - lo <= 1);
+    }
+    double g = run(20, 400, &lo, &hi); assert(lo == 20 && hi == 20 && fabs(g - 20) < 1e-6);   // a 20 fps limit: 20 every frame
+    g = run(30, 300, &lo, &hi); assert(lo == 30 && hi == 30);
+    g = run(5, 50, &lo, &hi); assert(lo == 10 && hi == 10 && fabs(g - 5) < 1e-6);   // below the floor: 10, the game at half speed (as on the Switch), no catching up
+    g = run(120, 240, &lo, &hi); assert(lo == 60 && hi == 60);   // above the cap: 60
+    uint64_t r[30] = {0}; r[8] = 60; r[21] = 0; memset(&g_sr, 0, sizeof g_sr);   // no interval (0): the game's own division, untouched
+    sead_rate_at(r, 8 | 21 << 5 | 20 << 10, at(1)); atomic_fetch_add(&g_presents, 1); sead_rate_at(r, 8 | 21 << 5 | 20 << 10, at(1.05)); assert(r[8] == 60);
+    r[21] = 1; atomic_fetch_add(&g_presents, 2); sead_rate_at(r, 8 | 21 << 5 | 20 << 10, at(1.15)); assert(r[8] == 20);   // two presents in 0.1 s since the last call: 20 fps, not 10
+    assert(g_sead_gate == sead_rate);   // the callback the gate number reaches
+    // On and off: DM_FPS_DECOUPLE=0 at start, then the in-game panel live (nxhost_fps_decouple_set); off leaves the dividend at 60
+    const int P = 8 | 21 << 5 | 20 << 10;
+    setenv("DM_FPS_DECOUPLE", "0", 1); assert(!sead_rate_on()); memset(&g_sr, 0, sizeof g_sr);
+    r[20] = 0x1234000; r[8] = 60; r[21] = 2; atomic_fetch_add(&g_presents, 1); sead_rate_gate(r, P, at(2)); atomic_fetch_add(&g_presents, 1); sead_rate_gate(r, P, at(2.05)); assert(r[8] == 60);
+    nxhost_fps_decouple_set(1); assert(sead_rate_on());
+    atomic_fetch_add(&g_presents, 1); sead_rate_gate(r, P, at(2.10)); assert(r[8] == 60);   // the first frame on: a fresh measurement, the game's own
+    atomic_fetch_add(&g_presents, 1); sead_rate_gate(r, P, at(2.15)); assert(r[8] == 40);   // 20 fps at interval 2: 40 / 2
+    nxhost_fps_decouple_set(0); r[8] = 60; atomic_fetch_add(&g_presents, 1); sead_rate_gate(r, P, at(2.20)); assert(r[8] == 60 && !g_sr.last.tv_sec);
+    unsetenv("DM_FPS_DECOUPLE");
+    // The locked path (sead_locked): the game's own stored rate (60) replaced by the measured one before the load, put back when decoupling goes off
+    static int32_t ctl[0x20]; ctl[0x50 / 4] = 60; uint64_t lr[30] = {0}; lr[0] = (uint64_t)(uintptr_t)ctl; const int L = 0 | (0x50 / 4) << 5;
+    memset(&g_sr, 0, sizeof g_sr); nxhost_fps_decouple_set(1);
+    atomic_fetch_add(&g_presents, 1); sead_locked_at(lr, L, at(3)); assert(ctl[0x14] == 60);   // the first frame: the game's own
+    atomic_fetch_add(&g_presents, 1); sead_locked_at(lr, L, at(3 + 1.0 / 30)); assert(ctl[0x14] == 30 && g_lk.own == 60);
+    atomic_fetch_add(&g_presents, 1); sead_locked_at(lr, L, at(3 + 2.0 / 30)); assert(ctl[0x14] == 30 && g_lk.own == 60);   // its own rate kept while ours is there
+    ctl[0x14] = 60; atomic_fetch_add(&g_presents, 1); sead_locked_at(lr, L, at(3 + 3.0 / 30)); assert(ctl[0x14] == 30 && g_lk.own == 60);   // the game locked it again (60): taken as its own
+    nxhost_fps_decouple_set(0); atomic_fetch_add(&g_presents, 1); sead_locked_at(lr, L, at(3 + 4.0 / 30)); assert(ctl[0x14] == 60 && !g_lk.addr);   // off: the game's own back
+    nxhost_fps_decouple_set(1); atomic_fetch_add(&g_presents, 1); sead_locked_at(lr, L, at(3.5)); assert(ctl[0x14] == 60);   // on again: a fresh measurement
+    atomic_fetch_add(&g_presents, 1); sead_locked_at(lr, L, at(3.55)); assert(ctl[0x14] == 20);
+}
+
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
     for (int i = 0; i < 25; i++) {
@@ -186,5 +240,6 @@ int main(void) {
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, floors behind pointers and under the controller's maximum, presents paced where nothing else holds a cap, caps set while running, build gates and overrides passed");
+    sead_rate_check();
+    puts("Frame limits: integer/float FPS, milliseconds, vsync copies, floors behind pointers and under the controller's maximum, presents paced where nothing else holds a cap, caps set while running, build gates and overrides, sead's rate gate passed");
 }

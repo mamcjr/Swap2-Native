@@ -1,0 +1,13 @@
+# What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
+# <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
+# A table of its own, not game.tsv rows: game.tsv is part of a pack's rewrite key (pack_android.py rewrite_key), and a change here must not make packs stale.
+
+# Profile from upstream Banana Native; boots to the practice court on the POCO (2026-11-18), still in bring-up: the warning on every phone
+status	bring-up
+
+# Upstream Banana Native's rows (eden/v0.3.42), from its shaders and its Android runs; not measured here yet
+required	feature.geometryShader	1	Geometry shaders: 104 of the game's shader modules use them; without them those draws are skipped
+required	feature.shaderDrawParameters	1	Shader draw parameters: every vertex shader of the game reads them
+degraded	feature.shaderStorageImageWriteWithoutFormat	1	Storage image writes without a format: 4 of the game's shaders use them
+degraded	feature.shaderStorageImageReadWithoutFormat	1	Storage image reads without a format: 3 of the game's shaders use them
+degraded	feature.tessellationShader	1	Tessellation shaders: 4 of the game's shader modules (2 hull, 2 domain) use them

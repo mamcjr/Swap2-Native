@@ -70,7 +70,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             alu(0x0be, InstName.Flo, ABrev, uniform: true);
             alu(0x01a, InstName.Bfe, ASgxt);
             alu(0x09a, InstName.Bfe, ASgxt, uniform: true);
+            alu(0x01b, InstName.Bfe, ABmsk);
 
+            x(0x80d, InstName.Isetp, AGuardCull, N, writesRd: false);
+            x(0x925, InstName.Pixld, APixelCovered, N);
             x(0x882, InstName.Mov, AUMov, N, uniform: true);
             x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
             x(0xc82, InstName.Mov, AUMov, N, uniform: true);
@@ -1345,6 +1348,89 @@ namespace Ryujinx.Graphics.Shader.Instructions
             res = context.ConditionalSelect(context.ICompareEqual(n, Const(0)), Const(0), res);
 
             ASet(context, x, res, u);
+        }
+
+        // From upstream Banana Native (eden/v0.3.42), as the next two.
+        // BMSK Rd, a, b: a mask of b bits from bit a (Star Fox's 58046f286de779e1: BMSK R5, R4, R5, then R9 << R4, the two ANDed and handed to an atomic, a bit field written into a word).
+        // The semantics are PTX's bmsk: .W (75, as SGXT's; only the clamping form has been seen) takes both operands modulo 32; else a >= 32 gives 0 and b >= 32 reaches bit 31
+        public static void ABmsk(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            bool u = AUniform(context);
+            (ASrc sa, ASrc sb) = ASecond(context, x, u, neg: false, abs: false);
+
+            Operand a = AGet(context, sa), b = AGet(context, sb);
+            Operand a1 = context.BitwiseAnd(a, Const(31)), b1 = context.BitwiseAnd(b, Const(31)), sum = context.IAdd(a1, b1);
+            Operand mask0 = context.ShiftLeft(Const(-1), a1);
+            Operand reachesTop = context.ICompareGreaterOrEqualUnsigned(sum, Const(32));
+
+            if (!x.Bit(75))
+            {
+                Operand aOver = context.ICompareGreaterOrEqualUnsigned(a, Const(32));
+
+                mask0 = context.ConditionalSelect(aOver, Const(0), mask0);
+                reachesTop = context.BitwiseOr(reachesTop, context.BitwiseOr(aOver, context.ICompareGreaterOrEqualUnsigned(b, Const(32))));
+            }
+
+            // the bits above the field: none when it reaches the top, all when it is empty (a1 + b1 < 32 in the shift, so it is defined)
+            Operand above = context.ConditionalSelect(context.ICompareEqual(b1, Const(0)), Const(-1), context.ShiftLeft(Const(-1), context.BitwiseAnd(sum, Const(31))));
+
+            above = context.ConditionalSelect(reachesTop, Const(0), above);
+
+            ASet(context, x, context.BitwiseAnd(mask0, context.BitwiseNot(above)), u);
+        }
+
+        // 0x925 Rd (78..80 = 1, no predicate result): 1 for a covered pixel, 0 for a helper invocation. No table at hand names it (PIXLD.COVERED, perhaps). What it reads comes from the two shaders
+        // that use it, Star Fox's quad efficiency views 46040940ce0fd49b and 826168691af2e211, which add it up over the quad through SHFL and FSWZADD: one takes sum - 1 as the index of a
+        // 4-entry palette, so a shaded pixel's sum is at least 1; the other draws 0.03125 + 0.15625 sum in red.
+        // Form 3 is the index of the sample the fragment runs for (Maxwell's PIXLD.MY_INDEX, numbered 5 there): PRAGMATA's pixel shaders (154) read it first and index the driver's sample
+        // position table with it (LDC c[0][R + 0x620], a byte of x and y nibbles), as GLSLC's Maxwell code does with MY_INDEX (InstEmitMove.Pixld). Any other form stays refused.
+        // The helper invocation flag is IoVariable.ThreadKill here (upstream: HelperInvocation), which the SPIR-V generator maps to BuiltIn HelperInvocation
+        public static void APixelCovered(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            int form = x.Bits(78, 81);
+
+            if ((form != 1 && form != 3) || x.Bits(81, 84) != 7 || x.Bits(24, 32) != 0 || x.Bits(32, 48) != 0 || context.TranslatorContext.Definitions.Stage != ShaderStage.Fragment)
+            {
+                throw AFail(context, $"0x925 form {form} outside a covered pixel's or sample index read in a pixel shader");
+            }
+
+            if (form == 3)
+            {
+                ASet(context, x, context.Load(StorageKind.Input, IoVariable.SampleId), false);
+                return;
+            }
+
+            Operand helper = context.Load(StorageKind.Input, IoVariable.ThreadKill);
+
+            ASet(context, x, context.ConditionalSelect(helper, Const(0), Const(1)), false);
+        }
+
+        // 0x80d, as upstream nxnative has it (seedds/nxnative PR #2549, carried by Banana Native): what the compiler puts at the end of a vertex shader's position, its meaning inferred
+        // from what surrounds it. Before it, FSETP sets P0..P5 where x, y or z lies beyond +/- w times the two system registers 30 and 31, which no other instruction reads: a guard band
+        // test. Then this twice: immediate 0xc4321111 with no predicate result, then immediate 0x80000000 whose result is the guard of an EXIT before the shader writes the position and
+        // its other outputs. So a vertex is dropped early when the GPU knows its primitive cannot be seen. How it knows is not known, so the host never drops one: the result is false,
+        // the vertex writes its outputs, and clipping does the rest, as for a shader without this. Any other form stops the shader.
+        public static void AGuardCull(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            uint imm = (uint)x.Imm32;
+            int pd = x.Bits(81, 84), pd2 = x.Bits(84, 87), ps = x.Bits(87, 90), cmp = x.Bits(76, 79);
+            bool plain = pd2 == RegisterConsts.PredicateTrueIndex && ps == RegisterConsts.PredicateTrueIndex;
+
+            // With no predicate result it writes nothing the shader can read (upstream: PRAGMATA's shaders have it with immediate 0x80000007)
+            if (plain && pd == RegisterConsts.PredicateTrueIndex)
+            {
+                return;
+            }
+
+            if (!plain || context.TranslatorContext.Definitions.Stage != ShaderStage.Vertex || !(imm == 0x80000000 && cmp == 6))
+            {
+                throw AFail(context, "a 0x80d not of the guard band cull");
+            }
+
+            ASetPred(context, pd, Const(IrConsts.False), false);
         }
 
         // ---- predicates ----

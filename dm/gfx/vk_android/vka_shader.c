@@ -283,9 +283,31 @@ VkShaderModule vka_shader_pfb_pick(VkShaderModule m, int a2c, int alpha_func) {
     pthread_mutex_unlock(&g_twmu);
     return r;
 }
+// Every subgroup shuffle as ShuffleXor by lane ^ index (vka_spv_shuffle_xor, from DroidPlay Core 8115593e): Qualcomm's shader compiler in its V@07xx drivers (the major
+// version in driverVersion bits 12-21) crashes on OpGroupNonUniformShuffle while it builds a pipeline (libllvm-qgl.so, fault address 0x48; Adreno 650 at V@0746, Adreno
+// 735 at V@0762), and builds the same module with the shuffle as ShuffleXor, which reads the same lane. V@0615 / V@0676 (730 / 740) and V@0800 and up build the shuffle.
+// DM_VK_SHUFFLE_XOR (restart): default 1 on Qualcomm's own driver V@0700-0799, 0 elsewhere; 1 forces it on any driver (an A/B), 0 off. After every other rewrite
+static int shuffle_xor_on(void) {
+    static int v = -1;
+    if (v < 0) { uint32_t ver = V.props.driverVersion >> 12 & 0x3ff;
+                 v = VKA_ENV("DM_VK_SHUFFLE_XOR", V.driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY && ver >= 700 && ver < 800) != 0;
+                 if (v) VLOG("subgroup shuffles: made ShuffleXor by lane ^ index (driver %#x, V@%04u; DM_VK_SHUFFLE_XOR=0: as they are)", V.props.driverVersion, ver); }
+    return v;
+}
+// Applied in lib_csm, so every library module and every variant made from one (retyped, claimed, fitted) takes it. NULL: the module as it is
+static uint32_t *shuffle_xor(const VkShaderModuleCreateInfo *ci, size_t *on) {
+    if (!shuffle_xor_on() || ci->codeSize < 20) return NULL;
+    int ns = 0; char e[256] = ""; uint32_t *o = vka_spv_shuffle_xor(ci->pCode, ci->codeSize / 4, on, &ns, e, sizeof e);
+    if (!o) { if (e[0]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("a module's shuffles left as they are, which this driver's compiler may crash on: %s", e); } return NULL; }
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("a module's %d shuffles made ShuffleXor (DM_VK_SHUFFLE_XOR)", ns);
+    return o;
+}
 // A library module (or a variant made from one): the only modules the hook above rewrites
 static VkResult lib_csm(const VkShaderModuleCreateInfo *ci, VkShaderModule *m) {
-    t_lib_mod = 1; VkResult r = vk.vkCreateShaderModule(V.dev, ci, NULL, m); t_lib_mod = 0; return r;
+    size_t sn = 0; uint32_t *sx = shuffle_xor(ci, &sn); VkShaderModuleCreateInfo c2;
+    if (sx) { c2 = *ci; c2.codeSize = sn * 4; c2.pCode = sx; ci = &c2; }
+    t_lib_mod = 1; VkResult r = vk.vkCreateShaderModule(V.dev, ci, NULL, m); t_lib_mod = 0;
+    free(sx); return r;
 }
 
 // ---------- Shaders by key ----------
@@ -343,6 +365,18 @@ static void single_lane(uint64_t key, int stage, uint32_t **w, size_t *nb) {
                                                             stage == DMSH_VK_STAGE_GS && V.driver_id == VK_DRIVER_ID_MESA_TURNIP ? "Turnip's geometry stage (DM_VK_SUBGROUP_GS)" : V.subgroup_stages & g_stage_bit[stage] ? "the device's subgroup size in this stage is not the library's and cannot be pinned" : "the device has none in this stage");
     free(*w); *w = o; *nb = on * 4;
 }
+// A geometry shader that may emit nothing for a primitive emits a degenerate one instead (vka_spv_gs_fill: Qualcomm's driver stops the GPU when the binning and rendering
+// passes of Adreno's tiled rendering disagree on what such a shader emitted; Banana Native 0749171c, Donkey Kong Bananza's terrain). DM_VK_GS_FILL (restart): default 1
+// on Adreno drivers (Qualcomm's, Turnip), 0 elsewhere; 0 / 1 to choose. Applied after the one-lane subgroup rewrite, before the memory write claim. Logged for the first few
+static void gs_fill(uint64_t key, int stage, uint32_t **w, size_t *nb) {
+    if (stage != DMSH_VK_STAGE_GS) return;
+    int adreno = V.driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY || V.driver_id == VK_DRIVER_ID_MESA_TURNIP;
+    if (!VKA_ENV("DM_VK_GS_FILL", adreno)) return;
+    size_t on = 0; char e[256] = ""; uint32_t *o = vka_spv_gs_fill(*w, *nb / 4, &on, e, sizeof e);
+    if (!o) { if (e[0]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("geometry shader %016llx: not made to emit a primitive where it emits none: %s", (unsigned long long)key, e); } return; }
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("geometry shader %016llx: emits a degenerate primitive where it would emit none (DM_VK_GS_FILL)", (unsigned long long)key);
+    free(*w); *w = o; *nb = on * 4;
+}
 // DM_VK_SPV_OVERRIDE=<folder> (a diagnostic, android/TESTING.md): <folder>/<key>_<variant>.spv, when it is there, is that module's SPIR-V instead of the library's (a shader
 // rewritten to show its inputs, say, in nxreplay). Logged once per module; the interface (locations, bindings) must stay the library's, which the pipeline layout follows
 static uint32_t *spv_override(uint64_t key, unsigned variant, size_t *nb) {
@@ -397,6 +431,7 @@ static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, con
     mesh_fragment(e, w, &nb);
     int stage = m->variant == DMSH_VK_MOD_MESH_COMPUTE ? DMSH_VK_STAGE_CS : m->variant == DMSH_VK_MOD_MESH_VERTEX ? DMSH_VK_STAGE_VS : e->stage;
     if (e->flags & DMSH_VK_F_SUBGROUP) single_lane(key, stage, &w, &nb);
+    gs_fill(key, stage, &w, &nb);
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = w};
     VkShaderModule mod = VK_NULL_HANDLE; VkResult r = lib_csm(&ci, &mod);
     free(w);
@@ -424,6 +459,7 @@ static int gs_words(vka_shader *s, uint32_t **out, size_t *on, char *err, size_t
     size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, err, errn) : NULL;
     if (!w) return -1;
     if (s->e->flags & DMSH_VK_F_SUBGROUP) single_lane(s->key, s->e->stage, &w, &nb);
+    gs_fill(s->key, s->e->stage, &w, &nb);
     int r = vka_spv_gs_claim(w, nb / 4, VKA_GS_CLAIM_BINDING, out, on, err, errn);
     free(w); return r;
 }

@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <android_linker_ns.h>
+#include <android/api-level.h>
 #include <android/dlext.h>
 #include <android/log.h>
 #include "kgsl.h"
@@ -91,6 +92,16 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
         }
 
         LOGI("hook_android_dlopen_ext: applied libfile_redirect_hook");
+    }
+
+    // Swap2-Native change (after Banana Native f71720e0): Qualcomm's 891.x drivers import AIBinder_Class_setTransactionCodeToFunctionNameMap, which libbinder_ndk.so
+    // has only from API 36; without it the custom driver fails to load below and the system driver is used. libbinder_compat_hook.so supplies it in this namespace's
+    // global group (android/host/adreno_binder_compat.c). A custom driver on API < 36 only, so Android 16 and the system driver load as before; a failure only logs
+    if ((hook_params->featureFlags & ADRENOTOOLS_DRIVER_CUSTOM) && android_get_device_api_level() < 36) {
+        if (linkernsbypass_namespace_dlopen("libbinder_compat_hook.so", RTLD_GLOBAL, driverNs))
+            LOGI("hook_android_dlopen_ext: applied libbinder_compat_hook (API %d)", android_get_device_api_level());
+        else
+            LOGW("hook_android_dlopen_ext: libbinder_compat_hook not loaded: %s", dlerror());
     }
 
     // Use our new namespace to load the vulkan driver

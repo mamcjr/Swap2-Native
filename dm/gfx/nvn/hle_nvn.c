@@ -12,6 +12,7 @@
 #include "nvn_protos.h"
 #include "nvn_count.h"
 #include "nvn_tex.h"
+#include "nvn_dpool.h"
 #include "../tex/nvn_deswizzle.h"
 #include "nvn_mtl.h"
 #include "nvn_pace.h"
@@ -580,52 +581,50 @@ NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) {
 // Fire Emblem: Three Houses: a 12,544-entry texture pool and a 3,856-entry sampler pool for the scene, and 4,096-entry ones its 2D UI command buffer binds. Both fill IDs from 256 up; the scene's
 // default 8×8 white texture overwrote the UI's textures, and the title menu's labels, the name entry and other menus drew as plain bars or not at all. The scene also registers each draw's
 // textures into fresh IDs of a ring in its large pool (8,729 and up a few seconds in); with the table's capacity taken from the last pool alone, those all read as empty slots and the screen was black
-enum { NDPOOL = 16 };
-static struct dpool_base { const void *pool; int base; } g_tpb[NDPOOL], g_spb[NDPOOL];
-static int g_ntpb, g_nspb, g_tnext, g_snext;
+// The ranges: nvn_dpool.h
+static nvn_dpool_tab g_tpt, g_spt;
 static pthread_mutex_t g_dpool_mu = PTHREAD_MUTEX_INITIALIZER;
-static int dpool_add(struct dpool_base *t, int *nt, int *next, const void *pool, int n, const char *kind) {   // → the pool's base (assigned at its first Initialize)
+static int dpool_add(nvn_dpool_tab *t, const void *pool, int n, const char *kind) {   // → the pool's base (assigned at its first Initialize)
     pthread_mutex_lock(&g_dpool_mu);
-    int i = 0; while (i < *nt && t[i].pool != pool) i++;
-    if (i == *nt) {
-        if (*nt == NDPOOL) { pthread_mutex_unlock(&g_dpool_mu); LOG("[RED] %s pools exceed %d: later ones share the first pool's numbering", kind, NDPOOL); return 0; }
-        t[i] = (struct dpool_base){pool, *next}; (*nt)++; *next += (n + 255) & ~255;
-        if (i) LOG("[nvn] pool #%d (%s, %d entries): numbered from %d in the host table, separate from the earlier pools", i + 1, kind, n, t[i].base);
-    }
-    int b = t[i].base; pthread_mutex_unlock(&g_dpool_mu); return b;
+    int had = t->n, b = nvn_dpool_add(t, pool, n);
+    pthread_mutex_unlock(&g_dpool_mu);
+    if (b < 0) { LOG("[RED] %s pools exceed %d: later ones share the first pool's numbering", kind, NVN_NDPOOL); return 0; }
+    if (t->n > had && had) LOG("[nvn] pool #%d (%s, %d entries): numbered from %d in the host table, separate from the earlier pools", t->n, kind, n, b);
+    return b;
 }
-static int dpool_base(const struct dpool_base *t, int nt, const void *pool) { for (int i = 0; i < nt; i++) if (t[i].pool == pool) return t[i].base; return 0; }
-int nvn_dpool_base(const void *pool, int tex) { return tex ? dpool_base(g_tpb, g_ntpb, pool) : dpool_base(g_spb, g_nspb, pool); }   // the replay's bound pools (nvn_mtl.m state_op)
+static int dpool_base(nvn_dpool_tab *t, const void *pool) { pthread_mutex_lock(&g_dpool_mu); int b = nvn_dpool_find(t, pool); pthread_mutex_unlock(&g_dpool_mu); return b; }
+static void dpool_release(nvn_dpool_tab *t, const void *pool) { pthread_mutex_lock(&g_dpool_mu); nvn_dpool_release(t, pool); pthread_mutex_unlock(&g_dpool_mu); }
+int nvn_dpool_base(const void *pool, int tex) { return dpool_base(tex ? &g_tpt : &g_spt, pool); }   // the replay's bound pools (nvn_mtl.m state_op)
 // The Android frame replayer (dm/gfx/vk_android/vka_replay.c), which runs in the host library without the game: a captured descriptor pool's bases, as its Initialize gave them
 void nvn_dpool_base_set(const void *pool, int tex_base, int samp_base) {
     pthread_mutex_lock(&g_dpool_mu);
-    if (g_ntpb < NDPOOL) g_tpb[g_ntpb++] = (struct dpool_base){pool, tex_base};
-    if (g_nspb < NDPOOL) g_spb[g_nspb++] = (struct dpool_base){pool, samp_base};
+    if (g_tpt.n < NVN_NDPOOL) g_tpt.e[g_tpt.n++] = (nvn_dpool_ent){pool, tex_base, 0};
+    if (g_spt.n < NVN_NDPOOL) g_spt.e[g_spt.n++] = (nvn_dpool_ent){pool, samp_base, 0};
     pthread_mutex_unlock(&g_dpool_mu);
 }
 // The pools each command buffer last bound are kept in its own host state (cmd_t tex_base / samp_base). They used to be a 64-entry list of command buffers that was never cleared:
 // Dark Souls Remastered binds one of 12 sampler pools in more than 64 command buffers, and every later one read its samplers through the first pool's numbering
 NVN(nvnTexturePoolInitialize, NVNboolean, NVNtexturePool *tp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)tp = (dpool_t){(const pool_t *)p, off, n}; OLOG("TexturePool n=%d", n);
-    dpool_add(g_tpb, &g_ntpb, &g_tnext, tp, n, "texture"); mtl_set_tex_pool_n(g_tnext);
+    dpool_add(&g_tpt, tp, n, "texture"); mtl_set_tex_pool_n(g_tpt.next);
     return 1;
 }
-NVN(nvnTexturePoolFinalize, void, NVNtexturePool *tp) { (void)tp; }
+NVN(nvnTexturePoolFinalize, void, NVNtexturePool *tp) { dpool_release(&g_tpt, tp); }   // its range is free for a later pool (nvn_dpool.h)
 NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
-    mtl_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
+    mtl_reg_tex(dpool_base(&g_tpt, tp) + id, (const tex_t *)t, (const view_t *)v);
 }
 // Image descriptors live in the same pool index space as texture descriptors, and image handles are pool indices (nvnDeviceGetImageHandle; BindImages below), so an image
 // registers into the same table. Hyrule Warriors: Age of Calamity registers the images its compute shaders write in the first battle (earlier games registered only textures)
 NVN(nvnTexturePoolRegisterImage, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
-    mtl_reg_image(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
+    mtl_reg_image(dpool_base(&g_tpt, tp) + id, (const tex_t *)t, (const view_t *)v);
 }
 NVN(nvnSamplerPoolInitialize, NVNboolean, NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
-    *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); dpool_add(g_spb, &g_nspb, &g_snext, sp, n, "sampler"); return 1;
+    *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n); dpool_add(&g_spt, sp, n, "sampler"); return 1;
 }
-NVN(nvnSamplerPoolFinalize, void, NVNsamplerPool *sp) { (void)sp; }
-NVN(nvnSamplerPoolRegisterSampler, void, const NVNsamplerPool *sp, int id, const NVNsampler *s) { mtl_reg_samp(dpool_base(g_spb, g_nspb, sp) + id, &((const samp_t *)s)->p); }
+NVN(nvnSamplerPoolFinalize, void, NVNsamplerPool *sp) { dpool_release(&g_spt, sp); }   // (nvn_dpool.h)
+NVN(nvnSamplerPoolRegisterSampler, void, const NVNsamplerPool *sp, int id, const NVNsampler *s) { mtl_reg_samp(dpool_base(&g_spt, sp) + id, &((const samp_t *)s)->p); }
 // straight from a builder, without a sampler object (FINAL FANTASY TACTICS - The Ivalice Chronicles registers its samplers this way)
-NVN(nvnSamplerPoolRegisterSamplerBuilder, void, const NVNsamplerPool *sp, int id, const NVNsamplerBuilder *b) { mtl_reg_samp(dpool_base(g_spb, g_nspb, sp) + id, &((const samp_builder_t *)b)->p); }
+NVN(nvnSamplerPoolRegisterSamplerBuilder, void, const NVNsamplerPool *sp, int id, const NVNsamplerBuilder *b) { mtl_reg_samp(dpool_base(&g_spt, sp) + id, &((const samp_builder_t *)b)->p); }
 // Unreal Engine reads a descriptor pool's size back at device setup (Octopath Traveler 0)
 NVN(nvnTexturePoolGetMemoryPool, const NVNmemoryPool *, const NVNtexturePool *tp) { return (const NVNmemoryPool *)((const dpool_t *)tp)->pool; }
 NVN(nvnTexturePoolGetMemoryOffset, ptrdiff_t, const NVNtexturePool *tp) { return (ptrdiff_t)((const dpool_t *)tp)->off; }
@@ -1081,7 +1080,15 @@ NVN(nvnEventInitialize, NVNboolean, NVNevent *e, const NVNeventBuilder *b) {
 NVN(nvnEventFinalize, void, NVNevent *e) { ((ev_t *)e)->magic = 0; }
 NVN(nvnEventGetValue, uint32_t, const NVNevent *e) { return *((const ev_t *)e)->val; }
 static void ev_signal(const ev_t *e, int mode, uint32_t v) { if (mode == NVN_EVENT_SIGNAL_MODE_ADD) *e->val += v; else *e->val = v; }
-NVN(nvnEventSignal, void, NVNevent *e, NVNeventSignalMode m, uint32_t v) { ev_signal((const ev_t *)e, m, v); mtl_event_cpu_signal(); }
+// DM_NVN_CAPTURE on Android (vka_capture.c): a CPU signal in the frame being captured is a step of the capture (what the CPU wrote before it, then the signal): a GPU wait
+// parked on another queue may be waiting for it, and its replay has to see it at the same point. Under the submit lock, as the capture's submit steps are. Elsewhere nothing
+__attribute__((weak)) int nvn_cap_event_on(void) { return 0; }
+__attribute__((weak)) void nvn_cap_event_signal(volatile uint32_t *word, int mode, uint32_t value) { (void)word; (void)mode; (void)value; }
+NVN(nvnEventSignal, void, NVNevent *e, NVNeventSignalMode m, uint32_t v) {
+    if (nvn_cap_event_on()) { pthread_mutex_lock(&g_sub_mu); nvn_cap_event_signal(((const ev_t *)e)->val, m, v); ev_signal((const ev_t *)e, m, v); pthread_mutex_unlock(&g_sub_mu); }
+    else ev_signal((const ev_t *)e, m, v);
+    mtl_event_cpu_signal();
+}
 
 // ---------- Queue ----------
 #define QB(b) ((queue_builder_t *)(b))
@@ -1396,7 +1403,9 @@ NVN(nvnCommandBufferBindVertexStreamState, void, NVNcommandBuffer *c, int n, con
     p_bind_vstream *r = RECN(c, OP_BIND_VSTREAM, p_bind_vstream, st, n); r->first = 0; r->n = n; memcpy(r->st, st, 8 * n);
 }
 NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int n, const NVNbufferRange *rg) {
-    if (n < 0 || first + n > 16) { LOG("[RED] BindVertexBuffers first=%d n=%d", first, n); return; }
+    // NVN has 16 streams. Mario Tennis Fever clears 32 before each model (first = 16 to 31 with a null range, thousands of times a run): nothing can read those, so only a real range past the limit is wrong
+    if (first >= 16 && n == 1 && !rg[0].address && !rg[0].size) return;
+    if (n < 0 || first + n > 16) { static int red; if (red++ < 8) LOG("[RED] BindVertexBuffers first=%d n=%d", first, n); return; }
     for (int i = 0; i < n; i++) shp_bind(SHK_VBUF, rg[i].address, rg[i].size);
     if (n == 1 && (unsigned)first < 16 && rg[0].size <= UINT32_MAX) {
         *REC(c, OP_BIND_VBUF1, p_bind_vbuf1) = (p_bind_vbuf1){(uint32_t)first, (uint32_t)rg[0].size, rg[0].address}; return;
@@ -1478,8 +1487,8 @@ NVN(nvnCommandBufferDispatchComputeIndirect, void, NVNcommandBuffer *c, NVNbuffe
     *REC(c, OP_DISPATCH, p_dispatch) = (p_dispatch){0, 0, 0, (uint64_t)__builtin_return_address(0), ind};
 }
 NVN(nvnCommandBufferBarrier, void, NVNcommandBuffer *c, int bits) { *(int32_t *)rec(c, OP_BARRIER, 8) = bits; }
-NVN(nvnCommandBufferSetTexturePool, void, NVNcommandBuffer *c, const NVNtexturePool *p) { REC(c, OP_SET_TEX_POOL, p_set_pool)->pool = (const dpool_t *)p; CB(c)->tex_base = dpool_base(g_tpb, g_ntpb, p); }
-NVN(nvnCommandBufferSetSamplerPool, void, NVNcommandBuffer *c, const NVNsamplerPool *p) { REC(c, OP_SET_SAMP_POOL, p_set_pool)->pool = (const dpool_t *)p; CB(c)->samp_base = dpool_base(g_spb, g_nspb, p); }
+NVN(nvnCommandBufferSetTexturePool, void, NVNcommandBuffer *c, const NVNtexturePool *p) { REC(c, OP_SET_TEX_POOL, p_set_pool)->pool = (const dpool_t *)p; CB(c)->tex_base = dpool_base(&g_tpt, p); }
+NVN(nvnCommandBufferSetSamplerPool, void, NVNcommandBuffer *c, const NVNsamplerPool *p) { REC(c, OP_SET_SAMP_POOL, p_set_pool)->pool = (const dpool_t *)p; CB(c)->samp_base = dpool_base(&g_spt, p); }
 
 NVN(nvnCommandBufferCopyBufferToTexture, void, NVNcommandBuffer *c, NVNbufferAddress src, const NVNtexture *t, const NVNtextureView *v,
     const NVNcopyRegion *r, int flags) {
@@ -2956,6 +2965,86 @@ static void push_const(NVNcommandBuffer *c, int compute, uint64_t w, uint64_t of
 }
 NVN_NOPROTO(nvnCommandBufferPushGraphicsConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) { push_const(c, 0, w, off, n, data); }
 NVN_NOPROTO(nvnCommandBufferPushComputeConstants, void, NVNcommandBuffer *c, uint64_t w, uint64_t off, uint64_t n, const void *data) { push_const(c, 1, w, off, n, data); }
+
+// ---------- NVN2's DLSS ----------
+// A Switch 2 game calls DLSS through NVN itself (Fire Emblem Fortune's Weave's gfxa::TaskDLSS: main+0x1913b48 makes the network, main+0xb70f00 evaluates it): a neural network on NVIDIA's GPU, with
+// no counterpart here. The replay draws a stand-in from the same things (colour, depth, motion vectors at the input's size, the jitter, a history reset): on Vulkan, vka_exec.c dlss_eval (Banana Native's GSR 2 / FSR 1 / FSR 3.1 stand-ins, vka_dlss.c, vka_fsr3.c); the Metal replay leaves the output unwritten
+// The builder and the parameters are packed in place: the game's builder is 0x108 bytes of its stack frame, and the parameters hold no more than the driver's own, which keeps the same fields for
+// its getters. The network's texture IDs and storage are the driver's own needs, which the scaler does not have, so they are taken and dropped
+typedef struct { int32_t w, h, method, preset; uint32_t flags; } dlss_builder_t;
+typedef dlss_builder_t dlss_net_t;   // the network keeps what it was built with: the game gives it 0x800 bytes
+typedef struct { const NVNtexture *tex[DLSS_TEXTURES]; int32_t iw, ih, base[DLSS_TEXTURES][2]; float mv[2], jitter[2], pre_exposure; uint32_t reset; } dlss_params_t;
+static inline int dlss_ceil_div(int v, int d) { return (v + d - 1) / d; }
+// The output is this many times the input, by the builder's method (read from the game's choice at main+0x1913c24: output / input of 2 and under is 0, 3 is 1, 1 is 2)
+static int dlss_factor(int method) { return method == 1 ? 3 : method == 2 ? 1 : 2; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDefaults, void, dlss_builder_t *b) { memset(b, 0, sizeof *b); }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetDevice, void, dlss_builder_t *b, NVNdevice *d) { (void)b; (void)d; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetOutputResolution, void, dlss_builder_t *b, int w, int h) { b->w = w; b->h = h; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMethod, void, dlss_builder_t *b, int m) { b->method = m; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetPreset, void, dlss_builder_t *b, int p) { b->preset = p; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetFlags, void, dlss_builder_t *b, uint32_t f) { b->flags = f; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetMaxEvaluationEntries, void, dlss_builder_t *b, int n) { (void)b; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetTextureIDs, void, dlss_builder_t *b, const void *pool, const int *ids, int n) { (void)b; (void)pool; (void)ids; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderSetStorage, void, dlss_builder_t *b, void *mem, size_t n) { (void)b; (void)mem; (void)n; }
+NVN_NOPROTO(nvnDlssNetworkBuilderGetStorageSize, size_t, const dlss_builder_t *b) { (void)b; return 0x1000; }   // the stand-in keeps its memory on the host's side; a page, for a game that allocates what it is told
+// The argument order is NGX's NGX_DLSS_GET_OPTIMAL_SETTINGS: optimal, largest and smallest input, sharpness (the game stores them so at main+0x1913cfc). One input size per method: no dynamic range
+NVN_NOPROTO(nvnDlssNetworkBuilderGetOptimalSettings, NVNboolean, const dlss_builder_t *b, int *ow, int *oh, int *maxw, int *maxh, int *minw, int *minh, float *sharp) {
+    int f = dlss_factor(b->method), w = dlss_ceil_div(b->w, f), h = dlss_ceil_div(b->h, f);
+    if (ow) *ow = w;
+    if (oh) *oh = h;
+    if (maxw) *maxw = w;
+    if (maxh) *maxh = h;
+    if (minw) *minw = w;
+    if (minh) *minh = h;
+    if (sharp) *sharp = 0;
+    return 1;
+}
+NVN_NOPROTO(nvnDlssNetworkInitialize, NVNboolean, dlss_net_t *n, const dlss_builder_t *b) {
+    *n = *b;
+    LOG("[nvn] DLSS network %dx%d, method %d (input 1/%d), preset %d, flags %#x: the Vulkan stand-in draws it (vka_exec.c dlss_eval)", b->w, b->h, b->method, dlss_factor(b->method), b->preset, b->flags);
+    return 1;
+}
+NVN_NOPROTO(nvnDlssNetworkFinalize, void, dlss_net_t *n) { (void)n; }
+// A new output resolution for a network made (the builder's SetOutputResolution, the only size a network has: the input comes with each evaluation, SetInputSubrectangleSize).
+// Star Fox builds 1920x1080 and resizes to 768x432 at start, and its evaluations write a 768x432 output texture: with the builder's size kept, every evaluation asked for a
+// 1920x1080 output rectangle, clamped to the texture ("rectangles past the textures ... clamped"). The evaluation's output size is now the network's latest
+NVN_NOPROTO(nvnDlssNetworkResize, NVNboolean, dlss_net_t *n, int w, int h) {
+    static int k; if (k < 8 && (!k || n->w != w || n->h != h)) { k++; LOG("[nvn] DLSS network resized to %dx%d (from %dx%d): its output size from now on", w, h, n->w, n->h); }   // (the first 8 changes)
+    if (w > 0 && h > 0) { n->w = w; n->h = h; }
+    return 1;
+}
+NVN_NOPROTO(nvnDlssParametersSetDefaults, void, dlss_params_t *p) { memset(p, 0, sizeof *p); p->pre_exposure = 1; p->mv[0] = p->mv[1] = 1; }
+static void dlss_set_tex(dlss_params_t *p, int k, const NVNtexture *t, const NVNtextureView *v) {
+    p->tex[k] = t;
+    if (v) ONCE_LOG("[RED] DLSS parameter %d given a texture view: the whole texture is used", k);
+}
+NVN_NOPROTO(nvnDlssParametersSetInputColor, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_COLOR, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetDepth, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_DEPTH, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectors, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_MOTION, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetOutputColor, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_OUTPUT, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetBiasCurrentColorMask, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_BIAS, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetExposureTexture, void, dlss_params_t *p, const NVNtexture *t, const NVNtextureView *v) { dlss_set_tex(p, DLSS_EXPOSURE, t, v); }
+NVN_NOPROTO(nvnDlssParametersSetInputSubrectangleSize, void, dlss_params_t *p, int w, int h) { p->iw = w; p->ih = h; }
+NVN_NOPROTO(nvnDlssParametersSetInputColorSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_COLOR][0] = x; p->base[DLSS_COLOR][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetDepthSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_DEPTH][0] = x; p->base[DLSS_DEPTH][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_MOTION][0] = x; p->base[DLSS_MOTION][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetOutputSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_OUTPUT][0] = x; p->base[DLSS_OUTPUT][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetBiasCurrentColorSubrectangleBase, void, dlss_params_t *p, int x, int y) { p->base[DLSS_BIAS][0] = x; p->base[DLSS_BIAS][1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetMotionVectorScale, void, dlss_params_t *p, float x, float y) { p->mv[0] = x; p->mv[1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetJitterOffset, void, dlss_params_t *p, float x, float y) { p->jitter[0] = x; p->jitter[1] = y; }
+NVN_NOPROTO(nvnDlssParametersSetPreExposure, void, dlss_params_t *p, float e) { p->pre_exposure = e; }
+NVN_NOPROTO(nvnDlssParametersSetHistoryReset, void, dlss_params_t *p, uint32_t on) { p->reset = on & 0xff; }   // an NVNboolean: only its low 8 bits are the guest's
+NVN_NOPROTO(nvnDlssParametersSetEvaluationIndex, void, dlss_params_t *p, int i) { (void)p; (void)i; }   // which of the network's frames in flight: the replay runs them in order
+NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_net_t *n, const dlss_params_t *p) {
+    p_dlss *o = REC_SNAP(c, OP_DLSS, p_dlss, DLSS_TEXTURES);
+    for (int k = 0; k < DLSS_TEXTURES; k++) {
+        o->tex[k] = tex_snap(o, SNAP_OFF(p_dlss), k, p->tex[k], (uint64_t)__builtin_return_address(0));
+        memcpy(o->base[k], p->base[k], sizeof o->base[k]);
+    }
+    o->net = (uint64_t)(uintptr_t)n; o->iw = p->iw; o->ih = p->ih; o->ow = n->w; o->oh = n->h; o->flags = n->flags;
+    memcpy(o->mv, p->mv, sizeof o->mv); memcpy(o->jitter, p->jitter, sizeof o->jitter); o->pre_exposure = p->pre_exposure; o->reset = p->reset != 0;
+}
+
 // NVN2 command buffer modes Donkey Kong Bananza sets on every command buffer it begins: they tune how the GPU's front end runs the commands (whether compute may overlap the next
 // work, how geometry is processed, how commands are recorded), not what they produce. The host records and replays every command in order on Metal, so none changes its result.
 // Logged once each with the first value; open: what the values select on the console

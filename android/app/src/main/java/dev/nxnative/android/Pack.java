@@ -382,6 +382,27 @@ final class Pack {
             }
             out.put(e.getKey() + ".nup", target.getPath());
         }
+        if (nup) addedAfter(game, out);
         return out;
+    }
+
+    /**
+     * The add-ons the game's own .nup holds that pack.tsv has no aoc row for (Prepare writes the rows from what it finds, once: a DLC merged into the .nup after
+     * Prepare had no link, so the game saw no DLC until Prepare ran again). Linked as the rows' are; an index with a row is left to its row. Add-ons of this game
+     * only (title ID = the game's + 0x1000 + index). Adapted from Banana Native eden/v0.3.43 af1ed596 (Pack.addedAfter, Forgejo #410; MIT), without its
+     * companion .nup / NSP files, which this launcher does not read
+     */
+    private void addedAfter(File game, Map<String, String> out) {
+        try {
+            Nup n = Nup.open(game);
+            long app = Long.parseUnsignedLong(n.programId(), 16);
+            for (Nup.Pkg p : n.of(Nup.ADDON)) {
+                long idx = p.titleId - app - 0x1000;
+                if (idx <= 0 || idx > 2000 || p.romfsDir == Nup.NONE || aoc.containsKey((int) idx)) continue;
+                out.putIfAbsent(idx + ".nup", game.getAbsoluteFile().getPath());
+            }
+        } catch (IOException | RuntimeException e) {
+            // unreadable or no program ID: only the rows' links
+        }
     }
 }

@@ -1,0 +1,22 @@
+#version 450
+// The task/mesh fallback's check of its packed modules on the device (vka_mesh.inc DM_VK_MESH_PACK_CHECK): the words a dispatch writes,
+// info[0] workgroups of p.words each from the start of the buffer (at most p.limit), are filled with a sentinel (mode 2) before the library's
+// module runs and copied aside (mode 0), filled again before the packed module runs on the same inputs, and compared (mode 1): every word
+// either wrote, or left as the sentinel, must be the same. res[slot]: differing words, the first of them, the words compared, the workgroups.
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) buffer Out { uint o[]; };
+layout(set=0,binding=1,std430) buffer Ref { uint r[]; };
+layout(set=0,binding=2,std430) readonly buffer Info { uint info[]; };
+layout(set=0,binding=3,std430) buffer Res { uint res[]; };
+layout(push_constant) uniform P { uint mode; uint words; uint slot; uint limit; } p;
+void main() {
+    uint n = min(info[0] * p.words, p.limit);
+    uint step = gl_NumWorkGroups.x * 64u;
+    if (p.mode == 2u) { for (uint k = gl_GlobalInvocationID.x; k < n; k += step) o[k] = 0x5eb7c3a1u; return; }
+    if (p.mode == 0u) { for (uint k = gl_GlobalInvocationID.x; k < n; k += step) r[k] = o[k]; return; }
+    uint bad = 0u, first = 0xffffffffu;
+    for (uint k = gl_GlobalInvocationID.x; k < n; k += step) if (r[k] != o[k]) { bad++; first = min(first, k); }
+    uint b = p.slot * 4u;
+    if (bad != 0u) { atomicAdd(res[b], bad); atomicMin(res[b + 1u], first); }
+    if (gl_GlobalInvocationID.x == 0u) { res[b + 2u] = n; res[b + 3u] = info[0]; }
+}

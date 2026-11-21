@@ -85,6 +85,7 @@ typedef struct {
     // instance-rate divisors, logic operations, dual-source blending, geometry and tessellation stages, depth clamp, fill mode lines, wide lines
     int indirect_count;
     int push_desc, vin_dyn, null_desc, ext_storage, idx8, divisor, logic_op, dual_src, geom, tess, depth_clamp, fill_lines, depth_bias_clamp, multi_vp, a2c;
+    int minmax;   // samplerFilterMinmax (Vulkan 1.2): NVN's min / max sampler reduction (vka_tex.c sampler_of; Banana Native 02d081a2)
     int vstores, fstores;   // vertexPipelineStoresAndAtomics, fragmentStoresAndAtomics: texture-use feedback of the pool (vka_tex.c "Texture pool reads") writes from those stages
     // NVN2 task and mesh programs (VK_EXT_mesh_shader: mesh = meshShader, task = taskShader too; DM_VK_MESH=0 leaves it off): their shaders are refused without it (vka_shader.c refusal)
     // and their draws skipped. mesh_inv / task_inv: the largest workgroup (maxMeshWorkGroupInvocations / maxTaskWorkGroupInvocations); mesh_out_v / mesh_out_p: the most vertices /
@@ -247,6 +248,7 @@ typedef struct vka_img {
     // Content from guest storage (vka_tex.c storage_mode): track = re-uploaded when the CPU writes its pages (write-protected after each upload, nvn_dirty.c),
     // stamp = the dirty-page generation taken before the last upload, span = the tracked pool range that holds the storage
     int track, wb_pending; uint64_t stamp; const void *span;
+    uint64_t wb_fence;       // the fence of the submission that holds the last copy of its GPU content back into its storage (vka_tex_writeback; 0: none): vka_wbfollow.h
     uint64_t hash;           // DM_VK_NANSCAN: a hash of the storage at the last upload (vka_tex_id_check)
     uint64_t gw_seen; int from_mem; uint64_t head, up_fence; uint8_t *snap;   // head, up_fence: DM_VK_NANSCAN's storage watch   // the newest GPU write into guest memory its last upload included (vka_tex.c gw_t); content from guest storage (ST_TRACK / ST_FILL)
     // In a sparse virtual pool (hle_nvn.c nvn_sparse_*): the storage is read through the pool's 4 KB page table, never at mem (unmapped pages there are inaccessible);
@@ -345,6 +347,7 @@ void vka_gp_mark(VkCommandBuffer cb, const char *file, int line);
 void vka_gp_pass(const char *desc);
 void vka_gp_draw(uint64_t vertex, uint64_t fragment, uint64_t mesh, uint64_t task, uint32_t units, uint32_t instances, int indirect);   // the timed frame's shaders
 void vka_gp_compute(uint64_t key, uint32_t x, uint32_t y, uint32_t z, int indirect);
+void vka_gp_pass_begun(VkCommandBuffer cb);   // after vkCmdBeginRendering: DM_VK_GPUPROF_DRAWS times the pass's draws one by one from here
 void vka_gp_part(VkCommandBuffer cb);
 void vka_gp_sub_begin(VkCommandBuffer cb, uint64_t frame);
 void vka_gp_commit(VkCommandBuffer cb, uint64_t fence);

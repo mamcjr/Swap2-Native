@@ -39,7 +39,7 @@ static void guest_main(void) {
 }
 
 struct dm_flags g_flag;
-uint64_t g_t0_ns;
+uint64_t g_t0_ns, g_host_t0_ns;
 static void flags_init(void) {
     g_flag.thr = !!getenv("DM_THR"); g_flag.svc = !!getenv("DM_SVC"); g_flag.fs = !!getenv("DM_FS");
     g_flag.dbg = !!getenv("DM_DBG"); g_flag.imports = !!getenv("DM_IMPORTS");
@@ -71,7 +71,7 @@ static void fastboot_apply(void) {
     free(s);
 }
 static void host_preload(int argc, char **argv) {
-    g_t0_ns = proc_start_mono_ns();
+    g_t0_ns = proc_start_mono_ns(); g_host_t0_ns = now_ns();
     fastboot_apply();
     flags_init();
     if (argc < 2) die("usage: dmhost <dir> [mod...] [-- game arguments...]");

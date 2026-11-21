@@ -170,5 +170,7 @@ void vka_drv_fill(const vka_bstate *s, int st, int bank, int pool, uint8_t *d) {
 
 void vka_support_fill(uint8_t *d, size_t n) {
     memset(d, 0, n);
-    for (size_t o = 192; o + 4 <= n && o < 192 + 16 * 73; o += 16) { const float one = 1.0f; memcpy(d + o, &one, 4); }   // render_scale[73] (nvn_mtl.m support_buf)
+    // render_scale[73] (nvn_mtl.m support_buf): always 1.0. The library relies on it: its build replaces each call of the translator's render scale helpers by the
+    // helper's argument (vk_android_spv.py unit_render_scale), so a scale other than 1.0 here would no longer reach those shaders
+    for (size_t o = 192; o + 4 <= n && o < 192 + 16 * 73; o += 16) { const float one = 1.0f; memcpy(d + o, &one, 4); }
 }

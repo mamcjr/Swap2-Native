@@ -51,7 +51,7 @@ typedef struct thr {
     uint32_t handle; uint64_t id;
     uint64_t entry, arg, stack_top; int prio, core; uint64_t mask;
     uint64_t born_ns, exit_ns; uint32_t born_tick, exit_tick;   // Time of creation / exit and the game tick at that time (for the state dump: did the job worker exit before the stall)
-    int started, exited, cancel;
+    int started, entered, exited, cancel;   // entered: its pthread has been dispatched and goes on to guest code
     pthread_t pt; pthread_cond_t cv;
     // Current wait: kind 0=none 1=lock 2=condition 3=address 4=synchronization object
     int wkind, woke; uint64_t waddr, wkey; uint32_t wtag; int64_t wres;
@@ -139,6 +139,23 @@ static int thr_in_handoff(const thr_t *t, const thr_t *self) {
 }
 // Holding G. t blocked (a guest wait, a timed sleep, YieldToAnyThread): it gave its core back, so it no longer holds the threads whose handoff made it runnable
 static void hand_leave(thr_t *t) { t->nhand = 0; }
+// Connecting to a service takes the caller a few round trips, and threads it started on other cores run meanwhile. Mario Tennis Fever's boot stub builds its last decoder thread's arguments on its stack
+// (main+0x97c), starts that thread and calls nn::ro::Initialize, then reuses the same stack slots for a string (main+0xa04): on Horizon the thread has read them long before. The host's Initialize
+// returned at once, and the pthread started too late and read null (main+0x1dc0, once in a dozen boots on the Mac; nxnative b6dbb851, ported from Banana Native #275). So this waits until the threads
+// started so far have been dispatched into guest code, then for a round trip. As in dm_thread_service_request, it models a time; the bound is for a thread the host cannot run
+#define SERVICE_CONNECT_WAIT_NS 50000000
+void dm_thread_service_connect(void) {
+    uint64_t end = now_ns() + SERVICE_CONNECT_WAIT_NS;
+    for (;;) {
+        int waiting = 0;
+        pthread_mutex_lock(&G);
+        for (thr_t *t = g_all; t; t = t->all) if (t->started && !t->entered && !t->exited && !t->host_owned) waiting = 1;
+        pthread_mutex_unlock(&G);
+        if (!waiting || now_ns() >= end) break;
+        usleep(50);
+    }
+    usleep(200);
+}
 // A native HLE condition wait is a guest blocking boundary, like a kernel wait.
 // Called with the HLE's condition mutex held: the waiter cannot miss a signal
 // between publishing its blocked state and pthread_cond_wait releasing that
@@ -317,7 +334,7 @@ static void *thread_main(void *p) {
     crash_thread_init();
     guest_thread_init(); guest_thread_set_id(t->id);
     guest_gate_stack(1);   // the guest runs on its own stack from dm_thread_enter on: this pthread's stack below this frame is where its SVCs run
-    pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); pthread_mutex_unlock(&G);
+    pthread_mutex_lock(&G); while (!t->started) pthread_cond_wait(&t->cv, &G); t->entered = 1; pthread_mutex_unlock(&G);
     { char nb[48], hn[64]; snprintf(hn, sizeof hn, "%#x %s", t->handle, thr_name(t, nb, sizeof nb)); plat_thread_set_name(hn); }   // the guest's name (set before StartThread) for sample / Instruments
     dm_thread_enter(t->entry, t->arg, t->stack_top);   // Does not return: the guest must exit through ExitThread
     die("guest thread entry returned");
@@ -525,7 +542,7 @@ uint32_t svc_thread_main_init(void) {
     pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
     // Its affinity is its ideal core alone, as Horizon creates every thread (Mesosphere KThread::Initialize); it was 7, which a same-core handoff now takes for a thread that can run elsewhere (dm_yield_to_core_peers).
     // Its core is the process's ideal core (the NPDM's main thread core; 0 in every NPDM read so far)
-    t->started = 1; t->prio = 44; t->core = ideal_core(); t->mask = 1ull << t->core; t->pt = pthread_self(); t->mport = plat_thread_of(t->pt); t->host_work = &dm_host_work;
+    t->started = t->entered = 1; t->prio = 44; t->core = ideal_core(); t->mask = 1ull << t->core; t->pt = pthread_self(); t->mport = plat_thread_of(t->pt); t->host_work = &dm_host_work;
     // The iOS boot pthread inherits default QoS. Apply the guest policy before
     // publishing the main thread, just as workers do before running guest code.
     qos_apply(t);
@@ -1209,6 +1226,12 @@ uint32_t hle_dup_readable_handle(uint32_t h) {   // A second read end of the sam
     event_t *e = h_get(h, O_EVENT_R); uint32_t r = 0;
     if (e) { e->refs++; r = h_new(O_EVENT_R, e); }
     pthread_mutex_unlock(&G);
+    return r;
+}
+uint32_t hle_new_event(uint32_t *write_end) {   // A new kernel event, as svcCreateEvent makes it, for a host service to copy to its client: its read end; its write end in *write_end, or none when NULL (never signaled)
+    event_t *e = calloc(1, sizeof *e); if (!e) die("event calloc");
+    e->refs = write_end ? 2 : 1;
+    pthread_mutex_lock(&G); uint32_t r = h_new(O_EVENT_R, e); if (write_end) *write_end = h_new(O_EVENT_W, e); pthread_mutex_unlock(&G);
     return r;
 }
 uint64_t hle_system_event_binding(void *ev) {

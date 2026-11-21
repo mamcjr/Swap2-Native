@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">新增至主畫面</string>
+    <string name="s2_shortcut_add_note">在手機主畫面新增啟動此遊戲的捷徑</string>
+    <string name="s2_shortcut_unsupported">此手機的主畫面應用程式不支援捷徑。</string>
+    <string name="s2_shortcut_gone">%1$s 已不在 %2$s 中。請重新新增遊戲後再使用此捷徑。</string>
+    <string name="s2_shortcut_missing">找不到 %1$s：%2$s</string>
+    <string name="s2_shortcut_blocked_title">主畫面上沒有捷徑？</string>
+    <string name="s2_shortcut_blocked">在小米、Redmi 和 POCO 手機上，只有取得「桌面捷徑」權限後主畫面才會新增捷徑。請在 %1$s 的應用程式權限（其他權限）中允許此權限，然後重新新增捷徑。</string>
+    <string name="s2_shortcut_permissions">應用程式權限</string>
+</resources>

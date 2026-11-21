@@ -14,7 +14,7 @@ import java.util.Map;
 /**
  * A game this APK runs: its profile (dm/games/&lt;title ID&gt;) was compiled into a host of its own, libnxhost_&lt;title ID&gt;.so (build.gradle nxGames,
  * src/main/cpp/CMakeLists.txt), and what the launcher needs of it comes from build.gradle as BuildConfig.NX_PROFILES: one line per game, tab-separated: title ID,
- * name, the shader count Prepare translates, the shader inputs digest, the builds (game.tsv build rows, "version module=build ID …", ';' between builds), and, when the APK has them, the readiness rows (the profile's readiness.tsv: "level|fact|min|what", ';' between rows: Readiness.parseReqs), its status row (playable or bring-up; dm/games/README.md "Readiness rows"), the shader delta rows (vk_delta.tsv's "from" rows: "version=count", ',' between them), its "stamp" rows ("version:old SHA-256:new SHA-256", ';' between them), what Game resolution sets (resolutionEnv), the NDSR input encoding when the shader map has agl's NDSR networks (the Upscaler option, ndsrEnv) and the Scene resolution's palette scale (scene_scale_palette: sceneScale).
+ * name, the shader count Prepare translates, the shader inputs digest, the builds (game.tsv build rows, "version module=build ID …", ';' between builds), and, when the APK has them, the readiness rows (the profile's readiness.tsv: "level|fact|min|what", ';' between rows: Readiness.parseReqs), its status row (playable or bring-up; dm/games/README.md "Readiness rows"), the shader delta rows (vk_delta.tsv's "from" rows: "version=count", ',' between them), its "stamp" rows ("version:old SHA-256:new SHA-256", ';' between them), what Game resolution sets (resolutionEnv), the NDSR input encoding when the shader map has agl's NDSR networks (the Upscaler option, ndsrEnv) and the Scene resolution's palette scale (scene_scale_palette: sceneScale), then the frame hold (fps_hold) and the first release date (release: the library's sort).
  * Swap2-Native: one host runs every game (the profile comes with the pack), so a game whose profile is not built in runs from a profile folder in
  * /sdcard/Switch2/profiles/&lt;title ID&gt;/ (game.tsv and its tables, as in dm/games: {@link #userDir}), read here and handed to the packer (DM_GAMES_DIR). A built-in
  * profile wins over a folder of the same title ID. A game with neither cannot run: the launcher says so instead of starting it.
@@ -29,6 +29,7 @@ final class Profile {
     String ndsr = "";    // agl's NDSR networks (build.gradle ndsrOf): the FSR stand-in's input encoding (profile ndsr_input: sqrt or linear) when the shader map has them, else ""
     String fpsHold = "";   // the frame hold (build.gradle fpsHoldOf): the profile's fps_hold row, "on" / "off", or "" (the pack's own); the launcher passes it as DM_FPS_HOLD
     String foliage = "";   // the Ground foliage (build.gradle foliageOf): "<level>=<keys, ','>|…" from foliage_off rows, or "" (not offered)
+    String release = "";   // the first release date (build.gradle releaseOf): the profile's release row, "YYYY-MM-DD", or "" (none: the library's sort by release date puts it last)
     String scene = "";   // the Scene resolution (build.gradle sceneOf): "<scale>/<expected original scales, ','>[/<label>=<scale>|…]" from scene_scale_palette and scene_preset, or "" (not offered)
 
     /** Whether Game resolution does something for this game (its profile has window_fn, res_levels or graphics_scale rows) */
@@ -167,6 +168,7 @@ final class Profile {
             p.upscaler = c.length > 12 ? c[12] : "";
             p.foliage = c.length > 13 ? c[13] : "";
             p.fpsHold = c.length > 14 ? c[14] : "";
+            p.release = c.length > 15 && c[15].matches("[0-9]{4}-[0-9]{2}-[0-9]{2}") ? c[15] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);
@@ -218,7 +220,7 @@ final class Profile {
                     rows.add(c);
                 }
             } catch (IOException e) { continue; }
-            String name = d.getName(), ndsrInput = "linear", scene = "", upscaler = "", fpsHold = "";
+            String name = d.getName(), ndsrInput = "linear", scene = "", upscaler = "", fpsHold = "", release = "";
             List<String> presets = new ArrayList<>(), foliage = new ArrayList<>();
             List<String> builds = new ArrayList<>(), scale = new ArrayList<>();
             boolean window = false;
@@ -227,6 +229,7 @@ final class Profile {
                 if (c[0].equals("ndsr_default") && c.length > 1 && c[1].equals("fsr")) upscaler = "fsr";
                 if (c[0].equals("scene_scale_palette") && c.length > 1 && scene.isEmpty()) scene = c[1] + "/" + (c.length > 2 ? c[2] : "") + scene;
                 if (c[0].equals("scene_preset") && c.length > 2) presets.add(c[1] + "=" + c[2]);
+                if (c[0].equals("release") && c.length > 1 && c[1].matches("[0-9]{4}-[0-9]{2}-[0-9]{2}")) release = c[1];
                 if (c[0].equals("fps_hold") && c.length > 1 && (c[1].equals("on") || c[1].equals("off"))) fpsHold = c[1];
                 if (c[0].equals("foliage_off") && c.length > 2 && c[1].matches("[A-Za-z0-9_]+") && c[2].matches("[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*"))
                     foliage.add(c[1] + "=" + c[2]);
@@ -252,6 +255,7 @@ final class Profile {
             p.upscaler = upscaler;
             p.foliage = String.join("|", foliage);
             p.fpsHold = fpsHold;
+            p.release = release;
             out.add(p);
         }
         return out;

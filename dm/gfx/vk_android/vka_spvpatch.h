@@ -14,6 +14,9 @@ uint32_t *vka_spv_subgroup_single(const uint32_t *w, size_t nw, size_t *out_nw, 
 // A geometry shader's memory writes, counted (the return; -1 with err on failure) and, with out and a count above 0, the module with each of them made only by the run of
 // the shader that first claims its primitive in the storage buffer at set 0 binding (zeroed for each draw, a word per primitive), malloc'd (*out_nw words): vka_spvpatch.c
 int vka_spv_gs_claim(const uint32_t *w, size_t nw, uint32_t binding, uint32_t **out, size_t *out_nw, char *err, size_t errn);
+// A geometry shader that may end without emitting anything made to emit one degenerate primitive instead (Adreno's binning and rendering passes; vka_spvpatch.c,
+// from Banana Native 0749171c). A malloc'd copy (*out_nw words); NULL with err empty: nothing to do (not such a shader); NULL with the reason in err: not rewritten
+uint32_t *vka_spv_gs_fill(const uint32_t *w, size_t nw, size_t *out_nw, char *err, size_t errn);
 // A pixel shader's float colour outputs at the locations of umask / smask as unsigned / signed integers of their bits (each store bit-cast), for integer attachments: malloc'd
 // (*out_nw words), NULL with the reason in err (vka_spvpatch.c)
 uint32_t *vka_spv_fout_retype(const uint32_t *w, size_t nw, uint32_t umask, uint32_t smask, size_t *out_nw, char *err, size_t errn);
@@ -43,3 +46,8 @@ uint32_t *vka_spv_pool_fb(const uint32_t *w, size_t nw, uint32_t set, uint32_t t
 // A descriptor array at (set, binding) declared with more than len elements gets len (vka_spvpatch.c vka_spv_array_len: a device whose pool table is shorter than the
 // translator's 2^20). The rewritten module (malloc), or NULL when nothing changes
 uint32_t *vka_spv_array_len(const uint32_t *w, size_t nw, uint32_t set, uint32_t binding, uint32_t len, size_t *out_nw);
+
+// Every subgroup shuffle as a ShuffleXor by the invocation's lane ^ its index, which reads the same lane (vka_spvpatch.c, from DroidPlay Core 8115593e: Qualcomm's V@07xx
+// compilers crash on the shuffle). A malloc'd copy (*out_nw words, *sites shuffles rewritten); NULL with err empty when the module has no shuffle, NULL with the reason in err
+// when it cannot be rewritten (no SubgroupLocalInvocationId input or 32-bit unsigned type)
+uint32_t *vka_spv_shuffle_xor(const uint32_t *w, size_t nw, size_t *out_nw, int *sites, char *err, size_t errn);

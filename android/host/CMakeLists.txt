@@ -153,6 +153,12 @@ target_include_directories(file_redirect_hook PRIVATE ${ADT}/include)
 target_compile_options(file_redirect_hook PRIVATE -O2 -w)
 target_link_options(file_redirect_hook PRIVATE -Wl,-z,global)
 target_link_libraries(file_redirect_hook PRIVATE hook_impl)
+# libbinder_compat_hook.so: the API 36 Binder annotation Qualcomm's 891.x drivers import, for Android 15 and older; hook_impl.cpp loads it into the driver's namespace
+# for a custom driver on API < 36 only (adreno_binder_compat.c). Plain C, one export, so the global group it joins gains nothing else
+add_library(binder_compat_hook SHARED ${CMAKE_CURRENT_SOURCE_DIR}/adreno_binder_compat.c)
+target_compile_options(binder_compat_hook PRIVATE -O2 -fvisibility=hidden)
+target_link_options(binder_compat_hook PRIVATE -Wl,-z,global)
+target_link_libraries(binder_compat_hook PRIVATE dl)
 
 # nxreplay: the frame replayer, an executable for adb shell (pushed beside libnxhost.so, run with LD_LIBRARY_PATH; android/TESTING.md "Frame capture and replay"). Gradle does not
 # build it (the APK does not carry it): cmake --build <build> --target nxreplay

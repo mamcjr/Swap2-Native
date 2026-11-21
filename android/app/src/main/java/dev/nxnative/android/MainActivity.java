@@ -1019,6 +1019,7 @@ public final class MainActivity extends Activity {
         prepSummary(Ondevice.state());
         Profile.reload();   // a profile folder put in Switch2/profiles while the app was away (Profile.userDir)
         if (gameBox != null && Game.load(this).size() != games.size()) refresh();   // a card FrontendLaunch added while Home was in the background
+        else if (gameBox != null && sortedPlayed != null && !sortedPlayed.equals(Game.playedTimes(this))) refresh();   // back from a game: the Last played order moves it
         onResumeViews();
         if (headerStatus != null) headerStatus.start();   // the header's clock and battery follow the phone again
         getSystemService(android.hardware.input.InputManager.class).registerInputDeviceListener(padListener, null);
@@ -1029,6 +1030,7 @@ public final class MainActivity extends Activity {
         // search adds the games copied into Switch2/Games (libraryScan: quietly, off the main thread)
         Switch2Migration.start(this, this::refresh, this::libraryScan);
         GameSettings.builtinDefaults(this);   // the profiles' mods that are on by default (BuiltinMods), once per game
+        GameShortcuts.refresh(this);   // the app icon's menu of the last played games, and the pinned shortcuts' covers (off the main thread)
     }
 
     private void onResumeViews() {
@@ -1082,6 +1084,7 @@ public final class MainActivity extends Activity {
     void refresh() {
         games.clear();
         games.addAll(Game.load(this));
+        sortGames();
         if (gameBox == null) return;
         if (libraryScroll != null) homeScrollX = libraryScroll.getScrollX();
         gameBox.removeAllViews();
@@ -1112,9 +1115,19 @@ public final class MainActivity extends Activity {
         counted.setSingleLine(true);
         counted.setEllipsize(TextUtils.TruncateAt.END);
         counted.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);   // the label's description says it
-        LinearLayout.LayoutParams cl = Ui.weight();
+        LinearLayout.LayoutParams cl = Ui.wrap();
         cl.leftMargin = dp(8);
+        cl.gravity = Gravity.CENTER_VERTICAL;
         idRow.addView(counted, cl);
+        if (!games.isEmpty()) {   // the library's order (sortOrder), a small chip after the count; X on a gamepad opens it too
+            sortView = sortChip(small);
+            LinearLayout.LayoutParams sp = Ui.wrap();
+            sp.leftMargin = dp(10);
+            sp.gravity = Gravity.CENTER_VERTICAL;
+            idRow.addView(sortView, sp);
+        } else sortView = null;
+        libTop.setTouchDelegate(null);   // the Sort chip's band, set again once it is laid out (sortChip)
+        idRow.addView(Ui.spacer(this));
         if (!small || getResources().getConfiguration().fontScale < 1.3f) libTop.addView(idRow);
         // The selected game: its name as it is spelled (never upper-cased), one line, ellipsized, so a long name never grows the block or moves the covers;
         // its state / version line beside it on the same baseline (under it on a narrow window)
@@ -1174,6 +1187,98 @@ public final class MainActivity extends Activity {
         hints(true);
         select(selected);
         prepSummary(Ondevice.state());
+    }
+
+    // ---- The library's order (LibraryOrder): the Sort chip after the count, its dialog, and X on a gamepad. Remembered in the "library" preferences' sort;
+    // none chosen keeps the order the games were added in ----
+    private TextView sortView;   // the Sort chip in the library's line (refresh), null when it has none
+    private java.util.Map<String, Long> sortedPlayed;   // the last starts the games were put in Last played order by (null: another order), so onResume sees a newer one
+
+    private LibraryOrder sortChoice() { return LibraryOrder.of(Prefs.open(this, "library").getString("sort", null)); }
+
+    /** Puts games in the chosen order: by name, by the profile's release date, or by the last start (Game.playedTimes, keyed by the game's folder) */
+    private void sortGames() {
+        LibraryOrder o = sortChoice();
+        sortedPlayed = o != null && o.key == LibraryOrder.Key.PLAYED ? Game.playedTimes(this) : null;
+        if (o == null || games.size() < 2) return;
+        java.util.Map<String, Long> played = sortedPlayed != null ? sortedPlayed : java.util.Collections.emptyMap();
+        o.sort(games, g -> g.name, g -> { Profile p = Profile.of(g.titleId); return p == null ? null : p.release; }, g -> played.get(g.gameDir));
+    }
+
+    private String sortLabel(LibraryOrder o) {
+        switch (o.id()) {
+            case "name_asc": return getString(R.string.s2_sort_name_asc);
+            case "name_desc": return getString(R.string.s2_sort_name_desc);
+            case "release_asc": return getString(R.string.s2_sort_release_asc);
+            case "release_desc": return getString(R.string.s2_sort_release_desc);
+            case "played_asc": return getString(R.string.s2_sort_played_asc);
+            default: return getString(R.string.s2_sort_played_desc);
+        }
+    }
+
+    /**
+     * The Sort chip: the chosen order's name (Sort before one is chosen) in the small rounded label style (Ui.chip), pressable and focusable. Its touch band is
+     * 48 dp high: once laid out it reaches down over the selected game's name (no target there, libTop's TouchDelegate), so the line stays as low as it was
+     */
+    private TextView sortChip(boolean small) {
+        LibraryOrder o = sortChoice();
+        TextView t = Ui.text(this, o == null ? getString(R.string.s2_sort) : sortLabel(o), small ? 11 : 12, R.color.bn_text_2, 600);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setIncludeFontPadding(false);
+        t.setBackground(Ui.ripple(this, Ui.round(Ui.col(this, R.color.bn_tint), dp(999), 0, 0)));
+        t.setPadding(dp(10), dp(small ? 4 : 5), dp(10), dp(small ? 4 : 5));
+        t.setContentDescription(o == null ? getString(R.string.s2_sort_title) : getString(R.string.s2_sort_now, sortLabel(o)));
+        t.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(View host, android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                info.setClassName(Button.class.getName());
+            }
+        });
+        t.setClickable(true);
+        t.setFocusable(true);
+        t.setSoundEffectsEnabled(false);
+        t.setOnClickListener(LauncherEffects.click(v -> sortOrder()));
+        t.addOnLayoutChangeListener((v, l, top, r, b, ol, ot, or, ob) -> {
+            if (v != sortView || !(v.getParent() instanceof View)) return;
+            View line = (View) v.getParent();
+            android.graphics.Rect hit = new android.graphics.Rect();
+            v.getHitRect(hit);
+            hit.offset(line.getLeft(), line.getTop());
+            hit.bottom = Math.max(hit.bottom, hit.top + dp(48));
+            libTop.setTouchDelegate(new android.view.TouchDelegate(hit, v));
+        });
+        return t;
+    }
+
+    /** The Sort dialog: the six orders (each key ascending and descending), the chosen one checked; a choice reorders Home at once and is remembered */
+    private void sortOrder() {
+        if (games.isEmpty()) return;
+        LibraryOrder now = sortChoice();
+        String[] labels = new String[LibraryOrder.ALL.length];
+        int checked = -1;
+        for (int k = 0; k < labels.length; k++) {
+            labels[k] = sortLabel(LibraryOrder.ALL[k]);
+            if (now != null && LibraryOrder.ALL[k].id().equals(now.id())) checked = k;
+        }
+        LauncherEffects.play(this, LauncherEffects.Cue.PANEL_OPEN);
+        AlertDialog d = new AlertDialog.Builder(this).setTitle(R.string.s2_sort_title)
+                .setSingleChoiceItems(labels, checked, (x, w) -> {
+                    x.dismiss();
+                    LibraryOrder o = LibraryOrder.ALL[w];
+                    if (now != null && o.id().equals(now.id())) return;
+                    Prefs.open(this, "library").edit().putString("sort", o.id()).commit();
+                    // The new order from its start: the first game selected and the row scrolled back, the focus on it for a gamepad
+                    if (libraryScroll != null) libraryScroll.scrollTo(0, 0);
+                    homeScrollX = 0;
+                    selected = null;
+                    refresh();
+                    if (!getWindow().getDecorView().isInTouchMode()) getWindow().getDecorView().post(this::focusSelected);
+                })
+                .setNegativeButton(R.string.s2l_cancel, null).create();
+        d.show();
+        android.widget.ListView lv = d.getListView();
+        if (lv != null && checked >= 0) lv.setSelection(checked);
     }
 
     /**
@@ -1306,7 +1411,8 @@ public final class MainActivity extends Activity {
     /**
      * The gamepad's buttons as PadNav names them (the Nintendo layout by default: A on the right, B at the bottom). A on a cover does the shelf's action (Play,
      * Prepare, ...), anywhere else it presses what has the focus (the first press after a touch only shows the focus, on the selected cover at Home); B is Back;
-     * Y opens the selected game's settings (its Options menu for a game without a profile); L and R go to the dock's previous or next page (tab). X does nothing
+     * Y opens the selected game's settings (its Options menu for a game without a profile); X the library's Sort (sortOrder); L and R go to the dock's previous
+     * or next page (tab)
      */
     private boolean padKey(android.view.KeyEvent e) {
         int k = PadNav.label(this, e);
@@ -1341,7 +1447,8 @@ public final class MainActivity extends Activity {
                 }
                 return true;
             }
-            case android.view.KeyEvent.KEYCODE_BUTTON_X:
+            case android.view.KeyEvent.KEYCODE_BUTTON_X:   // the library's Sort (its chip in the library's line)
+                if (released(e, k) && home && !tiles.isEmpty()) sortOrder();
                 return true;
             case android.view.KeyEvent.KEYCODE_BUTTON_L1:
             case android.view.KeyEvent.KEYCODE_BUTTON_R1:
@@ -1628,7 +1735,7 @@ public final class MainActivity extends Activity {
         hintAction = library ? (TextView) ((ViewGroup) a).getChildAt(((ViewGroup) a).getChildCount() - 1) : null;
         hintRow.addView(a);
         if (library) {
-            String[][] more = {{"B", getString(R.string.s2_hint_back)}, {"Y", getString(R.string.s2_settings)}, {"L R", getString(R.string.s2_hint_tabs)}};
+            String[][] more = {{"B", getString(R.string.s2_hint_back)}, {"Y", getString(R.string.s2_settings)}, {"X", getString(R.string.s2_sort)}, {"L R", getString(R.string.s2_hint_tabs)}};
             for (String[] m : more) {
                 LinearLayout.LayoutParams lp = Ui.wrap();
                 lp.leftMargin = dp(compact() ? 18 : 24);
@@ -1768,6 +1875,12 @@ public final class MainActivity extends Activity {
         if (noProfile == null) Ui.add(box, new Ui.Setting(this, R.drawable.s2_ic_settings, getString(R.string.s2_game_settings), v -> { d[0].dismiss(); GameSettings.dialog(this, g); }).chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, R.drawable.s2_ic_folder, this.getString(R.string.s2_folders), v -> { d[0].dismiss(); Folders.dialog(this, g); }).chevron(this).view, 0);
         Ui.add(box, new Ui.Setting(this, R.drawable.s2_ic_external, this.getString(R.string.s2_share_log), v -> { d[0].dismiss(); shareLog(g.titleId); }).chevron(this).view, 0);
+        // Add to Home screen: a shortcut that starts this game through the opening (GameShortcuts, ShortcutLaunch)
+        if (noProfile == null && GameShortcuts.pinSupported(this))
+            Ui.add(box, new Ui.Setting(this, "📌", getString(R.string.s2_shortcut_add), v -> {
+                d[0].dismiss();
+                if (!GameShortcuts.pin(this, g)) Toast.makeText(this, R.string.s2_shortcut_unsupported, Toast.LENGTH_LONG).show();
+            }).value(getString(R.string.s2_shortcut_add_note)).chevron(this).view, 0);
         // Save, under its own heading, each with what it does: the app's own backups (<Switch2>/save-backups/<id>/, verified; a restore or import backs up the current
         // save first) and a save as one .zip, in from another emulator or phone, out for one (SaveUi, SaveStore, SaveZip). Import takes a .zip, never a folder
         Ui.add(box, Ui.section(this, getString(R.string.s2_saves)), 16);

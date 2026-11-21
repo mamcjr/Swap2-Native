@@ -9,6 +9,8 @@
 #include "../../gfx/vk_android/vka_selftest_spv.h"
 #include "t_android_spvpatch_img.h"
 #include "t_android_spvpatch_pfb.h"
+#include "t_android_spvpatch_gs.h"
+#include "t_android_spvpatch_shx.h"
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -238,6 +240,39 @@ int main(void) {
             printf("t_android_spvpatch: %s: %d memory writes claimed\n", gs, found);
             free(w); }
     }
+    {   // vka_spv_gs_fill: a culling geometry shader made to emit a degenerate triangle on each path that would emit none (Banana Native 0749171c)
+        const struct { const uint32_t *w; size_t n; const char *tag; } gm[] = {{SPV_GSFILL_CULL, sizeof SPV_GSFILL_CULL / 4, "gs fill (SPIR-V 1.3)"},
+                                                                              {SPV_GSFILL_CULL15, sizeof SPV_GSFILL_CULL15 / 4, "gs fill (SPIR-V 1.5)"}};
+        for (int k = 0; k < 2; k++) {
+            const uint32_t *w = gm[k].w; size_t nw = gm[k].n;
+            uint32_t *x = vka_spv_gs_fill(w, nw, &on, err, sizeof err);
+            CHECK(x, "%s: not rewritten: %s", gm[k].tag, err);
+            if (!x) continue;
+            int nret = count_op(w, nw, 253);   // OpReturn
+            CHECK(count_op(x, on, 253) == nret && nret == 3, "%s: the returns kept (%d)", gm[k].tag, nret);
+            CHECK(count_op(x, on, 218) == count_op(w, nw, 218) + 3 * nret, "%s: three vertices emitted before each return", gm[k].tag);
+            CHECK(count_op(x, on, 219) == count_op(w, nw, 219) + nret, "%s: a primitive ended before each return", gm[k].tag);
+            CHECK(count_op(x, on, 247) == count_op(w, nw, 247) + nret, "%s: a selection around each fill", gm[k].tag);
+            CHECK(count_op(x, on, 62) == count_op(w, nw, 62) + 1 + count_op(w, nw, 218) + 3 * nret, "%s: the flag cleared once and set after each emit; a Position store per fill vertex", gm[k].tag);
+            uint32_t epn = 0, xepn = 0;
+            for (size_t i = 5; i < nw && (w[i] >> 16); i += w[i] >> 16) if ((w[i] & 0xffff) == 15) epn = w[i] >> 16;
+            for (size_t i = 5; i < on && (x[i] >> 16); i += x[i] >> 16) if ((x[i] & 0xffff) == 15) xepn = x[i] >> 16;
+            CHECK(xepn == epn + (w[1] >= 0x10400 ? 1u : 0u), "%s: the flag in the entry point's interface only from SPIR-V 1.4 (%u -> %u words)", gm[k].tag, epn, xepn);
+            if (val) CHECK(validate(x, on, gm[k].tag), "%s valid", gm[k].tag);
+            size_t on2 = 0; uint32_t *y = vka_spv_gs_fill(x, on, &on2, err, sizeof err);   // a second pass is still taken (the fill emits) and still valid
+            if (y && val) CHECK(validate(y, on2, "gs fill twice"), "%s twice valid", gm[k].tag);
+            free(y); free(x);
+        }
+        uint32_t *x = vka_spv_gs_fill(SPV_GSFILL_HELPER, sizeof SPV_GSFILL_HELPER / 4, &on, err, sizeof err);
+        CHECK(!x && !err[0], "gs fill: emits in a function of their own are left alone (%s)", err);
+        free(x);
+        x = vka_spv_gs_fill(SPV_TRI_FRAG, sizeof SPV_TRI_FRAG / 4, &on, err, sizeof err);
+        CHECK(!x && !err[0], "gs fill: a pixel shader is left alone (%s)", err);
+        free(x);
+        x = vka_spv_gs_fill(SPV_GSFILL_CULL, 9, &on, err, sizeof err);
+        CHECK(!x && err[0], "gs fill: a module cut short is refused");
+        free(x);
+    }
     {   // Texture pool reads (vka_spv_pool_fb): a bit set before each read of the pool, early depth tests where they give the same result
         size_t pn = sizeof SPV_PFB_FRAG / 4; int sites = 0, early = 0;
         uint32_t *x = vka_spv_pool_fb(SPV_PFB_FRAG, pn, 1, 0, 2, 0, VKA_PFB_EARLY, 1, &on, &sites, &early, err, sizeof err);
@@ -316,6 +351,23 @@ int main(void) {
         CHECK(!vka_spv_array_len(m, mn, 1, 1, 4096, &an), "the sampler array at its own length is left alone");
         CHECK(!vka_spv_array_len(m, mn, 0, 0, 16, &an), "no variable at that set: nothing changes");
         CHECK(!vka_spv_array_len(m, 9, 1, 0, 16, &an), "a module cut short is refused");
+    }
+    {   // vka_spv_shuffle_xor (DroidPlay Core 8115593e): each shuffle a ShuffleXor by lane ^ index, the same lane read; a module without shuffles is left alone
+        size_t sn = sizeof SPV_SHX_COMP / 4, on = 0; int ns = 0; char e[256];
+        uint32_t *x = vka_spv_shuffle_xor(SPV_SHX_COMP, sn, &on, &ns, e, sizeof e);
+        CHECK(x, "the shuffles are not rewritten: %s", e);
+        if (x) {
+            CHECK(ns == 2 && count_op(x, on, 345) == 0 && count_op(x, on, 346) == count_op(SPV_SHX_COMP, sn, 346) + 2, "two shuffles made ShuffleXor (%d sites)", ns);
+            CHECK(count_op(x, on, 198) == count_op(SPV_SHX_COMP, sn, 198) + 2 && x[3] == SPV_SHX_COMP[3] + 4, "an xor and a lane load each, four new ids");
+            if (val) CHECK(validate(x, on, "shuffle xor"), "valid SPIR-V");
+            size_t on2 = 0; int ns2 = 0; e[0] = 1;
+            CHECK(!vka_spv_shuffle_xor(x, on, &on2, &ns2, e, sizeof e) && !e[0], "a module without shuffles: nothing to do");
+            free(x);
+        }
+        uint32_t *t = malloc(sizeof SPV_SHX_COMP); memcpy(t, SPV_SHX_COMP, sizeof SPV_SHX_COMP);
+        for (size_t i = 5; i < sn; i += t[i] >> 16) if ((t[i] & 0xffff) == 71 && t[i + 2] == 11 && t[i + 3] == 41) t[i + 3] = 40;   // the lane built-in renamed away
+        CHECK(!vka_spv_shuffle_xor(t, sn, &on, &ns, e, sizeof e) && e[0], "no lane built-in: refused with a reason");
+        free(t);
     }
     printf("t_android_spvpatch: %s%s\n", g_fail ? "FAILED" : "ok", val ? "" : " (no spirv-val: structure only)");
     return g_fail != 0;

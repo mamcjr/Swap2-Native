@@ -108,6 +108,7 @@ enum {
     OP_STENCIL, OP_POLY_OFFSET, OP_DRAW, OP_DRAW_IDX, OP_DISPATCH, OP_BARRIER,
     OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST,
     OP_WAIT_EVENT, OP_WAIT_SYNC,   // GPU waits: the queue goes on past them once the event or sync is reached (vk_android/vka_qsched.h; the Metal replay passes them at once)
+    OP_DLSS,   // NVN2's DLSS evaluation (p_dlss; hle_nvn.c "NVN2's DLSS")
     OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
@@ -194,6 +195,11 @@ typedef struct { uint64_t addr, size; uint32_t value, _pad; } p_clear_buf;   // 
 typedef struct { float rgba[4]; } p_blend_color;
 typedef struct { float ref; } p_alpha_ref;
 typedef struct { uint16_t compute, offset; uint32_t size; uint8_t data[]; } p_push_const;   // NVN2 push constants: the bytes at offset in the graphics or compute block (DMSH_PUSH_*)   // SetAlphaRef: the reference of the alpha test (ColorStateSetAlphaTest; nvn_mtl.m at_bind)
+// NVN2's DLSS evaluation (hle_nvn.c "NVN2's DLSS"): the textures the game hands it, the network's output size and flags, the input and output subrectangles, and the frame's values
+enum { DLSS_COLOR, DLSS_DEPTH, DLSS_MOTION, DLSS_OUTPUT, DLSS_BIAS, DLSS_EXPOSURE, DLSS_TEXTURES };
+typedef struct { const tex_t *tex[DLSS_TEXTURES]; uint64_t net; int32_t iw, ih, ow, oh, base[DLSS_TEXTURES][2]; float mv[2], jitter[2], pre_exposure; uint32_t flags, reset; } p_dlss;
+// What the FSR 3.1 stand-in takes from an evaluation (vka_fsr3.c, Banana Native's form): the colour and output rectangles as a copy record's, depth, motion and the frame's values
+typedef struct { p_copy_t2t c; const tex_t *depth, *motion; float jitter[2], mv[2]; uint32_t reset; } p_dlss_t2t;
 typedef struct { int32_t index, pad; uint64_t addr, size; } p_tf_bind;   // BindTransformFeedbackBuffer(s): one record per buffer (index 0-3)
 typedef struct { int32_t what, pad; uint64_t ctl; } p_tf_state;          // what: 0 begin, 1 end, 2 pause, 3 resume; ctl = the game's 32-byte control buffer
 typedef struct { int32_t on; } p_rast_discard;

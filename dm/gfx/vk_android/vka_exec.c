@@ -7,10 +7,16 @@
 #include "../nvn/nvn_mtl.h"
 #include "../nvn/nvn_timestamp.h"
 #include "vka_present_rot.h"
+#include "vka_t2tpath.h"   // how a texture copy is made: copy, blit or a drawn depth copy (Banana Native a4a64a03; t_android_t2tpath.c)
+#include "vka_depthcopy.h"   // the drawn depth copy (vka_t2t_depth_draw)
+#include "vka_tstick.h"   // the timestamp tick measured against the host clock (Banana Native 5e4212d1; t_android_tstick.c)
 #include "vka_qsched.h"
+#include "../nvn/nvn_capture.h"   // (cap_rcnd: the render-condition decisions of a captured frame)
 #include "vka_ubq.h"   // inline uniform updates' ranges and batch rule (t_android_ubq.c)
 #include "vka_rcix.h"   // render conditions: the newest report in flight by address (t_android_rcix.c)
 #include "vka_oqbatch.h"   // occlusion queries: a completed list's reads and resets in batches (t_android_rcix.c)
+#include "vka_dlss.h"   // NVN2's DLSS stand-ins (vka_dlss.c, vka_fsr3.c): dlss_eval
+#include "vka_ndsr.h"   // vka_ndsr_note_rt (OP_SET_RT)
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -122,6 +128,34 @@ static int rc_known(uint64_t a, uint64_t *v, int *why) {
     memcpy(v, (const void *)(uintptr_t)a, 8); *why = RCS_DRAW; return 1;
 }
 uint64_t vka_frame(void);
+// The decisions of a captured frame (DM_NVN_CAPTURE, vka_capture.c) and their replay (vka_replay.c). A condition on a report still in flight is unknown and draws, so a
+// decision depends on whether the GPU had finished that report when the replay recorded the condition: timing, which a replay of the frame cannot have the same (Ocarina
+// of Time: some 660 a frame on occlusion reports in flight). The capture records each decision in recording order with its report's address; the replayer gives the same
+// decision to the condition at the same place and address, and decides by itself from the first one that does not match (said once)
+static pthread_mutex_t g_rcr_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_rcr_mode; static cap_rcnd *g_rcr; static size_t g_rcr_n, g_rcr_cap, g_rcr_pos; static uint64_t g_rcr_same, g_rcr_off;   // mode: 0 off, 1 recording, 2 replaying
+void vka_rc_record(int on) { pthread_mutex_lock(&g_rcr_mu); g_rcr_mode = on ? 1 : 0; if (on) g_rcr_n = 0; pthread_mutex_unlock(&g_rcr_mu); }
+size_t vka_rc_recorded(const cap_rcnd **out) { *out = g_rcr; return g_rcr_n; }   // (after vka_rc_record(0))
+void vka_rc_replay(const cap_rcnd *d, size_t n) {
+    pthread_mutex_lock(&g_rcr_mu);
+    if (n > g_rcr_cap) { g_rcr = realloc(g_rcr, n * sizeof *g_rcr); g_rcr_cap = n; }
+    if (n) memcpy(g_rcr, d, n * sizeof *d);
+    g_rcr_n = n; g_rcr_pos = 0; g_rcr_same = g_rcr_off = 0; g_rcr_mode = n ? 2 : 0;
+    pthread_mutex_unlock(&g_rcr_mu);
+}
+void vka_rc_replay_stats(uint64_t *same, uint64_t *off, uint64_t *left) { pthread_mutex_lock(&g_rcr_mu); *same = g_rcr_same; *off = g_rcr_off; *left = g_rcr_mode == 2 ? g_rcr_n - g_rcr_pos : 0; pthread_mutex_unlock(&g_rcr_mu); }
+static int rc_recorded(uint64_t addr, int skip) {
+    if (!__atomic_load_n(&g_rcr_mode, __ATOMIC_RELAXED)) return skip;
+    pthread_mutex_lock(&g_rcr_mu);
+    if (g_rcr_mode == 1) { if (g_rcr_n == g_rcr_cap) { g_rcr_cap = g_rcr_cap ? 2 * g_rcr_cap : 4096; g_rcr = realloc(g_rcr, g_rcr_cap * sizeof *g_rcr); } g_rcr[g_rcr_n++] = (cap_rcnd){addr, (uint32_t)skip, 0}; }
+    else if (g_rcr_mode == 2) {
+        if (g_rcr_pos < g_rcr_n && g_rcr[g_rcr_pos].addr == addr) { skip = (int)g_rcr[g_rcr_pos++].skip; g_rcr_same++; }
+        else { g_rcr_off++; VRED("render conditions: decision %zu of the captured frame was for the report at %#llx, this one is at %#llx: the replay decides by itself from here", g_rcr_pos,
+                                 g_rcr_pos < g_rcr_n ? (unsigned long long)g_rcr[g_rcr_pos].addr : 0ull, (unsigned long long)addr); g_rcr_mode = 0; }
+    }
+    pthread_mutex_unlock(&g_rcr_mu);
+    return skip;
+}
 static int rc_eval(const p_render_cond *rc) {   // 1 = the block that begins here is not drawn
     if (rc->mode >= 2) { g_rc_stat[rc->mode == 2 ? RCS_ON : RCS_OFF]++; return rc->mode == 3; }
     uint64_t x = 0, y = 0; int wx = RCS_DRAW, wy = RCS_DRAW;
@@ -136,7 +170,7 @@ static int rc_eval(const p_render_cond *rc) {   // 1 = the block that begins her
                  kx ? "known" : "unknown", (unsigned long long)x, wx, ky ? "known" : "unknown", (unsigned long long)y, wy, !kx || !ky ? "drawn (unknown)" : skip ? "skipped" : "drawn"); }
     }
     if (kx && ky && (wx == RCS_TS || wy == RCS_TS)) g_rc_stat[RCS_TS]++;
-    return skip;
+    return rc_recorded(rc->addr, skip);
 }
 // Every 300 frames with the replay statistics (DM_VK_STATS): what the render conditions did a frame (no line while the game sets none)
 static void rc_stats(char *b, size_t n, double frames) {
@@ -556,6 +590,7 @@ static uint64_t sh_get(uint32_t qi, uint32_t use) {
     }
     return 0;
 }
+static _Atomic uint64_t g_tk_post[NSLOT];   // when a slot's submission had its completion processed (post_run, op kind 8): the tick's measure (tick_sample)
 static void post_run(void *ops_, int n) {   // the completion thread, in submission order, before the fence reads as done
     pop *ops = ops_;
     uint64_t g = guest_ns(); if (!g) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); g = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
@@ -601,6 +636,7 @@ static void post_run(void *ops_, int n) {   // the completion thread, in submiss
             uint64_t rec[2] = {DM_GAME_RENDER_COND ? 0 : tk, tk}; (void)tt;
             memcpy((void *)(uintptr_t)ops[i].addr, rec, sizeof rec); continue;
         }
+        if (ops[i].kind == 8) { atomic_store(&g_tk_post[(ops[i].q0 - 1) % NSLOT], now_ns()); continue; }   // this slot's completion processed now (tick_sample)
         if (ops[i].kind >= 4 && ops[i].kind <= 7) { oq_done(&ops[i], ticks, &oqb); continue; }   // a counted samples-passed report, queries given back (Occlusion queries)
         if (ops[i].kind == 1) { volatile uint32_t *v = (volatile uint32_t *)(uintptr_t)ops[i].addr; if (ops[i].mode == NVN_EVENT_SIGNAL_MODE_ADD) *v += ops[i].v; else *v = ops[i].v; }
         else {
@@ -647,6 +683,25 @@ static void gpu_tag_begin(uint64_t f) {
     if (atomic_load(&g_gpu[k].frame) != f) { atomic_store(&g_gpu[k].frame, f); atomic_store(&g_gpu[k].ns, 0); atomic_store(&g_gpu[k].pending, 0); atomic_store(&g_gpu[k].t0, UINT64_MAX); atomic_store(&g_gpu[k].t1, 0); atomic_store(&g_gpu[k].span, 0); }
     atomic_fetch_add(&g_gpu[k].pending, 1);
 }
+// The tick's real length (vka_tstick.h, from Banana Native 5e4212d1): each finished submission gives its last timestamp and the host time its completion was processed
+// (g_tk_post). Once five 2 s windows are in, a driver's timestampPeriod more than 2 % off the measure is replaced for every GPU time from then on: the frame's busy time
+// (mtl_gpu_ms: the frame step's GPU cost, the [longframe] and pace lines), the segment timestamps a game reads, DM_VK_GPUPROF (vka_ts_tick_ns). Turnip T30 on an Adreno
+// 740 reports 33.11 ns for a counter that advances once in 52.08 ns: every GPU time read 36 % low. DM_VK_TS_TICK=0 (restart) keeps the driver's period
+static vktk g_tk; static int g_tk_done;
+double vka_ts_tick_ns(void) { return g_ts_ok > 0 ? g_ts_ns : 0; }
+static void tick_sample(unsigned slot, uint64_t last_tick) {
+    uint64_t post = atomic_load(&g_tk_post[slot]);
+    if (g_tk_done || !post) return;
+    double m = vktk_add(&g_tk, last_tick, post);
+    if (!(m > 0)) return;
+    g_tk_done = 1;
+    double drv = V.props.limits.timestampPeriod, pick = vktk_pick(drv, m); int on = VKA_ENV("DM_VK_TS_TICK", 1) != 0;
+    if (pick == drv) { VLOG("GPU time: the timestamp tick measured against the host clock is %.2f ns, as the driver's %.2f ns", m, drv); return; }
+    VLOG("GPU time: the driver reports %.2f ns a timestamp tick, but against the host clock its counter advances one tick in %.2f ns (%d windows of %.0f s): its GPU times read %.0f %% %s; %s",
+         drv, m, (int)VKTK_N, VKTK_WINDOW_NS / 1e9, fabs(m / drv - 1) * 100 / (m > drv ? m / drv : 1), m > drv ? "low" : "high",
+         on ? "GPU times use the measured tick from here on (DM_VK_TS_TICK=0 keeps the driver's)" : "the driver's is kept (DM_VK_TS_TICK=0)");
+    if (on) { g_ts_ns = m; if (g_sqp) g_sq_ns = m; }
+}
 static void gpu_slot_done(unsigned slot) {   // the slot's fence is done: its two timestamps are there
     if (!g_slot_ts[slot]) return;
     g_slot_ts[slot] = 0;
@@ -660,6 +715,7 @@ static void gpu_slot_done(unsigned slot) {   // the slot's fence is done: its tw
         for (uint32_t i = 0; i < np; i++) { uint64_t a = t[2 * i] > prev ? t[2 * i] : prev, b = t[2 * i + 1]; if (b > a) busy += b - a; if (b > prev) prev = b; }
         uint64_t s0 = (uint64_t)(t[0] * g_ts_ns), s1 = (uint64_t)(t[2 * np - 1] * g_ts_ns);
         atomic_fetch_add(&g_gpu[k].ns, (uint64_t)(busy * g_ts_ns)); atomic_fetch_add(&g_gpu[k].span, s1 - s0);
+        tick_sample(slot, t[2 * np - 1]);
         if (s0 < atomic_load(&g_gpu[k].t0)) atomic_store(&g_gpu[k].t0, s0);
         if (s1 > atomic_load(&g_gpu[k].t1)) atomic_store(&g_gpu[k].t1, s1);
     }
@@ -841,7 +897,7 @@ void vka_rp_sub_begin(void) {
     vka_gbar_cb(g_cb);   // the game's barriers between dispatches (vka_gbar.c) follow this command buffer
     if (ts_init()) {
         qf.reset(g_cb, g_qp, k * QPS, QPS); qf.write(g_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, k * QPS);
-        g_slot_frame[k] = g_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; gpu_tag_begin(g_frame);
+        g_slot_frame[k] = g_frame; g_slot_ts[k] = 1; g_slot_parts[k] = 1; gpu_tag_begin(g_frame); atomic_store(&g_tk_post[k], 0);
         g_sq_n = 0; g_sq_base = (int)k * SEGQ; g_slot_nq[k] = 0; if (atomic_fetch_add(&g_slot_use[k], 1) == UINT32_MAX) atomic_store(&g_slot_use[k], 1);   // (use 0 = none)
         if (seg_ts() && !g_sqp) {
             VkQueryPoolCreateInfo ci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NSLOT * SEGQ};
@@ -955,6 +1011,7 @@ static uint64_t sub_commit(uint64_t reserved, int has_sig, uint64_t signal) {
     rc_commit(fence);
     int tail = 0;   // counted for the tail floor (DM_VK_GPU_FLOOR_AUTO=2): given back by the span op when it completes
     if (g_cb && g_stat_draws > g_sub_draws0) { int vka_floor_tail_add(void); tail = vka_floor_tail_add(); post((pop){3, 0, (uint32_t)tail, 0, g_job_frame_set ? g_job_frame : g_frame}); }   // the frame's span at the end of this submission with draws (post_run)
+    if (g_cb && g_slot_ts[(g_slot_i - 1) % NSLOT]) post((pop){.kind = 8, .q0 = (g_slot_i - 1) % NSLOT + 1});   // when its completion is processed: the tick's measure (tick_sample)
     pop *ops = g_npost ? malloc((size_t)g_npost * sizeof *ops) : NULL; if (ops) memcpy(ops, g_post, (size_t)g_npost * sizeof *ops);
     int n = g_npost; g_npost = 0;
     ops = carry_take(fence, signal, ops, &n);
@@ -1326,12 +1383,21 @@ static void copy_t2t(const p_copy_t2t *c) {
                && s->samples == d->samples && s->f.bpb == d->f.bpb && s->f.bw == d->f.bw && s->f.bh == d->f.bh && s->f.tb == d->f.tb) {   // (tb: BC decoded on the CPU, both sides into texels of one size)
         VkImageCopy r = {ss, {c->sr.xoffset, c->sr.yoffset, s3 ? c->sr.zoffset : 0}, ds, {c->dr.xoffset, c->dr.yoffset, d3 ? c->dr.zoffset : 0}, {(uint32_t)c->sr.width, (uint32_t)c->sr.height, s3 ? (uint32_t)nz : 1}};
         vk.vkCmdCopyImage(g_cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
-    } else {   // a scaled, mirrored or format-changing copy: a blit (filtered with LINEAR_FILTER)
-        if (s->f.kind != d->f.kind || (s->f.kind && s->f.kind < 3) || s->f.bw > 1 || d->f.bw > 1 || s->samples > 1 || d->samples > 1) {
-            VRED_ONCE("texture copy %#x → %#x needs a draw (integer, compressed, multisampled or depth with scaling)", c->src->d.format, c->dst->d.format); return; }
+    } else {   // a scaled, mirrored or format-changing copy: a blit (filtered with LINEAR_FILTER), or a draw into a depth format the driver cannot blit (vka_t2tpath.h)
+        VkFormatProperties sp, dp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, s->f.vk, &sp); vk.vkGetPhysicalDeviceFormatProperties(V.pd, d->f.vk, &dp);
+        int dmode = VKA_ENV("DM_VK_DEPTH_COPY_DRAW", 1), force = dmode >= 2 && d->f.kind == 3;   // (2: a depth copy drawn where it could be blitted, an A/B)
+        int path = vka_t2t_path(0, s->f.kind, d->f.kind, s->f.bw > 1 || d->f.bw > 1, s->samples > 1 || d->samples > 1,
+                                (sp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) && !force, (dp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) != 0);
+        if (path == VKA_T2T_DEPTH_DRAW && dmode <= 0) path = VKA_T2T_NONE;
+        if (path == VKA_T2T_NONE) {
+            VRED_ONCE("texture copy %#x → %#x needs a draw (integer, compressed, multisampled, stencil, or formats the driver cannot blit: VkFormat %d → %d)", c->src->d.format, c->dst->d.format, s->f.vk, d->f.vk); return; }
         int x0 = c->sr.xoffset, x1 = x0 + c->sr.width, y0 = c->sr.yoffset, y1 = y0 + c->sr.height, t;
         if (c->flags & NVN_COPY_FLAGS_MIRROR_X_BIT) { t = x0; x0 = x1; x1 = t; }
         if (c->flags & NVN_COPY_FLAGS_MIRROR_Y_BIT) { t = y0; y0 = y1; y1 = t; }
+        if (path == VKA_T2T_DEPTH_DRAW) {
+            if (!vka_t2t_depth_draw(g_cb, s, d, ss, ds, x0, y0, x1, y1, (VkRect2D){{c->dr.xoffset, c->dr.yoffset}, {(uint32_t)c->dr.width, (uint32_t)c->dr.height}})) return;
+            vka_img_written(d); g_stat_ops++; vka_barrier(g_cb); return;
+        }
         VkImageBlit r = {ss, {{x0, y0, 0}, {x1, y1, 1}}, ds, {{c->dr.xoffset, c->dr.yoffset, 0}, {c->dr.xoffset + c->dr.width, c->dr.yoffset + c->dr.height, 1}}};
         VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, s->f.vk, &fp);
         VkFilter fl = (c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) && sa == VK_IMAGE_ASPECT_COLOR_BIT && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
@@ -1339,6 +1405,80 @@ static void copy_t2t(const p_copy_t2t *c) {
     }
     vka_img_written(d); g_stat_ops++;
     vka_barrier(g_cb);
+}
+
+// NVN2's DLSS (OP_DLSS, hle_nvn.c "NVN2's DLSS"): the network has no Vulkan counterpart, so the replay writes the output texture itself, so the game's post chain reads a
+// picture (Fire Emblem Fortune's Weave's 3D was black with the evaluation dropped). Ported from Banana Native (MIT; eden/v0.3.45 9c98a63b). DM_VK_DLSS (live) picks how:
+// 4 = FSR 3.1 (vka_fsr3.c), 3 = Snapdragon GSR2 3-pass (the default), 2 = FSR 1 with the jitter taken out, both in vka_dlss.c; 1 = a bilinear blit of the input
+// subrectangle to the output size (also what 2 and 3 fall back to); 0 leaves the output unwritten (A/B).
+// The colour's and the output's sRGB-ness is the textures' (NVN formats), not their images': the replay stores an sRGB texture as its UNORM twin, and one image may be shared
+// by a texture and its twin. An sRGB input is read through its decoding view and an sRGB output written encoded, as DLSS reads and writes them on the console; a blit, which
+// moves the stored values as they are, is used only where both textures agree (Star Fox's RGBA8 sRGB colour into an RGBA16F output was blitted raw: too bright; vka_dlss_srgb_plan)
+static void dlss_eval(const p_dlss *o) {
+    static uint64_t n;
+    int mode = VKA_ENV("DM_VK_DLSS", 3);
+    if (mode <= 0) return;
+    const tex_t *ct = o->tex[DLSS_COLOR], *ot = o->tex[DLSS_OUTPUT];
+    if (!ct || !ot) { VRED_ONCE("DLSS evaluation without an input colour or an output texture: skipped"); return; }
+    if (vka_rp_is_open()) vka_rp_end();   // (the stand-ins dispatch and blit outside a pass; vka_tex_own below needs none open)
+    vka_img *s = vka_tex_get(ct, g_cb), *d = vka_tex_get(ot, g_cb);
+    if (!s || !d) return;
+    if ((s->aspect & VK_IMAGE_ASPECT_COLOR_BIT) == 0 || (d->aspect & VK_IMAGE_ASPECT_COLOR_BIT) == 0 || d->f.bw > 1 || d->samples > 1) {
+        VRED_ONCE("DLSS stand-in: formats %#x → %#x: no colour input or an output a blit cannot write (compressed, depth or multisampled): the output stays unwritten", ct->d.format, ot->d.format); return; }
+    vka_tex_own(d, g_cb);
+    uint32_t sl = 0, dl = 0; if (!vka_img_lv(s, &sl) || !vka_img_lv(d, &dl)) return;
+    int iw = o->iw > 0 ? o->iw : (int)s->w, ih = o->ih > 0 ? o->ih : (int)s->h, ow = o->ow > 0 ? o->ow : (int)d->w, oh = o->oh > 0 ? o->oh : (int)d->h;
+    int sx = o->base[DLSS_COLOR][0], sy = o->base[DLSS_COLOR][1], dx = o->base[DLSS_OUTPUT][0], dy = o->base[DLSS_OUTPUT][1];
+    if (sx < 0 || sy < 0 || dx < 0 || dy < 0 || sx + iw > (int)s->w || sy + ih > (int)s->h || dx + ow > (int)d->w || dy + oh > (int)d->h) {
+        VRED_ONCE("DLSS stand-in: rectangles past the textures (input %d,%d %dx%d of %ux%u, output %d,%d %dx%d of %ux%u): clamped", sx, sy, iw, ih, s->w, s->h, dx, dy, ow, oh, d->w, d->h);
+        if (sx < 0) sx = 0;
+        if (sy < 0) sy = 0;
+        if (dx < 0) dx = 0;
+        if (dy < 0) dy = 0;
+        if (sx + iw > (int)s->w) iw = (int)s->w - sx;
+        if (sy + ih > (int)s->h) ih = (int)s->h - sy;
+        if (dx + ow > (int)d->w) ow = (int)d->w - dx;
+        if (dy + oh > (int)d->h) oh = (int)d->h - dy;
+        if (iw <= 0 || ih <= 0 || ow <= 0 || oh <= 0) return;
+    }
+    vka_fmt cf, of;
+    int ck = vka_fmt_of(ct->d.format, &cf), ok = vka_fmt_of(ot->d.format, &of), sfi = 0, in_srgb = 0, enc = 0;
+    vka_dlss_srgb_plan(ck, ck ? (int)cf.vk : 0, ck ? (int)cf.view : 0, ck ? cf.srgb : 0, (int)s->f.vk, s->f.srgb, ok, ok ? (int)of.vk : 0, ok ? of.srgb : 0, (int)d->f.vk, d->f.srgb, &sfi, &in_srgb, &enc);
+    const VkFormat sfmt = (VkFormat)sfi;   // the texture's view format over its image (VK_FORMAT_UNDEFINED: a format of its own, the image's view)
+    {   // once per change: what the game hands DLSS (NGX's feature flags: 1 IsHDR, 2 MVLowRes, 4 MVJittered, 8 DepthInverted, 0x20 DoSharpening, 0x40 AutoExposure)
+        static uint64_t last; uint64_t sig = (uint64_t)ct->d.format << 48 | (uint64_t)ot->d.format << 32 | o->flags;
+        if (sig != last) { last = sig;
+            VLOG("DLSS stand-in: colour NVN format %#x (VkFormat %d, %s), output NVN format %#x (VkFormat %d, %s), flags %#x (%s, auto exposure %s), pre-exposure %.3f",
+                 ct->d.format, s->f.vk, in_srgb ? "sRGB: read decoded" : "linear", ot->d.format, d->f.vk, enc ? "sRGB: written encoded" : "linear", o->flags,
+                 o->flags & 1 ? "HDR" : "LDR", o->flags & 0x40 ? "on" : "off", o->pre_exposure); }
+    }
+    if (mode >= 4) {   // FSR 3.1 (vka_fsr3.c): its inputs as a copy record's rectangles; FSR 1 / bilinear when it cannot run
+        p_dlss_t2t f = {0};
+        f.c.src = ct; f.c.dst = ot; f.c.sr = (NVNcopyRegion){sx, sy, 0, iw, ih, 1}; f.c.dr = (NVNcopyRegion){dx, dy, 0, ow, oh, 1};
+        f.depth = o->tex[DLSS_DEPTH]; f.motion = o->tex[DLSS_MOTION]; memcpy(f.jitter, o->jitter, sizeof f.jitter); memcpy(f.mv, o->mv, sizeof f.mv); f.reset = o->reset;
+        vka_img *z = f.depth ? vka_tex_get(f.depth, g_cb) : NULL, *m = f.motion ? vka_tex_get(f.motion, g_cb) : NULL;
+        if (!o->base[DLSS_DEPTH][0] && !o->base[DLSS_DEPTH][1] && !o->base[DLSS_MOTION][0] && !o->base[DLSS_MOTION][1] && vka_dlss_fsr3(g_cb, s, sfmt, d, enc, z, m, &f)) { vka_img_written(d); g_stat_ops++; return; }
+        mode = vka_dlss_mode_after(mode, 1);
+    }
+    if (mode >= 2 && vka_dlss_run(g_cb, o, mode, s, sl, sfmt, sx, sy, iw, ih, d, dl, enc, dx, dy, ow, oh)) { vka_img_written(d); g_stat_ops++; return; }
+    if (in_srgb != enc) {   // the bilinear scale through the decoding view, encoded for an sRGB output: a blit would carry one texture's encoding into the other
+        VkImageView v = (s->usage & VK_IMAGE_USAGE_SAMPLED_BIT) && s->samples == 1 && !s->f.kind ? vka_view(s, sfmt ? sfmt : s->f.view, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, sl, 1, 0, 1, NULL) : VK_NULL_HANDLE;
+        uint32_t tw = s->w >> sl ? s->w >> sl : 1, th = s->h >> sl ? s->h >> sl : 1;
+        if (vka_dlss_scale(g_cb, v, sx, sy, iw, ih, tw, th, d, dl, dx, dy, ow, oh, enc)) { vka_img_written(d); g_stat_ops++; return; }
+        VRED_ONCE("DLSS stand-in: input and output differ in sRGB (NVN formats %#x → %#x) and the encoding copy cannot run: a blit, whose picture is off in brightness", ct->d.format, ot->d.format);
+    }
+    if ((s->f.kind && s->f.kind < 3) || s->f.kind != d->f.kind || s->f.bw > 1 || s->samples > 1) {
+        VRED_ONCE("DLSS stand-in: formats %#x → %#x cannot be blitted (integer, compressed or multisampled): the output stays unwritten", ct->d.format, ot->d.format); return; }
+    VkImageBlit r = {{VK_IMAGE_ASPECT_COLOR_BIT, sl, 0, 1}, {{sx, sy, 0}, {sx + iw, sy + ih, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, dl, 0, 1}, {{dx, dy, 0}, {dx + ow, dy + oh, 1}}};
+    VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, s->f.vk, &fp);
+    VkFilter fl = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    vk.vkCmdBlitImage(g_cb, s->img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r, fl);
+    vka_img_written(d); g_stat_ops++;
+    vka_barrier(g_cb);
+    n++;
+    if (n == 1 || (!(n & (n - 1)) && n <= 4096))
+        VLOG("DLSS stand-in (%s): %dx%d at %d,%d of %#x %ux%u → %dx%d at %d,%d of %#x %ux%u, reset %u, jitter %.3f %.3f (%llu evaluations)", fl == VK_FILTER_LINEAR ? "bilinear" : "nearest",
+             iw, ih, sx, sy, ct->d.format, s->w, s->h, ow, oh, dx, dy, ot->d.format, d->w, d->h, o->reset, o->jitter[0], o->jitter[1], (unsigned long long)n);
 }
 
 static void not_yet(uint32_t op) {
@@ -1471,7 +1611,7 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
                 if (!ub_batch_on) { if (g_inline_ub.n) ub_flush(g_cb); else vka_transfer_write_barrier(g_cb); }
             }
             break;
-        case OP_SET_RT: S.rt = *(const p_set_rt *)a; S.has_rt = 1; break;
+        case OP_SET_RT: S.rt = *(const p_set_rt *)a; S.has_rt = 1; vka_ndsr_note_rt(&S.rt); break;   // (vka_ndsr.c: the scene depth for DM_VK_NDSR=gsr2 / DM_VK_NDSR_CAM_LOG)
         case OP_SCISSOR: S.sc = *(const p_scissor *)a; S.has_sc = 1; break;
         case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
         case OP_CLEAR_COLOR: if (g_cb) clear_color(a); break;
@@ -1480,6 +1620,7 @@ static int exec(const uint8_t *p, int depth) {   // 1: parked at a wait (g_pk ho
         case OP_COPY_B2T: if (g_cb) copy_bt(a, 1); break;
         case OP_COPY_T2B: mdx_write(); if (g_cb) copy_bt(a, 0); break;
         case OP_COPY_T2T: if (g_cb) copy_t2t(a); break;
+        case OP_DLSS: if (!S.rc_skip && g_cb) dlss_eval(a); break;
         case OP_BARRIER: if (g_cb && !bar_kept && !bar_covered) { int32_t bits; memcpy(&bits, a, 4); if (!vka_gbar_game(g_cb, (uint32_t)bits)) vka_barrier(g_cb); } break;   // (vka_gbar.c: between dispatches, a compute-to-compute barrier at the next one)
         case OP_DRAW: if (!S.rc_skip && g_cb) { p_draw t; const p_draw *d = draw_rec(a, h.size, &t); g_stat_draws++; mdx_before_draw(p, d); uint64_t sk = oq_sk0(); vka_draw(&S.d, &S.rt, S.has_rt, &S.sc, S.has_sc, d, NULL); oq_sk1(sk); }
                       else if (!S.rc_skip && g_oq_count) { g_oq_lost++; g_oqs_skip++; } break;   // (dropped with no command buffer: counts 1, Occlusion queries)

@@ -2,7 +2,7 @@
 // presented frame with the live one. It is dm/gfx/tests/nvn_replay.m (the Mac's) on the Vulkan replay: the same chunk walk and record relocation (nvn_capture.c), the replay's own
 // mtl_* entry points (vka_*.c) and hle_nvn.c's side tables through two setters. It lives in libnxhost.so (nxhost_replay); android/host/nxreplay.c is the executable that runs it
 // from adb shell (android/TESTING.md "Frame capture and replay"):
-//   nxreplay <capture> [--warm n] [--repeat n] [--max-pixels n] [--png path | --no-png] [--list] [--dump serial,...] [--dump-rt] [--dump-gpu] [--out dir] [--no-flip] [--sync]
+//   nxreplay <capture> [--warm n] [--repeat n] [--max-pixels n] [--png path | --no-png] [--list] [--dump serial,...] [--dump-rt] [--dump-gpu] [--dump-live] [--out dir] [--no-flip] [--sync]
 // --warm n: n replays in one process, each after the one before (pipelines and images made by the first are kept: the steady-state time); --repeat n: n fresh processes.
 // Each replay prints the submissions' CPU time (recording: mtl_sub_begin to vkQueueSubmit), the frame's GPU time (timestamps), the wall time to the last fence and the draws.
 // --list: the textures the frame's records name, with their images; --dump: PNGs of those serials' level 0; --dump-rt: of every colour image the GPU wrote among them;
@@ -41,7 +41,7 @@ static tex_t *rp_to; static uint32_t rp_nto;
 static prog_t *rp_pr; static cap_prog *rp_prc; static uint32_t rp_npr;
 static dpool_t *rp_dp; static uint32_t rp_ndp;
 static sync_t *rp_sy; static uint32_t rp_nsy;
-static uint8_t **rp_seg; static uint32_t rp_nseg;
+static uint8_t **rp_seg; static uint32_t rp_nseg; static uint8_t **rp_keep; static size_t rp_nkeep;   // (rp_keep: the segments of the replay's submissions, freed after its last wait)
 static uint64_t rp_bad;
 
 static int dec_addr(void *ctx, uint64_t *field, uint64_t len, int writable) {
@@ -247,13 +247,94 @@ static int copy_file(const char *from, const char *to) {
     while ((k = fread(buf, 1, sizeof buf, a))) ok &= fwrite(buf, 1, k, b) == k;
     fclose(a); ok &= !fclose(b); return ok;
 }
+// The images the live run left at its present (CAP_LIMG, DM_NVN_CAPTURE_IMAGES) against the replay's of the same serial: which images the replay leaves different, by
+// texel (level and layer each), in serial order (about the order the live run made them). dump: PNGs of level 0 of each one that differs, live and replayed side by side
+static void live_images(int rep, const char *outdir, const char *cname, int dump, int flip) {
+    uint64_t same = 0, differ = 0, missing = 0, shape = 0, unread = 0, n = 0;
+    for (size_t i = 0; i < rp_nch; i++) {
+        if (rp_ch[i].c.tag != CAP_LIMG) continue;
+        const uint8_t *d = rp_ch[i].d; cap_limg h; if (rp_ch[i].c.raw < sizeof h) RFAIL("short live image chunk");
+        memcpy(&h, d, sizeof h); const uint8_t *cs = d + sizeof h, *px = cs + (size_t)h.nsub * sizeof(cap_tsub); n++;
+        vka_img *im = vka_tex_acquire(h.serial);
+        if (!im) { if (missing++ < 32) printf("replay %d: live image ser=%llu %ux%u VkFormat %u: no image of that serial in the replay\n", rep, (unsigned long long)h.serial, h.width, h.height, h.pixfmt); continue; }
+        cap_tsub *subs = NULL; uint64_t total = 0; uint32_t ns = vcap_subs(im, &subs, &total);
+        if ((uint32_t)im->f.vk != h.pixfmt || im->w != h.width || im->h != h.height || im->levels != h.levels || im->layers != h.layers || ns != h.nsub) {
+            if (shape++ < 32) printf("replay %d: live image ser=%llu %ux%u VkFormat %u, %u levels, %u layers: the replay's is %ux%u VkFormat %d, %u levels, %u layers\n", rep, (unsigned long long)h.serial,
+                                     h.width, h.height, h.pixfmt, h.levels, h.layers, im->w, im->h, im->f.vk, im->levels, im->layers);
+            free(subs); vka_tex_drop(im); continue; }
+        vcap_hbuf hb; VkCommandBuffer cb; int ok = 0;
+        if (vcap_hbuf_make(&hb, vcap_sub_off(subs, ns) + 16)) { if ((cb = vcap_cb_begin())) { vcap_img_copy(cb, im, subs, ns, hb.b, 0); ok = vcap_cb_run(cb); } if (!ok) vcap_hbuf_free(&hb); }
+        if (!ok) { unread++; free(subs); vka_tex_drop(im); continue; }
+        uint64_t tex_diff = 0, texels = 0, first_sub = UINT64_MAX; uint32_t big = 0; const uint8_t *lp = px;
+        for (uint32_t k = 0; k < ns; k++) {
+            const uint8_t *a = lp, *b = hb.p + vcap_sub_off(subs, k); uint64_t nb = subs[k].bytes, tx = (uint64_t)subs[k].w * subs[k].h * subs[k].d;
+            size_t bpt = tx && nb % tx == 0 ? (size_t)(nb / tx) : 1; uint64_t dk = 0;
+            if (memcmp(a, b, (size_t)nb)) for (uint64_t o = 0; o + bpt <= nb; o += bpt) { uint32_t dv = 0; for (size_t q = 0; q < bpt; q++) { int x = (int)a[o + q] - (int)b[o + q]; if (x < 0) x = -x; if ((uint32_t)x > dv) dv = (uint32_t)x; }
+                if (dv) { dk++; if (dv > big) big = dv; } }
+            if (dk && first_sub == UINT64_MAX) first_sub = k;
+            tex_diff += dk; texels += nb / bpt; lp += nb;
+        }
+        if (!tex_diff) same++;
+        else {
+            differ++;
+            printf("replay %d: live image ser=%llu %ux%u VkFormat %d (kind %u, %u levels, %u layers): %llu of %llu texels differ (%.2f %%; largest byte difference %u; first in level %u layer %u)\n", rep,
+                   (unsigned long long)h.serial, h.width, h.height, im->f.vk, h.kind, h.levels, h.layers, (unsigned long long)tex_diff, (unsigned long long)texels, 100.0 * tex_diff / (texels ? texels : 1), big,
+                   subs[first_sub].level, subs[first_sub].slice);
+            if (dump && subs[0].plane == 0) { char pp[1300];
+                snprintf(pp, sizeof pp, "%s/%s.r%d_l%llu_%ux%u_f%d_live.png", outdir, cname, rep, (unsigned long long)h.serial, h.width, h.height, im->f.vk); vcap_png(pp, px, subs[0].w, subs[0].h, im->f.vk, flip);
+                snprintf(pp, sizeof pp, "%s/%s.r%d_l%llu_%ux%u_f%d_replay.png", outdir, cname, rep, (unsigned long long)h.serial, h.width, h.height, im->f.vk); vcap_png(pp, hb.p, subs[0].w, subs[0].h, im->f.vk, flip); }
+        }
+        vcap_hbuf_free(&hb); free(subs); vka_tex_drop(im);
+    }
+    if (n) printf("replay %d: %llu live images: %llu equal, %llu differ, %llu with no image of that serial, %llu of another shape, %llu not read back\n", rep, (unsigned long long)n,
+                  (unsigned long long)same, (unsigned long long)differ, (unsigned long long)missing, (unsigned long long)shape, (unsigned long long)unread);
+}
+// Before submit s, the replay's GPU-written images against the live run's hashes of them at the same point (CAP_LHSH): the images that match no more, the first time each
+// stops matching (bad: per serial, set once it differed), so the first submit where the replay leaves the live run is named with its images
+static nvn_hmap g_lh_bad = {.klen = 8};
+// The blocks the live run changed between submit s and s + 1 (PDIF of s + 1), hashed in the replay before submit s runs: afterwards a block whose hash moved was written by
+// the replay's submit s (its GPU, or the host's writes for it), one whose hash stayed was written only live (the game's CPU between the submits, or the live GPU alone)
+static uint64_t *g_pc_h; static size_t g_pc_n;
+static void pdif_snap(uint32_t next) {
+    g_pc_n = 0;
+    for (size_t i = 0; i < rp_nch; i++) { if (rp_ch[i].c.tag != CAP_PDIF || rp_ch[i].c.submit != next) continue; const uint8_t *d = rp_ch[i].d;
+        for (size_t o = 0; o + 24 <= rp_ch[i].c.raw;) { uint32_t r; uint64_t off, len; memcpy(&r, d + o, 4); memcpy(&off, d + o + 8, 8); memcpy(&len, d + o + 16, 8); o += 24 + (size_t)len;
+            if (r >= rp_nrg || off + len > rp_rg[r].size) continue;
+            for (uint64_t b = 0; b < len; b += 4096) { g_pc_h = realloc(g_pc_h, (g_pc_n + 1) * 8); g_pc_h[g_pc_n++] = vcap_hash(rp_rg[r].mem + off + b, (size_t)MIN(4096, len - b)); } } }
+}
+static void live_hashes(int rep, uint32_t s) {
+    uint64_t n = 0, differ = 0, fresh = 0, missing = 0;
+    for (size_t i = 0; i < rp_nch; i++) {
+        if (rp_ch[i].c.tag != CAP_LHSH || rp_ch[i].c.submit != s) continue;
+        const uint8_t *d = rp_ch[i].d; size_t len = (size_t)rp_ch[i].c.raw;
+        for (size_t o = 0; o + 16 <= len;) {
+            uint64_t ser; uint32_t ns; memcpy(&ser, d + o, 8); memcpy(&ns, d + o + 8, 4); const uint8_t *hs = d + o + 16; o += 16 + (size_t)ns * 8; if (o > len) break;
+            n++; vka_img *im = vka_tex_acquire(ser);
+            { const char *w = getenv("DM_RP_SER"); char sv[24]; snprintf(sv, sizeof sv, "%llu", (unsigned long long)ser);   // diagnostic: these serials' state at each submit
+              if (w && strstr(w, sv)) printf("replay %d: before submit %u: live image ser=%s: %s\n", rep, s, sv, im ? "the replay has it (compared below)" : "no image of that serial in the replay"); }
+            if (!im) { missing++; continue; }
+            cap_tsub *subs = NULL; uint64_t total = 0; uint32_t mine = vcap_subs(im, &subs, &total); vcap_hbuf hb; VkCommandBuffer cb; int ok = 0;
+            if (mine == ns && vcap_hbuf_make(&hb, vcap_sub_off(subs, ns) + 16)) { if ((cb = vcap_cb_begin())) { vcap_img_copy(cb, im, subs, ns, hb.b, 0); ok = vcap_cb_run(cb); } if (!ok) vcap_hbuf_free(&hb); }
+            uint32_t bad = 0, first = UINT32_MAX;
+            if (ok) { for (uint32_t k = 0; k < ns; k++) { uint64_t lh; memcpy(&lh, hs + (size_t)k * 8, 8); if (vcap_hash(hb.p + vcap_sub_off(subs, k), (size_t)subs[k].bytes) != lh) { bad++; if (first == UINT32_MAX) first = k; } } vcap_hbuf_free(&hb); }
+            else bad = ns, first = 0;
+            if (bad) { differ++;
+                if (!nvn_hm_get(&g_lh_bad, &ser)) { nvn_hm_put(&g_lh_bad, &ser, (void *)1); fresh++;
+                    printf("replay %d: before submit %u: image ser=%llu %ux%ux%u VkFormat %d (%u levels, %u layers) no longer matches the live run (%u of %u subresources differ, the first level %u layer %u)%s\n", rep, s,
+                           (unsigned long long)ser, im->w, im->h, im->depth, im->f.vk, im->levels, im->layers, bad, ns, ok ? subs[first].level : 0, ok ? subs[first].slice : 0, ok ? "" : " (not read back)"); } }
+            free(subs); vka_tex_drop(im);
+        }
+    }
+    if (n) printf("replay %d: before submit %u: %llu GPU-written images hashed live: %llu differ (%llu for the first time), %llu with no image of that serial\n", rep, s,
+                  (unsigned long long)n, (unsigned long long)differ, (unsigned long long)fresh, (unsigned long long)missing);
+}
 static uint64_t mono(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 extern uint64_t vka_n_rp;
 
 __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) {
-    const char *path = NULL, *png = NULL, *maxpx_arg = "0", *dump = NULL, *outdir = NULL; int repeat = 1, warm = 1, index = 1, nopng = 0, list = 0, dump_rt = 0, dump_gpu = 0, flip = -1, sync = 0;
+    const char *path = NULL, *png = NULL, *maxpx_arg = "0", *dump = NULL, *outdir = NULL; int repeat = 1, warm = 1, index = 1, nopng = 0, list = 0, dump_rt = 0, dump_gpu = 0, flip = -1, sync = 0, dump_live = 0;
     setvbuf(stdout, NULL, _IOLBF, 0); crash_install();
-#define USAGE "usage: %s <capture> [--warm n] [--repeat n] [--max-pixels n] [--png path | --no-png] [--list] [--dump serial,...] [--dump-rt] [--dump-gpu] [--out dir] [--no-flip] [--sync]\n"
+#define USAGE "usage: %s <capture> [--warm n] [--repeat n] [--max-pixels n] [--png path | --no-png] [--list] [--dump serial,...] [--dump-rt] [--dump-gpu] [--dump-live] [--out dir] [--no-flip] [--sync]\n"
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--repeat") && i + 1 < argc) { repeat = atoi(argv[++i]); if (repeat < 1) repeat = 1; }
         else if (!strcmp(argv[i], "--warm") && i + 1 < argc) { warm = atoi(argv[++i]); if (warm < 1) warm = 1; }
@@ -264,6 +345,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = argv[++i];
         else if (!strcmp(argv[i], "--dump-rt")) dump_rt = 1;
         else if (!strcmp(argv[i], "--dump-gpu")) dump_gpu = 1;
+        else if (!strcmp(argv[i], "--dump-live")) dump_live = 1;   // with a capture of DM_NVN_CAPTURE_IMAGES: PNGs of each image that differs from the live one, both
         else if (!strcmp(argv[i], "--list")) list = 1;
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outdir = argv[++i];
         else if (!strcmp(argv[i], "--no-flip")) flip = 0;
@@ -350,6 +432,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
                 else if (copy_file(v, pc)) printf("pipeline cache seeded from the live run's %s\n", v); } }
     }
     if (!vka_init()) RFAIL("no Vulkan device");
+    vka_worker_park_hold(1);   // a park waits for its producer however long the replay's steps between submissions take (the capture held it so too)
     int origin_ll = head_get(stat, sn, "origin_ll", v, sizeof v) ? atoi(v) : 1;
     mtl_set_origin_lower_left(origin_ll);
     if (head_get(stat, sn, "depth_zero", v, sizeof v)) mtl_set_depth_zero(atoi(v));
@@ -362,7 +445,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
     for (size_t i = 0; i < rp_nch; i++) {
         cap_chunk *c = &rp_ch[i].c; const uint8_t *d = rp_ch[i].d; uint32_t idx;
         if (c->tag == CAP_REGN) { cap_regn h; if (c->raw < sizeof h) RFAIL("short region chunk"); memcpy(&h, d, sizeof h); if (h.size != c->raw - sizeof h) RFAIL("region %u: size mismatch", h.index); map_region(h.index, &h, d + sizeof h); }
-        if (c->tag == CAP_SUBM) nsub = MAX(nsub, c->submit);
+        if (c->tag == CAP_SUBM || c->tag == CAP_CSIG) nsub = MAX(nsub, c->submit);   // (steps: submits and the CPU's event signals between them)
         if (c->tag == CAP_PRES && c->raw == sizeof *pres) pres = (const cap_pres *)d;
         if (c->tag == CAP_POBJ) for (size_t o = 0; o + sizeof(cap_pobj) <= c->raw; o += sizeof(cap_pobj)) { memcpy(&idx, d + o, 4); GROW(rp_npo, idx); }
         if (c->tag == CAP_TOBJ) for (size_t o = 0; o + 8 + sizeof(tex_t) <= c->raw; o += 8 + sizeof(tex_t)) { memcpy(&idx, d + o, 4); GROW(rp_nto, idx); }
@@ -421,7 +504,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
 
     // what each submit takes before it: if nothing, the replay need not wait for the GPU in between
     uint8_t *has_state = calloc(nsub + 2, 1);
-    for (size_t i = 0; i < rp_nch; i++) { uint32_t t = rp_ch[i].c.tag; if (t == CAP_PADD || t == CAP_PLAC || t == CAP_PDIF || t == CAP_TREG || t == CAP_SREG || t == CAP_TPIX) has_state[MIN(rp_ch[i].c.submit, nsub + 1)] = 1; }
+    for (size_t i = 0; i < rp_nch; i++) { uint32_t t = rp_ch[i].c.tag; if (t == CAP_PADD || t == CAP_PLAC || t == CAP_PDIF || t == CAP_TREG || t == CAP_SREG || t == CAP_TPIX || t == CAP_LHSH) has_state[MIN(rp_ch[i].c.submit, nsub + 1)] = 1; }
     const uint8_t *lpix = NULL; uint64_t lpixn = 0;
     for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_LPIX) { lpix = rp_ch[i].d; lpixn = rp_ch[i].c.raw; }
     char live[65]; for (int i = 0; i < 32; i++) snprintf(live + 2 * i, 3, "%02x", pres->sha256[i]);
@@ -436,31 +519,57 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
                 else o += 4096;
             }
         if (rep) printf("replay %d: %.1f MB of pool memory restored to the capture's in %.0f ms\n", index + rep, restored / 1048576.0, (mono() - tr0) / 1e6);
-        uint64_t fill0 = g_fill_n, prep_ns = 0, tw0 = 0;
-        for (uint32_t s = 1; s <= nsub; s++) {
+        uint64_t fill0 = g_fill_n, prep_ns = 0, tw0 = 0, slots_named = 0;
+        if (rep == 0 || rep == warm - 1) nvn_hm_clear(&g_lh_bad, NULL);
+        for (size_t i = 0; i < rp_nch; i++) if (rp_ch[i].c.tag == CAP_RCND) vka_rc_replay((const cap_rcnd *)rp_ch[i].d, (size_t)(rp_ch[i].c.raw / sizeof(cap_rcnd)));   // (each replay from the first)
+        // Steps 1..nsub (submits and the CPU's event signals), then nsub + 1, the present's: what the CPU wrote after the last one (a capture of an earlier build has none)
+        for (uint32_t s = 1; s <= nsub + 1; s++) {
+            if (s == nsub + 1) mtl_finish_handed();   // (the steps before end with it only when state follows: has_state)
+            if (s > 1 && (rep == 0 || rep == warm - 1)) live_hashes(index + rep, s);   // (the GPU is done with submit s - 1: has_state below)
             uint64_t t0 = mono();
             for (size_t i = 0; i < rp_nch; i++) {
                 cap_chunk *c = &rp_ch[i].c; uint8_t *d = rp_ch[i].d; if (c->submit != s) continue;
                 if (c->tag == CAP_PADD && s > 1) add_pools(d, c->raw);
                 else if (c->tag == CAP_PLAC && s > 1) add_placed(d, c->raw);
-                else if (c->tag == CAP_PDIF) for (size_t o = 0; o + 24 <= c->raw;) { uint32_t r; uint64_t off, len; memcpy(&r, d + o, 4); memcpy(&off, d + o + 8, 8); memcpy(&len, d + o + 16, 8);
-                    if (r >= rp_nrg || off + len > rp_rg[r].size || o + 24 + len > c->raw) RFAIL("a pool change outside its region"); dm_guest_write_prepare(rp_rg[r].mem + off, (size_t)len); memcpy(rp_rg[r].mem + off, d + o + 24, (size_t)len); o += 24 + (size_t)len; }
+                else if (c->tag == CAP_PDIF) { uint64_t pc_n = 0, pc_bad = 0, pc_live = 0, pc_both = 0; int cmp = s > 1 && (rep == 0 || rep == warm - 1);
+                    for (size_t o = 0; o + 24 <= c->raw;) { uint32_t r; uint64_t off, len; memcpy(&r, d + o, 4); memcpy(&off, d + o + 8, 8); memcpy(&len, d + o + 16, 8);
+                    if (r >= rp_nrg || off + len > rp_rg[r].size || o + 24 + len > c->raw) RFAIL("a pool change outside its region");
+                    // The live run's bytes after submit s - 1 (its GPU writes and the CPU's in between) against the replay's: 4 KiB blocks the replay's GPU left otherwise
+                    if (cmp) for (uint64_t b = 0; b < len; b += 4096) { size_t l = (size_t)MIN(4096, len - b); uint64_t k = pc_n++;
+                        if (memcmp(rp_rg[r].mem + off + b, d + o + 24 + b, l)) { pc_bad++;
+                            int moved = k < g_pc_n && vcap_hash(rp_rg[r].mem + off + b, l) != g_pc_h[k];
+                            const char *dl = getenv("DM_RP_PC_DUMP");   // diagnostic: blocks (live addresses, comma-separated) whose first differing words are printed, live and replayed
+                            if (dl) { uint64_t blk = rp_rg[r].old_lo + off + b; for (const char *q = dl; q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : NULL) if ((strtoull(q, NULL, 0) & ~4095ull) == blk) {
+                                const uint8_t *lv = d + o + 24 + b, *rv = rp_rg[r].mem + off + b; size_t f = 0; while (f < l && lv[f] == rv[f]) f++; f &= ~(size_t)15;
+                                for (size_t w = f; w < MIN(l, f + 128); w += 16) { uint32_t a4[4], b4[4], c4[4]; memcpy(a4, lv + w, 16); memcpy(b4, rv + w, 16); memcpy(c4, rp_rg[r].orig + off + b + w, 16);
+                                    printf("replay %d: block %#llx +%#zx live %08x %08x %08x %08x replay %08x %08x %08x %08x at the capture's start %08x %08x %08x %08x\n", index + rep, (unsigned long long)blk, w,
+                                           a4[0], a4[1], a4[2], a4[3], b4[0], b4[1], b4[2], b4[3], c4[0], c4[1], c4[2], c4[3]); } } }
+                            if (!moved) pc_live++;
+                            else if (pc_both++ < 32) printf("replay %d: before submit %u: pool block %#llx (region %u +%#llx) written by the replay's submit %u, other bytes than live\n", index + rep, s,
+                                                         (unsigned long long)(rp_rg[r].old_lo + off + b), r, (unsigned long long)(off + b), s - 1); } }
+                    dm_guest_write_prepare(rp_rg[r].mem + off, (size_t)len); memcpy(rp_rg[r].mem + off, d + o + 24, (size_t)len); o += 24 + (size_t)len; }
+                    if (cmp) printf("replay %d: before submit %u: %llu of %llu pool blocks the live run changed since submit %u differ in the replay: %llu written there with other bytes, %llu written only live (the game's CPU between the submits, which the replay applies now)\n",
+                                    index + rep, s, (unsigned long long)pc_bad, (unsigned long long)pc_n, s - 1, (unsigned long long)pc_both, (unsigned long long)pc_live); }
                 else if (c->tag == CAP_TREG) for (size_t o = 0; o + sizeof(cap_treg) <= c->raw; o += sizeof(cap_treg)) { cap_treg *e = (cap_treg *)(d + o); if (!e->ok) continue;
-                    if (e->pad) mtl_reg_image(e->tid, &e->t, e->has_v ? &e->v : NULL); else mtl_reg_tex(e->tid, &e->t, e->has_v ? &e->v : NULL); }
+                    if (e->pad & 1) mtl_reg_image(e->tid, &e->t, e->has_v ? &e->v : NULL); else mtl_reg_tex(e->tid, &e->t, e->has_v ? &e->v : NULL);
+                    if ((e->pad & 2) && !(e->pad & 1)) slots_named += vka_cap_slot_want(e->tid) > 0; }   // (the live slot named its image: made before the submission, as there)
                 else if (c->tag == CAP_SREG) for (size_t o = 0; o + sizeof(cap_sreg) <= c->raw; o += sizeof(cap_sreg)) { cap_sreg e; memcpy(&e, d + o, sizeof e); mtl_reg_samp(e.sid, &e.p); }
                 else if (c->tag == CAP_TPIX) fill_tex(d, c->raw);
             }
-            uint32_t nh = 0; const uint32_t *top = NULL; rp_nseg = 0;
+            uint32_t nh = 0; const uint32_t *top = NULL; rp_nseg = 0; const cap_subq *sq = NULL; const cap_csig *cs = NULL;
             for (size_t i = 0; i < rp_nch; i++) { cap_chunk *c = &rp_ch[i].c; if (c->submit != s) continue;
                 if (c->tag == CAP_SEGM) { uint32_t idx, len; memcpy(&idx, rp_ch[i].d, 4); memcpy(&len, rp_ch[i].d + 4, 4); if (idx >= rp_nseg) { rp_seg = realloc(rp_seg, (idx + 1) * sizeof *rp_seg); memset(rp_seg + rp_nseg, 0, (idx + 1 - rp_nseg) * sizeof *rp_seg); rp_nseg = idx + 1; }
                     rp_seg[idx] = malloc(len + 8); memcpy(rp_seg[idx], rp_ch[i].d + 8, len); memset(rp_seg[idx] + len, 0, 8); }
-                if (c->tag == CAP_SUBM) { memcpy(&nh, rp_ch[i].d, 4); top = (const uint32_t *)(rp_ch[i].d + 4); } }
+                if (c->tag == CAP_SUBM) { memcpy(&nh, rp_ch[i].d, 4); top = (const uint32_t *)(rp_ch[i].d + 4); }
+                if (c->tag == CAP_SUBQ && c->raw >= sizeof *sq) sq = (const cap_subq *)rp_ch[i].d;
+                if (c->tag == CAP_CSIG && c->raw >= sizeof *cs) cs = (const cap_csig *)rp_ch[i].d; }
             for (size_t i = 0; i < rp_nch; i++) { cap_chunk *c = &rp_ch[i].c; if (c->submit != s || c->tag != CAP_SEGM) continue;
                 uint32_t idx, len; memcpy(&idx, rp_ch[i].d, 4); memcpy(&len, rp_ch[i].d + 4, 4);
                 for (uint32_t o = 0; o < len;) { op_hdr h; memcpy(&h, rp_seg[idx] + o, 8); if (h.size < 8 || o + h.size > len) RFAIL("submit %u segment %u: corrupt record at %u", s, idx, o);
                     if (!cap_rec_fields(h.op, rp_seg[idx] + o + 8, h.size, &rp_dec, (void *)1) || rp_bad) RFAIL("submit %u segment %u: op %u at %u does not decode", s, idx, h.op, o); o += h.size; } }
             uint64_t *hs = malloc((size_t)MAX(nh, 1) * 8); for (uint32_t i = 0; i < nh; i++) { if (top[i] >= rp_nseg || !rp_seg[top[i]]) RFAIL("submit %u: handle %u names no segment", s, i); hs[i] = (uint64_t)(uintptr_t)rp_seg[top[i]]; }
             setup_ns += mono() - t0;
+            if (s <= nsub && (rep == 0 || rep == warm - 1)) pdif_snap(s + 1);
             if (s == 1) {   // untimed: what the captured state makes the replay do before it records (images of the registered textures made and uploaded, descriptors written)
                 uint64_t tp = mono();
                 mtl_set_frame(fno - 1); mtl_sub_begin(); mtl_sub_commit(); mtl_finish();
@@ -468,15 +577,33 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
                 vka_draw_stats(&d0, &s0, &p0, &n0); tw0 = mono();
             }
             uint64_t t1 = mono();
-            mtl_set_frame(fno); mtl_set_queue_origin_lower_left(qll);
+            vka_worker_poll_now();   // the parked queues whose waits hold now go on, at the point of the step where the capture let them (after its state, before its submission)
+            if (s == nsub + 1) { mtl_finish(); free(hs); break; }   // (the present's step: everything run, as the present does live)
+            if (cs && !top) {   // a step that is the game's CPU signal of an event (CAP_CSIG): the word written as nvnEventSignal writes it, and the parked queues look at it
+                uint64_t w = cs->word; if (!dec_addr(NULL, &w, 4, 1) || !w) RFAIL("step %u: the signalled event's word is in no captured region", s);
+                volatile uint32_t *word = (volatile uint32_t *)(uintptr_t)w; dm_guest_write_prepare((void *)(uintptr_t)w, 4);
+                if (cs->mode == NVN_EVENT_SIGNAL_MODE_ADD) *word += cs->value; else *word = cs->value;
+                mtl_event_cpu_signal();
+                if (sync || has_state[s + 1]) mtl_finish_handed();
+                free(hs); continue;
+            }
+            // On the NVN queue the live run submitted it on (CAP_SUBQ; a capture without it: one queue, as before), so a GPU wait parks its queue here as it did there
+            if (sq) mtl_queue_activate(sq->queue);
+            mtl_set_frame(fno); mtl_set_queue_origin_lower_left(sq ? sq->origin_ll : qll);
             mtl_sub_begin(); nvn_ft_poll(); mtl_sub_index(hs, (int)nh);
             for (uint32_t i = 0; i < nh; i++) { mtl_exec_rest(hs + i + 1, (int)(nh - i - 1)); mtl_exec((const uint8_t *)(uintptr_t)hs[i]); }
             mtl_exec_rest(NULL, 0); mtl_sub_commit();
             exec_ns += mono() - t1;
-            if (sync || s == nsub || has_state[s + 1]) mtl_finish();   // the capture read the next submit's inputs after the GPU finished this one
-            free(hs); for (uint32_t i = 0; i < rp_nseg; i++) { free(rp_seg[i]); rp_seg[i] = NULL; }
+            // The capture read the next submit's inputs once the GPU had run what it was handed, a parked queue left parked (mtl_finish_handed); the last waits for everything,
+            // as the present does live (a park still open there is released first)
+            if (sync || has_state[s + 1]) mtl_finish_handed();
+            // The segments stay until the replay's end: a submission parked at a GPU wait (vka_qsched.h) is recorded only once its producer, a later submission, has been
+            // replayed, from these copies (freed here, the parked one read freed memory at the last wait's release)
+            free(hs); for (uint32_t i = 0; i < rp_nseg; i++) if (rp_seg[i]) { rp_keep = realloc(rp_keep, (rp_nkeep + 1) * sizeof *rp_keep); rp_keep[rp_nkeep++] = rp_seg[i]; rp_seg[i] = NULL; }
         }
         double wall = (mono() - tw0) / 1e6;
+        { uint64_t rs, ro, rl; vka_rc_replay_stats(&rs, &ro, &rl); if (rs || ro || rl) printf("replay %d: render conditions: %llu decided as in the live frame%s, %llu of its decisions left unused\n", index + rep,
+                                                                                         (unsigned long long)rs, ro ? ", then one that did not match (decided by the replay from there)" : "", (unsigned long long)rl); }
         uint64_t d1, s1, p1, n1; vka_draw_stats(&d1, &s1, &p1, &n1); dd = d1 - d0; ds = s1 - s0;
         mtl_set_frame(fno + 1); mtl_sub_begin(); mtl_sub_commit(); mtl_finish();   // collects the frame's GPU timestamps
         { void vka_texstat_flush_all(void); vka_texstat_flush_all(); }   // DM_VK_TEXSTAT_FS / _ZB (vka_draw.c)
@@ -497,9 +624,11 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
         if (have_px) printf("replay %d: %llu pixels differ from the live frame (largest byte difference %u, x %u-%u y %u-%u)\n", index + rep, (unsigned long long)npx, big, x0, x1, y0, y1);
         printf("replay %d: digest %s %s live %s (%ux%u VkFormat %u)%s%s\n", index + rep, out, same ? "==" : "!=", live, w, h, pf, pngp[0] ? " → " : "", pngp);
         printf("replay %d: submits CPU %.2f ms (recording, %u submits), GPU %.2f ms, wall %.2f ms to the last fence; %llu draws (%llu skipped), %llu dispatches, %llu render passes, %llu pipelines made; "
-               "before the frame: %.1f ms applying the captured state (%llu images filled), %.1f ms preparing\n", index + rep, cpu, nsub, gpu, wall, (unsigned long long)dd, (unsigned long long)ds,
-               (unsigned long long)(p1 - p0), (unsigned long long)(vka_n_rp - rp0), (unsigned long long)(n1 - n0), setup_ns / 1e6, (unsigned long long)(g_fill_n - fill0), prep_ns / 1e6);
+               "before the frame: %.1f ms applying the captured state (%llu images filled, %llu pool slots asked to name their image as live), %.1f ms preparing\n", index + rep, cpu, nsub, gpu, wall,
+               (unsigned long long)dd, (unsigned long long)ds, (unsigned long long)(p1 - p0), (unsigned long long)(vka_n_rp - rp0), (unsigned long long)(n1 - n0), setup_ns / 1e6,
+               (unsigned long long)(g_fill_n - fill0), (unsigned long long)slots_named, prep_ns / 1e6);
         if (rep || warm == 1) { best_cpu = MIN(best_cpu, cpu); if (gpu >= 0) best_gpu = MIN(best_gpu, gpu); best_wall = MIN(best_wall, wall); }
+        if (rep == 0 || rep == warm - 1) live_images(index + rep, outdir, cname, dump_live && rep == warm - 1, flip);
         if (rep == 0) {   // pool blocks after the frame against the live run's
             uint64_t live_only = 0, rep_only = 0, both = 0, blocks = 0;
             for (size_t i = 0; i < rp_nch; i++) { if (rp_ch[i].c.tag != CAP_PHSH) continue; const uint8_t *d = rp_ch[i].d;
@@ -533,6 +662,7 @@ __attribute__((visibility("default"))) int nxhost_replay(int argc, char **argv) 
             }
             nvn_hm_clear(&seen, NULL);
         }
+        for (size_t i = 0; i < rp_nkeep; i++) free(rp_keep[i]); rp_nkeep = 0;   // (the frame's GPU work done: mtl_finish after its last submit)
         if (rep == warm - 1 && dump_gpu) {   // every GPU-written colour image alive after the last replay, and the --dump serials no record names (textures reached by ID only)
             enum { MAXI = 16384 }; vka_img **ims = malloc(MAXI * sizeof *ims); int n = ims ? vka_tex_live_refs(ims, MAXI) : 0;
             for (int i = 0; i < n; i++) { vka_img *im = ims[i]; int named = 0;

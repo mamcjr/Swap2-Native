@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">ホーム画面に追加</string>
+    <string name="s2_shortcut_add_note">このゲームを起動するショートカットをスマートフォンのホーム画面に追加します</string>
+    <string name="s2_shortcut_unsupported">このスマートフォンのホームアプリはショートカットに対応していません。</string>
+    <string name="s2_shortcut_gone">%1$s は %2$s にもうありません。このショートカットを使うにはゲームをもう一度追加してください。</string>
+    <string name="s2_shortcut_missing">%1$s が見つかりません: %2$s</string>
+    <string name="s2_shortcut_blocked_title">ホーム画面にショートカットがありませんか？</string>
+    <string name="s2_shortcut_blocked">Xiaomi、Redmi、POCO のスマートフォンでは、「ホーム画面のショートカット」の権限がないとショートカットを追加できません。%1$s のアプリの権限（その他の権限）で許可してから、もう一度追加してください。</string>
+    <string name="s2_shortcut_permissions">アプリの権限</string>
+</resources>

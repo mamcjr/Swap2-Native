@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">Zum Startbildschirm hinzufügen</string>
+    <string name="s2_shortcut_add_note">Eine Verknüpfung auf dem Startbildschirm des Telefons, die dieses Spiel startet</string>
+    <string name="s2_shortcut_unsupported">Die Startbildschirm-App dieses Telefons nimmt keine Verknüpfungen an.</string>
+    <string name="s2_shortcut_gone">%1$s ist nicht mehr in %2$s. Füge das Spiel erneut hinzu, um diese Verknüpfung zu nutzen.</string>
+    <string name="s2_shortcut_missing">%1$s wurde nicht gefunden: %2$s</string>
+    <string name="s2_shortcut_blocked_title">Keine Verknüpfung auf dem Startbildschirm?</string>
+    <string name="s2_shortcut_blocked">Auf Xiaomi-, Redmi- und POCO-Telefonen fügt der Startbildschirm Verknüpfungen nur mit der Berechtigung Verknüpfungen auf dem Startbildschirm hinzu. Erlaube sie für %1$s in den App-Berechtigungen (Weitere Berechtigungen) und füge die Verknüpfung dann erneut hinzu.</string>
+    <string name="s2_shortcut_permissions">App-Berechtigungen</string>
+</resources>

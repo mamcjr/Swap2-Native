@@ -8,6 +8,7 @@ program_id	040074A01BF12000
 
 # ---- App ----
 name	Donkey Kong Bananza
+release	2025-07-17
 ipa	DonkeyKongBananza.ipa
 app_category	public.app-category.action-games
 pad_layout	full

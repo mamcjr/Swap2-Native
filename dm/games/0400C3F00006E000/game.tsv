@@ -9,6 +9,7 @@ program_id	0400C3F00006E000
 
 # ---- App ----
 name	Mario Kart World
+release	2025-06-05
 ipa	MarioKartWorld.ipa
 app_category	public.app-category.racing-games
 pad_layout	full

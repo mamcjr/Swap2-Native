@@ -14,7 +14,7 @@ import java.util.TreeMap;
 /**
  * scripts/pack_android.py's rewrite_keys, plain Java (PackCheck.code; checked on the JVM against the Python by dm/tools/tests/test_android_rewritekey.py with
  * RewriteKeyJvmTest): SHA-256 over name\0bytes of the REWRITER files (and exefs_patches.py when the module has exefs patches), the module, the profile's
- * patches.py (when there is one), every other dm/games/&lt;id&gt;/patches.py that names the module's build ID (under its path), and game.tsv's build rows, the only
+ * patches.py (when there is one), every other dm/games/&lt;id&gt;/patches.py that names the module's build ID (under its path), and game.tsv's build and fps_decouple rows, the only
  * part of game.tsv the rewriter reads (buildRows, hashed under the name ROWS; the rest is the host's, and a change there must not make the code stale).
  * Also the earlier (v1) formula, which hashed the whole game.tsv and no other patches.py, when no other patches.py names the build: with the APK's game.tsv,
  * and with the pack's copy (&lt;pack&gt;/game.tsv) when its build rows are the APK's: the key proves the copy is the file it was made with, and the rows the
@@ -27,8 +27,8 @@ final class RewriteKey {
     static final String ROWS = "game.tsv build rows";
 
     /**
-     * game.tsv's build rows (pack_android.py build_rows; bytes kept as they are): each line (split at \n, one trailing \r dropped) of printable ASCII and tabs whose
-     * first cell is "build", its cells stripped of spaces and joined by tabs, one a line; a line holding "build" and any other byte is kept whole, as it is
+     * game.tsv's build and fps_decouple rows (pack_android.py build_rows; bytes kept as they are): each line (split at \n, one trailing \r dropped) of printable ASCII and tabs whose
+     * first cell is "build" or "fps_decouple", its cells stripped of spaces and joined by tabs, one a line; a line holding "build" or "fps_decouple" and any other byte is kept whole, as it is
      * (patch_nso.py's str.splitlines and str.strip break and strip at more characters than these).
      */
     static byte[] buildRows(byte[] tsv) {
@@ -41,12 +41,12 @@ final class RewriteKey {
                 text = ch == '\t' || ch >= 0x20 && ch < 0x7f;
             }
             if (!text) {
-                if (line.contains("build")) out.append(line).append('\n');
+                if (line.contains("build") || line.contains("fps_decouple")) out.append(line).append('\n');
                 continue;
             }
             String[] c = line.split("\t", -1);
             for (int i = 0; i < c.length; i++) c[i] = strip(c[i]);
-            if (c[0].equals("build")) out.append(String.join("\t", c)).append('\n');
+            if (c[0].equals("build") || c[0].equals("fps_decouple")) out.append(String.join("\t", c)).append('\n');
         }
         return out.toString().getBytes(StandardCharsets.ISO_8859_1);
     }

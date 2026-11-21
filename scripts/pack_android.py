@@ -6,6 +6,9 @@
 #   pack.tsv     what the launcher reads: title ID, version, build IDs, and the RomFS and DLC folders relative to the game folder; the shader library's path in the pack
 #   shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib, inputs.tsv   the game's shaders as SPIR-V for the Vulkan replay (dm/gfx/tools/vk_android_build.py; android/SHADERS.md), the library
 #                of this source tree's version: an up-to-date one in the shader cache is copied, else it is built from the Switch shader package
+#   nro.tsv, nro<i>.patched.bin and the rest   the NROs the game loads at run time with nn::ro (dm/tools/nro_collect.py: by the SHA-256s its NRRs list, from the RomFS or packed in
+#                a boot stub's main), collected into <work>/android-nro/ and rewritten like the modules; the host maps what nro.tsv lists (loader.c preload_nros). Not in pack.tsv's
+#                modules row: the launcher checks those against the dump's own files, and an NRO is not one
 #   build_src.sha256, rewrite_<module>.log
 # The RomFS is not in the pack (the app gives the host <game folder>/<romfs> as DM_ROMFS) and neither is anything else of the dump but the rewritten code.
 # The game may be a NUP file instead of a folder (android/NUP.md): its packages are read in place (pack_dump.scan, dm/tools/nup.py), the modules and the RomFS are
@@ -47,7 +50,7 @@ class Error(Exception): pass
 # The rewrite key, <module>.android.key: SHA-256 over name\0bytes of the REWRITER files (and exefs_patches.py when the module has exefs patches), the module, the
 # profile's patches.py (when there is one), every other dm/games/*/patches.py that names the module's build ID (patch_nso.py loads them all, and a build another
 # game ships, a shared sdk or movie module, may have its CUTS / OBS / FRAME_STEP there; hashed under its repository path), and the only part of game.tsv the
-# rewriter reads: its build rows (patch_nso.py reads them for a module whose build has no CUTS), normalized by build_rows and hashed under the name ROWS. Then
+# rewriter reads: its build rows (patch_nso.py reads them for a module whose build has no CUTS) and fps_decouple rows (the opt-in to sead's rate gate), normalized by build_rows and hashed under the name ROWS. Then
 # ' target=android' and, with exefs patches, ' mods=<their digest>'. The rest of game.tsv is the host's (ndsr_input, scene_scale_palette, window size, ...):
 # a change there must not make the code stale and rewrite main on the phone.
 # A key of the earlier formula (v1: the whole game.tsv, no other patches.py) counts as current when no other patches.py names the build and the game.tsv it
@@ -59,18 +62,18 @@ BUILD_ROW_TEXT = frozenset(range(0x20, 0x7f)) | {0x09}
 
 
 def build_rows(b):
-    """game.tsv's build rows, bytes in, bytes out: each line (split at \\n, one trailing \\r dropped) of printable ASCII and tabs whose first cell is `build`,
-    its cells stripped of spaces and joined by tabs, one a line. patch_nso.py splits with str.splitlines and strips each cell with str.strip, which also break
-    at \\r, \\x0b, \\x0c, \\x1c-\\x1e, \\x85, U+2028/9 and strip Unicode spaces: a line holding `build` and any byte outside printable ASCII and tabs is kept
+    """game.tsv's build and fps_decouple rows, bytes in, bytes out: each line (split at \\n, one trailing \\r dropped) of printable ASCII and tabs whose first cell is
+    `build` or `fps_decouple`, its cells stripped of spaces and joined by tabs, one a line (a profile without fps_decouple rows keys as before).
+    patch_nso.py splits with str.splitlines and strips each cell with str.strip, which also break at \\r, \\x0b, \\x0c, \\x1c-\\x1e, \\x85, U+2028/9 and strip Unicode spaces: a line holding `build` or `fps_decouple` and any byte outside printable ASCII and tabs is kept
     whole, as it is, so two tables that differ for the rewriter never come out the same here (RewriteKey.buildRows does the same)"""
     rows = []
     for line in b.split(b'\n'):
         if line.endswith(b'\r'): line = line[:-1]
         if not all(c in BUILD_ROW_TEXT for c in line):
-            if b'build' in line: rows.append(line + b'\n')
+            if b'build' in line or b'fps_decouple' in line: rows.append(line + b'\n')
             continue
         c = [x.strip(b' ') for x in line.split(b'\t')]
-        if c[0] == b'build': rows.append(b'\t'.join(c) + b'\n')
+        if c[0] in (b'build', b'fps_decouple'): rows.append(b'\t'.join(c) + b'\n')
     return b''.join(rows)
 
 
@@ -134,10 +137,130 @@ def upgrade_keys(srcs, out, g):
             print(f'  {m}: key brought to the current formula (same rewrite)')
 
 
+def write_lf(path, text):   # a text file with '\n' line ends in UTF-8 on every system (Windows' text mode writes CR LF in its ANSI code page)
+    with open(path, 'w', encoding='utf-8', newline='\n') as f: f.write(text)
+
+
+def stage(text):   # 'stage: <text>': what this step is doing now (upstream's Prepare card reads it)
+    print(f'stage: {text}', flush=True)
+
+
+# ---- NROs: the modules a game loads at run time (nn::ro) ----
+NRO_TOOLS = ('dm/tools/nro_collect.py', 'dm/tools/boot_nro.py', 'dm/tools/nso.py', 'dm/tools/nso_syms.py', 'dm/tools/romfs.py', 'dm/gfx/tools/smash_arc.py', 'dm/gfx/tools/cra.py')
+
+
+def rfs():   # dm/tools/romfs.py: the os, open of plain folders and of paths inside a .nup package or a RomFS image
+    sys.path.insert(0, str(REPO / 'dm/tools'))
+    import romfs
+    return romfs
+
+
+def nrr_files(romfs):   # [(path in the RomFS, bytes)] of its NRR files (*.nrr: Super Smash Bros. Ultimate keeps them in a folder named .nrr), as nro_collect.py reads them
+    R = rfs(); out = []
+    for dp, _, fs in R.os.walk(str(romfs)):
+        for f in sorted(fs):
+            if f.endswith('.nrr'):
+                p = R.os.path.join(dp, f)
+                with R.open(p, 'rb') as h: out.append((R.os.path.relpath(p, str(romfs)), h.read()))
+    return out
+
+
+def nro_key(exe, romfs, nrrs):
+    """What the collection depends on: its tools, the NRRs, the ExeFS's modules (a boot stub's NRO: their headers, which hold the build ID, and sizes) and the RomFS's
+    file list with sizes (where a registered NRO is found)"""
+    R = rfs(); h = hashlib.sha256()
+    for f in NRO_TOOLS: part(h, f, (REPO / f).read_bytes())
+    for n, b in nrrs: part(h, n, b)
+    for n in sorted(R.os.listdir(str(exe))):
+        p = R.os.path.join(str(exe), n)
+        if R.os.path.isfile(p):
+            with R.open(p, 'rb') as f: part(h, n, f.read(0x100) + str(R.os.path.getsize(p)).encode())
+    for dp, _, fs in R.os.walk(str(romfs)):
+        for f in sorted(fs):
+            p = R.os.path.join(dp, f); part(h, R.os.path.relpath(p, str(romfs)), str(R.os.path.getsize(p)).encode())
+    return h.hexdigest()
+
+
+def pack_nros(d):   # the NROs d/nro.tsv lists with files (a 'refused' row, an online SDK, has none)
+    t = Path(d) / 'nro.tsv'
+    if not t.is_file(): return []
+    return [l.split('\t')[0] for l in t.read_text(encoding='utf-8').splitlines() if l and not l.startswith('#') and not l.startswith('refused\t')]
+
+
+def collect_nros(exe, romfs, work, in_process=False):
+    """The NROs the game registers: {name: collected .nro} in <work>/android-nro/ (dm/tools/nro_collect.py, with the version's own ExeFS for a boot stub's NRO),
+    {} without NRRs. Reused while nro_key is unchanged (Super Smash Bros. Ultimate's scan takes minutes). in_process: in this Python, without a pool (the phone).
+    Written in place, its key file the marker (deleted first, written last, by a file's rename): a folder renamed under /storage/emulated goes through MediaProvider,
+    which may refuse it with EPERM (BananaNative issues #1 and #296; android/app Outputs.java)"""
+    work = Path(work); coll, kf = work / 'android-nro', work / 'android-nro.key'
+    nrrs = nrr_files(romfs)
+    if not nrrs:
+        kf.unlink(missing_ok=True); shutil.rmtree(coll, ignore_errors=True); return {}
+    key = nro_key(exe, romfs, nrrs)
+    if collected_nros(work) is None or kf.read_text().strip() != key:
+        work.mkdir(parents=True, exist_ok=True); kf.unlink(missing_ok=True)
+        shutil.rmtree(work / 'android-nro.partial', ignore_errors=True)   # left by a version that renamed the folder into place
+        if coll.exists(): shutil.rmtree(coll)
+        coll.mkdir()
+        stage(f'finding the NROs {len(nrrs)} NRR file{"s" if len(nrrs) != 1 else ""} register{"" if len(nrrs) != 1 else "s"}')
+        args, log = [str(romfs), str(coll), '--exefs', str(exe)], work / 'nro_collect.log'
+        if in_process: rc = run_in_process(REPO / 'dm/tools/nro_collect.py', args, {'DM_NRO_COLLECT_J': '1'}, log)
+        else:
+            with open(log, 'w') as f: rc = subprocess.run([sys.executable, str(REPO / 'dm/tools/nro_collect.py'), *args], env=child_env(), stdout=f, stderr=subprocess.STDOUT).returncode
+        if rc:
+            tail = log.read_text(errors='replace').splitlines()[-20:]
+            raise Error(f'nro_collect.py exit code {rc} (full output: {log}):\n' + '\n'.join(tail))
+        tmp = work / 'android-nro.key.tmp'; write_lf(tmp, key + '\n'); os.replace(tmp, kf)
+    got = {n: coll / f'{n}.nro' for n in pack_nros(coll)}
+    print(f'  NROs: {len(got)} the game loads at run time' + (f' ({", ".join(got)})' if len(got) <= 8 else ''), flush=True)
+    return got
+
+
+def place_nros(coll, out):   # the collection's nro.tsv into the pack (after the NROs' rewrite), or none for a game without NROs
+    t = Path(out) / 'nro.tsv'
+    if coll is None or not (Path(coll) / 'nro.tsv').is_file(): t.unlink(missing_ok=True); return
+    tmp = Path(out) / 'nro.tsv.partial'; shutil.copyfile(Path(coll) / 'nro.tsv', tmp); os.replace(tmp, t)
+
+
+def unfinished_nros(out):   # the pack's NROs whose rewrite did not finish: '<name> (<files> missing)'
+    out = Path(out)
+    return [f'{n} ({" and ".join(f for f in (f"{n}.patched.bin", f"{n}.android.key") if not (out / f).is_file())} missing)'
+            for n in pack_nros(out) if not (out / f'{n}.patched.bin').is_file() or not (out / f'{n}.android.key').is_file()]
+
+
+def collected_nros(work):
+    """The folder of the NROs collect_nros collected into work, or None when it has none or its collection did not finish (no key file) (shader_split.py reads a CRA
+    archive's file table from them: DM_NRO_DIR)"""
+    d = Path(work) / 'android-nro'
+    return d if (d / 'nro.tsv').is_file() and (Path(work) / 'android-nro.key').is_file() else None
+
+
 def nso_build_id(path):   # the module's build ID (NSO header +0x40), as the profile's build rows name it
     b = path.read_bytes()[:0x60]
     if b[:4] != b'NSO0': raise Error(f'{path}: not an NSO')
     return b[0x40:0x50].hex()
+
+
+def keep_times(src, dst):
+    """The modification time and mode of src on dst, best effort: exFAT/FAT storage that Android shows through its FUSE layer (/mnt/media_rw: an SD card, a USB drive)
+    refuses chmod and utime with EPERM, and shutil.copystat / copy2 then fail a finished copy (Banana Native issue #360, ported from eden/v0.3.43 af1ed596, MIT).
+    The data is what counts; same_copy compares sizes, not times"""
+    try: shutil.copystat(src, dst)
+    except OSError: pass
+
+
+def copy_file(src, dst):
+    """shutil.copy2 that keeps going when the storage refuses the metadata (keep_times)"""
+    shutil.copyfile(src, dst); keep_times(src, dst)
+
+
+def same_copy(src, dst):
+    """dst is a current copy of src: same size (times do not survive exFAT), and for a small file the same bytes"""
+    try:
+        n = os.path.getsize(src)
+        if os.path.getsize(dst) != n: return False
+        return n > (1 << 20) or Path(src).read_bytes() == Path(dst).read_bytes()
+    except OSError: return False
 
 
 def child_env(**extra):
@@ -334,7 +457,7 @@ def map_keys(path):
     with open(path) as f: return {c[3] for c in (l.rstrip('\n').split('\t') for l in f) if len(c) > 4 and c[0].endswith('.bin')}
 
 
-def split_shaders(a, g, vdir, pkg, parts=None):   # parts: the version's (romfs, exefs) when they are not vdir's own (pack_dump.version_part)
+def split_shaders(a, g, vdir, pkg, parts=None, nros=None):   # parts: the version's (romfs, exefs) when they are not vdir's own (pack_dump.version_part); nros: collected_nros
     """The Switch shader package from the dump, as the phone's split step makes it (the version's romfs and main, android/app PackService "split"): shader_split.py into
     <pkg> (written beside it, then renamed, so a stopped split leaves no half package). Its tables go beside the package. The library is the profile's (its shader_map.tsv
     decides what is built, and vk_android_build.py finds each of its shaders in the package by key), so the split must hold every shader of the profile's map: one that
@@ -343,7 +466,7 @@ def split_shaders(a, g, vdir, pkg, parts=None):   # parts: the version's (romfs,
     py = shader_python(a.shader_python, split=True)
     tmp = pkg.with_name(pkg.name + '.tmp'); shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
     print(f'shaders: splitting the shaders out of {rd} into {pkg} with {py} (a few minutes)', flush=True)
-    env = child_env(DM_GAME=g.id, DM_SPLIT_TARGETED='1')   # as the phone: only the files the profile's map names, when the build is the profile's and the tables come out the same
+    env = child_env(DM_GAME=g.id, DM_SPLIT_TARGETED='1', **({'DM_NRO_DIR': str(nros)} if nros else {}))   # as the phone: only the files the profile's map names, when the build is the profile's and the tables come out the same
     r = subprocess.run([py, str(SPLIT), str(rd), str(ed / 'main'), str(tmp / 'pkg'),
                         *[str(tmp / f) for f in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')]], env=env)
     if r.returncode: raise Error(f'shader_split.py exit code {r.returncode}')
@@ -375,7 +498,7 @@ def pack_shaders(a, g, work, out, vdir, parts=None):
     if not library_current(lib, g):
         if a.in_process: raise Error(f'no current shader library {lib}: --in-process does not build one yet (vk_android_build.py starts the translator and spirv-val as programs); --no-shaders packs without')
         pkg = (a.shader_pkg or work / 'android-shaders' / 'pkg').resolve()
-        if not pkg.is_dir(): split_shaders(a, g, vdir, pkg, parts)   # also into a --shader-pkg folder that is not there yet
+        if not pkg.is_dir(): split_shaders(a, g, vdir, pkg, parts, collected_nros(work))   # also into a --shader-pkg folder that is not there yet
         py = shader_python(a.shader_python)
         print(f'shaders: building the Vulkan library {lib} from {pkg} with {py} (J={a.J}; about 10 minutes on DKB)', flush=True)
         (work / 'android-shaders' / 'work').mkdir(parents=True, exist_ok=True)
@@ -389,8 +512,8 @@ def pack_shaders(a, g, work, out, vdir, parts=None):
         st = lib_stamp(lib); dmsh_chain.write_stamp(str(lib), st['game'], st['inputs'])
     for f in (VK_LIB, dmsh_chain.STAMP):
         s_, d_ = lib / f, dst / f
-        if d_.is_file() and d_.stat().st_size == s_.stat().st_size and d_.stat().st_mtime_ns == s_.stat().st_mtime_ns: continue
-        tmp = d_.with_name(f + '.partial'); shutil.copy2(s_, tmp); tmp.rename(d_)
+        if same_copy(s_, d_): continue   # by size, not by time: exFAT cannot keep a modification time
+        tmp = d_.with_name(f + '.partial'); copy_file(s_, tmp); os.replace(tmp, d_)   # replace: Windows' rename does not take an existing name
     others = sorted(o.name for o in (out / 'shaders').iterdir() if o.name != name and o.name.startswith(VK_PREFIX) and o.is_dir())
     if others:   # kept: another APK (the test and the play app, an older build) may load one of them from this pack; delete by hand to save the space
         print(f'shaders: kept the libraries of other versions in {out / "shaders"}: {", ".join(others)} (about 350 MB each)')
@@ -454,11 +577,17 @@ def main():
         if a.keep_code:
             if missing := [m for m in mods if not (out / f'{m}.patched.bin').is_file() or not (out / f'{m}.android.key').is_file()]:
                 raise Error(f'--keep-code: {out} has no complete {", ".join(missing)} (patched.bin and its key): rewrite first')
-            upgrade_keys(srcs, out, g)   # before the copy below replaces the game.tsv an earlier key was made with (a rewrite run does it in rewrite)
+            if gaps := unfinished_nros(out): raise Error(f'--keep-code: the rewrite step has not finished for {", ".join(gaps)} in {out}: run the rewrite step again')
+            coll = collected_nros(folder.parent / f'{app:016X}-work')   # the collected NROs the keys were made from, when this machine collected them
+            upgrade_keys(srcs | {n: coll / f'{n}.nro' for n in pack_nros(out) if coll and (coll / f'{n}.nro').is_file()}, out, g)   # before the copy below replaces the game.tsv an earlier key was made with (a rewrite run does it in rewrite)
             print('  modules kept as they are (--keep-code)')
         else:
-            try: rewrite(sys.executable, srcs, out, max(1, a.j), g, a.in_process, patches)
+            # the NROs the game loads at run time (nn::ro): collected by its NRRs' hashes (from the RomFS, or packed in a boot stub's main: Mario Tennis Fever), rewritten like the modules
+            work = folder.parent / f'{app:016X}-work'
+            nros = collect_nros(exe, romfs, work, a.in_process)
+            try: rewrite(sys.executable, srcs | nros, out, max(1, a.j), g, a.in_process, patches)
             finally: shutil.rmtree(out / '.nup-src', ignore_errors=True)   # the module copies a NUP game's rewrite read (rewriter_src)
+            place_nros(work / 'android-nro' if nros else None, out)
         if a.code_only: print(f'done: the modules in {out} (--code-only: pack.tsv and the shaders unchanged)'); return
         shutil.copyfile(g.dir / 'game.tsv', out / 'game.tsv')
         # The system resource is the packed version's NPDM's, as the kernel takes it on hardware (the host answers GetInfo 16 with it; non-zero turns on the SDK's virtual

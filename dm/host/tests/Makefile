@@ -71,10 +71,16 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_android_placedkill
 	$(B)/t_android_place
 	$(B)/t_android_psogate
+	$(B)/t_android_deadly
 	$(B)/t_android_gbar
 	$(B)/t_android_ubq
 	$(B)/t_android_rcix
 	$(B)/t_android_smap
+	$(B)/t_android_meshpack
+	$(B)/t_android_dlss
+	$(B)/t_android_tsr_cam
+	$(B)/t_android_shmcap
+	$(B)/t_lse_unaligned
 	$(B)/t_audio_instream
 run: $(B)/t_nro
 run: $(B)/t_symbols
@@ -353,6 +359,10 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+# Unaligned LSE atomics done in software for a core without FEAT_LSE2 (lse_unaligned.h; crash.c on Android arm64)
+run: $(B)/t_lse_unaligned
+$(B)/t_lse_unaligned: t_lse_unaligned.c ../lse_unaligned.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_lse_unaligned.c
 # The silent microphone of nn::audio input streams (audio_instream.h; hle_audio.c serves the streams with it)
 run: $(B)/t_audio_instream
 $(B)/t_audio_instream: t_audio_instream.c ../audio_instream.h | $(B)
@@ -395,6 +405,10 @@ $(B)/t_android_place: t_android_place.c $(VKA)/vka_place.h | $(B)
 run: $(B)/t_android_psogate
 $(B)/t_android_psogate: t_android_psogate.c $(VKA)/vka_psogate.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_psogate.c
+# Pipelines that crashed or killed the driver: the build a crash records, how records refuse later builds, the list's line and stamp (vka_deadly.h; vka_pso.c deadly_*)
+run: $(B)/t_android_deadly
+$(B)/t_android_deadly: t_android_deadly.c $(VKA)/vka_deadly.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_deadly.c
 # The game's barriers between compute dispatches: the barrier chosen for each, checked against NVN's ordering over every short sequence (vka_gbar.h; vka_gbar.c)
 run: $(B)/t_android_gbar
 $(B)/t_android_gbar: t_android_gbar.c $(VKA)/vka_gbar.h | $(B)
@@ -413,10 +427,38 @@ $(B)/t_android_rcix: t_android_rcix.c $(VKA)/vka_rcix.h $(VKA)/vka_oqbatch.h | $
 run: $(B)/t_android_smap
 $(B)/t_android_smap: t_android_smap.c $(VKA)/vka_smap.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_smap.c
+# Two task / mesh compute workgroups a 64-lane subgroup (vka_mesh_pack.h, vka_mesh.inc DM_VK_MESH_PACK): the selftest's fixtures rewritten and refused as they should be,
+# validated by spirv-val when it is on the PATH; DM_MESHPACK_DIR=<folder of <key>_5.spv> adds a library's task / mesh computes
+run: $(B)/t_android_meshpack
+$(B)/t_android_meshpack: t_android_meshpack.c $(VKA)/vka_mesh_pack.h $(VKA)/vka_mesh_test_spv.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_meshpack.c
+# NVN2's DLSS stand-in's choices (vka_dlss.h, Banana Native eden/v0.3.45; vka_dlss.c, vka_exec.c dlss_eval): GSR2 tune rows, the fallback order, the sRGB handling by NVN formats
+run: $(B)/t_android_dlss
+$(B)/t_android_dlss: t_android_dlss.c $(VKA)/vka_dlss.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_dlss.c -lm
+# Camera motion from depth for the temporal path in agl's NDSR slot (vka_tsr_cam.h; vka_ndsr.c DM_VK_NDSR=gsr2, fsr/ndsr_tsr.comp): the inverse, the block layout, the
+# reprojection prev_VP * inverse(VP) against both cameras' projections, the cut rule
+run: $(B)/t_android_tsr_cam
+$(B)/t_android_tsr_cam: t_android_tsr_cam.c $(VKA)/vka_tsr_cam.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_tsr_cam.c -lm
 # The replay's SPIR-V rewrites (vka_spvpatch.c): integer-fed vertex inputs (the selftest's vertex shader), storage and sampled images bound to integer textures (t_android_spvpatch_img.h),
 # validated by spirv-val when it is on the PATH; DM_VK_SPV_DIR=<.spv folder> adds those modules
-$(B)/t_android_spvpatch: t_android_spvpatch.c t_android_spvpatch_img.h $(VKA)/vka_spvpatch.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
+$(B)/t_android_spvpatch: t_android_spvpatch.c t_android_spvpatch_img.h t_android_spvpatch_gs.h t_android_spvpatch_shx.h $(VKA)/vka_spvpatch.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_spvpatch.c $(VKA)/vka_spvpatch.c
+# A texture copy's path: copy, blit, or a drawn depth copy where the driver cannot blit (vka_t2tpath.h, Banana Native a4a64a03); the timestamp tick measured against the
+# host clock (vka_tstick.h, Banana Native 5e4212d1; vka_exec.c tick_sample)
+run: $(B)/t_android_t2tpath $(B)/t_android_tstick $(B)/t_android_driverpath
+$(B)/t_android_t2tpath: t_android_t2tpath.c $(VKA)/vka_t2tpath.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_t2tpath.c
+$(B)/t_android_tstick: t_android_tstick.c $(VKA)/vka_tstick.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_tstick.c
+# Whether a custom GPU driver is what runs: its library's lines in /proc/self/maps (vka_driverpath.h, Banana Native v0.3.43 PR 409; vka_driver.c vka_driver_mapped)
+$(B)/t_android_driverpath: t_android_driverpath.c $(VKA)/vka_driverpath.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_driverpath.c
+# A Qualcomm GPU's real compute shared memory: at most 32 KiB whatever the driver advertises (vka_shmcap.h; vka_dev.c)
+run: $(B)/t_android_shmcap
+$(B)/t_android_shmcap: t_android_shmcap.c $(VKA)/vka_shmcap.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_shmcap.c
 
 # NVN dependencies and copied-texture ownership (BananaNative 0.2.8).
 run: $(B)/t_android_qsched $(B)/t_android_texown

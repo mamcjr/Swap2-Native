@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">Ajouter à l\'écran d\'accueil</string>
+    <string name="s2_shortcut_add_note">Un raccourci sur l\'écran d\'accueil du téléphone qui lance ce jeu</string>
+    <string name="s2_shortcut_unsupported">L\'application d\'accueil de ce téléphone n\'accepte pas les raccourcis.</string>
+    <string name="s2_shortcut_gone">%1$s n\'est plus dans %2$s. Ajoutez de nouveau le jeu pour utiliser ce raccourci.</string>
+    <string name="s2_shortcut_missing">%1$s est introuvable : %2$s</string>
+    <string name="s2_shortcut_blocked_title">Pas de raccourci sur l\'écran d\'accueil?</string>
+    <string name="s2_shortcut_blocked">Sur les téléphones Xiaomi, Redmi et POCO, l\'écran d\'accueil n\'ajoute un raccourci qu\'avec l\'autorisation Raccourcis sur l\'écran d\'accueil. Autorisez-la pour %1$s dans ses autorisations (Autres autorisations), puis ajoutez de nouveau le raccourci.</string>
+    <string name="s2_shortcut_permissions">Autorisations de l\'appli</string>
+</resources>

@@ -87,7 +87,7 @@ public final class ReadinessJvmTest {
                 && find(l, "Vulkan 1.3 loader").status == Readiness.Status.PASS && Readiness.of(l, Readiness.Status.FAIL).size() == 1, "an error line: " + l);
 
         // Status and the driver's environment
-        check(Readiness.status("playable") == null && Readiness.status("") == null && Readiness.status("bring-up").status == Readiness.Status.WARNING, "status");
+        check(Readiness.status("playable") == null && Readiness.status("") == null && Readiness.status("bring-up").status == Readiness.Status.INFO, "status");
         String[] de = Readiness.driverEnv(List.of("DM_SAVE=/x", "DM_VK_DRIVER=/d/turnip", "DM_VK_HOOKDIR=/h", "DM_VK_DRIVER=system"));
         check(de.length == 3 && de[0].equals("DM_VK_DRIVER=/d/turnip") && de[2].equals("DM_VK_DRIVER=system"), "driverEnv keeps the order (the last wins)");
         de = Readiness.driverEnv(List.of("DM_TEMP=/t", "DM_SAVE=/x", "DM_QGL=rendermode=1", "DM_LSFG=0"));

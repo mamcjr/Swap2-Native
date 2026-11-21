@@ -9,6 +9,7 @@ program_id	0400486024DEC000
 
 # ---- App ----
 name	The Legend of Zelda: Ocarina of Time
+release	2026-11-05
 ipa	ZeldaOcarinaOfTime.ipa
 app_category	public.app-category.adventure-games
 pad_layout	full

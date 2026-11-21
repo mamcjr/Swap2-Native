@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">Добавить на главный экран</string>
+    <string name="s2_shortcut_add_note">Ярлык на главном экране телефона, который запускает эту игру</string>
+    <string name="s2_shortcut_unsupported">Приложение главного экрана этого телефона не принимает ярлыки.</string>
+    <string name="s2_shortcut_gone">%1$s больше нет в %2$s. Добавьте игру снова, чтобы пользоваться этим ярлыком.</string>
+    <string name="s2_shortcut_missing">%1$s не найдена: %2$s</string>
+    <string name="s2_shortcut_blocked_title">Ярлыка нет на главном экране?</string>
+    <string name="s2_shortcut_blocked">На телефонах Xiaomi, Redmi и POCO главный экран добавляет ярлыки только с разрешением «Ярлыки на рабочем столе». Разрешите его для %1$s в разрешениях приложения (Другие разрешения), затем добавьте ярлык снова.</string>
+    <string name="s2_shortcut_permissions">Разрешения приложения</string>
+</resources>

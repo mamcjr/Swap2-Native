@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home's library order (MainActivity.sortOrder, LibraryOrder) -->
+<resources>
+    <string name="s2_sort">정렬</string>
+    <string name="s2_sort_title">게임 정렬</string>
+    <string name="s2_sort_name_asc">이름 (A–Z)</string>
+    <string name="s2_sort_name_desc">이름 (Z–A)</string>
+    <string name="s2_sort_release_asc">발매일 (오래된 순)</string>
+    <string name="s2_sort_release_desc">발매일 (최신순)</string>
+    <string name="s2_sort_played_asc">마지막 플레이 (오래된 순)</string>
+    <string name="s2_sort_played_desc">마지막 플레이 (최근 순)</string>
+    <string name="s2_sort_now">게임 정렬: %1$s</string>
+</resources>

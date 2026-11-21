@@ -43,19 +43,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             x(0xb60, InstName.Tex, ATex, InstProps.Tex);
             x(0x361, InstName.Tex, ATex, InstProps.Tex);
+            x(0x364, InstName.Tld4, ATex, InstProps.Tex);
+            x(0x367, InstName.Tld, ATex, InstProps.Tex);
             x(0xf60, InstName.Tex, ATex, InstProps.Tex);
+            x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
+            x(0xf66, InstName.Tld, ATex, InstProps.Tex);
+            x(0xf6c, InstName.Txd, ATex, InstProps.Tex);
+            x(0xf69, InstName.Tmml, ATex, InstProps.Tex);
+            x(0x36a, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb66, InstName.Tld, ATex, InstProps.Tex);
             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
-            x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
             x(0xb6c, InstName.Txd, ATex, InstProps.Tex);
+            x(0x36d, InstName.Txd, ATex, InstProps.Tex);
             x(0xb6f, InstName.Txq, ATxq, InstProps.Tex);
             x(0x370, InstName.Txq, ATxq, InstProps.Tex);
+            x(0xf6f, InstName.Txq, ATxq, InstProps.Tex);
             x(0xb97, InstName.Suld, ASurface, N);
             x(0xb99, InstName.Suld, ASurface, N);
             x(0xb9b, InstName.Sust, ASurface, N, writesRd: false);
             x(0xb9d, InstName.Sust, ASurface, N, writesRd: false);
             x(0x593, InstName.Suatom, ASuatom, N);
+            x(0x595, InstName.Suatom, ASuatomCas, N);
             x(0x59f, InstName.Sured, ASured, N, writesRd: false);
             x(0xb1d, InstName.Bar, ABar, N, writesRd: false);
         }
@@ -480,6 +489,27 @@ namespace Ryujinx.Graphics.Shader.Instructions
             EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, (SuatomOp)x.Bits(87, 91), (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: false);
         }
 
+        // SUATOM.CAS Rd, [Ra], Rb (0x595, from upstream Banana Native eden/v0.3.42): the compare-and-swap of an image through a handle, 0x593's layout with no operation field. Rb is
+        // the value compared with and Rb + 1 the new value (Mesa NAK: 0x396 for AtomOp::CmpExch beside 0x394, as 0x593 is beside 0x394 with the handle bound; its data source is the
+        // pair {compare, new value}), the order EmitSuatom reads them in. Rd is the old value (upstream: PRAGMATA's compute shader 50fece0d891feba4, Rd = RZ). Refused as 0x593 is
+        public static void ASuatomCas(EmitterContext context)
+        {
+            AmpereOp x = new(context.CurrOp);
+            (int handle, int cbufSlot) = ATexHandle(context, x);
+
+            if (cbufSlot != TextureOperation.DefaultCbufSlot)
+            {
+                throw AFail(context, $"SUATOM.CAS handle in bank {cbufSlot}");
+            }
+
+            if (x.Bits(81, 84) != 7)
+            {
+                throw AFail(context, "SUATOM.CAS with a predicate result");
+            }
+
+            EmitSuatom(context, (SuDim)x.Bits(61, 64), 0, 0, (SuatomSize)x.Bits(73, 76), handle, x.Ra, x.Rb, 0, x.Rd, false, isBindless: false, compareAndSwap: true);
+        }
+
         // SURED [Ra], Rb (0x59f): SUATOM without a result, the reduction form (NAK encodes its bindless twin, 0x3a0, with the operation at 87..90 and no
         // destination). Handle 40..59, dimension 61..64, size 73..76, .BA 72, operation 87..90 (add, min, max, inc, dec, and, or, xor: Maxwell's RedOp).
         // Mario Kart World 1.8.0's compute ab77eaee44cfef88 adds to a 2D U32 image with it (SURED.ADD.U32.2D [R4], R0, c[0x0][0x30]).
@@ -631,26 +661,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int opcode = x.Opcode;
 
             // TEX through a handle in a register, not named by its offset: the compiler's form for a handle it read itself, usually from a table at a computed offset. BindlessElimination takes the
-            // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60: a uniform register at 40..46. 0x361 (bit 59 set): a register, the first of the second source block,
-            // before the LOD (a census of Fire Emblem Fortune's Weave's 3,327: of the sources that an LDC just wrote, always that place, with and without .SCR). Rc stays the second destination in both
-            // 0xf63: TLD4's form of 0xf60 (Lichii b8c812b #112, f26ad43 #150): the uniform register at 40..46 with bit 91 set and 46..58 (0xb63's handle offset) zero, NODEP at 90,
-            // arrays allowed. Lichii refuses a depth reference, AOFFI and per-texel offsets in this form, and no capture has them, so they stop here (no Zelda: Ocarina of Time,
-            // Pokemon Pokopia shader has 0xf63 at all; its layout is Lichii's)
+            // handle from there, as for Maxwell's TEX.B. The other fields are those of the bound form. The family (from upstream Banana Native eden/v0.3.42): 0xb60 + 3n are TEX, TLD4,
+            // TLD, TMML, TXD bound; 0xf60 + 3n the same with the handle in a uniform register at 40..46 (other fields 0xb60 + 3n's); 0x361 + 3n (bit 59 set) the same with the handle
+            // in a register, the first of the second source block, before the LOD (a census of Fire Emblem Fortune's Weave's 3,327 0x361: of the sources that an LDC just wrote,
+            // always that place, with and without .SCR); Rc stays the second destination in all of them. 0xf63: TLD4 (Lichii b8c812b #112, f26ad43 #150), with a depth reference and
+            // offsets as 0xb63 (Star Fox: 2 pixel shaders). 0xf6c: TXD (Star Fox: 281 of its 2,856 shaders, the Ampere instruction it stopped at). 0xf66 TLD (PRAGMATA: 17 shaders),
+            // 0xf69 and 0x36a TMML (Kirby Air Riders: 4,776 pixel shaders), 0x364 and 0x367 TLD4 and TLD.
             Operand boundHandle = null;
-            bool handleInB = opcode == 0x361;
-            bool bindless = handleInB || opcode is 0xf60 or 0xf63;
+            bool handleInB = opcode is 0x361 or 0x364 or 0x367 or 0x36a;
+            // 0x36d is TXD with the handle in a register too, but it leads the first block, the coordinates after it: the second holds only the derivatives (upstream: PRAGMATA's
+            // pixel shader b8246ccc36f8d648: Ra = R0, the texture word ORed with a separate sampler's; R1, R2 the coordinates; Rb = R20..R23, four products of the gradients)
+            bool handleInA = opcode == 0x36d;
+            bool bindless = handleInB || handleInA || opcode is 0xf60 or 0xf63 or 0xf66 or 0xf6c or 0xf69;
 
-            if (opcode == 0xf63 && (!x.Bit(91) || x.Bits(46, 59) != 0))
-            {
-                throw AFail(context, "TLD4 0xf63 without a uniform register handle");
-            }
-
-            if (opcode == 0xf63 && x.Bits(76, 79) != 0)
-            {
-                throw AFail(context, "TLD4 0xf63 with a depth reference or offsets");
-            }
-
-            if (opcode is 0xf60 or 0xf63)
+            if (opcode is 0xf60 or 0xf63 or 0xf66 or 0xf6c or 0xf69)
             {
                 int ur = x.Bits(40, 46);
 
@@ -659,7 +683,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             if (bindless)
             {
-                opcode = opcode == 0xf63 ? 0xb63 : 0xb60;
+                opcode = opcode is 0xf63 or 0xf66 or 0xf6c or 0xf69 ? opcode - 0x400 : opcode is 0x364 or 0x367 or 0x36a or 0x36d ? opcode + 0x7ff : 0xb60;
             }
 
             TexDim dim = ATexDim(context, x.Bits(61, 64));
@@ -736,7 +760,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (opcode == 0xb6c)
             {
                 int n0 = coords + (isArray || offset ? 1 : 0);
-                (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0, 2 * coords);
+                (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0 + (handleInA ? 1 : 0), 2 * coords);
+
+                if (handleInA)
+                {
+                    boundHandle = a[0];
+                    a = a.GetRange(1, a.Count - 1);
+                }
+
+                // The handle leads the sources, as in the other bindless forms (BindlessElimination reads it there)
+                if (bindless)
+                {
+                    sources.Add(boundHandle);
+                }
 
                 sources.AddRange(a.GetRange(0, coords));
 
@@ -951,7 +987,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // TMML: the LOD a sample would use, x and y in 8.8 fixed point (as Maxwell's)
         private static void ATmml(EmitterContext context, SamplerType type, TextureFlags flags, int handle, int cbufSlot, int mask, Operand[] results, Operand[] sources)
         {
-            SetBindingPair setAndBinding = context.ResourceManager.GetTextureOrImageBinding(Instruction.Lod, type, TextureFormat.Unknown, flags, cbufSlot, handle);
+            // A handle in a register (0xf69, 0x36a): bound later by BindlessElimination, as the other bindless forms and Maxwell's TMML.B
+            SetBindingPair setAndBinding = (flags & TextureFlags.Bindless) != 0 ? default
+                : context.ResourceManager.GetTextureOrImageBinding(Instruction.Lod, type, TextureFormat.Unknown, flags, cbufSlot, handle);
             int r = 0;
 
             for (int comp = 0; comp < 4; comp++)
@@ -980,7 +1018,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             int mask = x.Bits(72, 76);
             // 0x370 is to 0xb6f as 0x361 to 0xb60: the handle in a register, Ra, with the LOD after it (Fire Emblem Fortune's Weave's lighting: MOV R1c, R64; MOV R1d, RZ; TXQ R1d, R1c). The shape
             // has no field here and the size query does not depend on it, so 2D, as Maxwell's bindless TXQ
-            bool bindless = x.Opcode == 0x370;
+            // 0xf6f is to 0xb6f as 0xf60 to 0xb60: the handle in a uniform register at 40..46, Ra the LOD (upstream Banana Native: PRAGMATA's 12 shaders, the size of a texture whose
+            // handle a ULDC read)
+            bool inUniform = x.Opcode == 0xf6f;
+            bool bindless = x.Opcode == 0x370 || inUniform;
             (int handle, int cbufSlot) = bindless ? (0, TextureOperation.DefaultCbufSlot) : ATexHandle(context, x);
             SamplerType type = bindless ? SamplerType.Texture2D : context.TranslatorContext.GpuAccessor.QuerySamplerType(handle);
             TextureFlags flags = bindless ? TextureFlags.Bindless : TextureFlags.None;
@@ -1004,7 +1045,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             Operand Src(int reg) => reg >= RegisterConsts.RegisterZeroIndex ? Const(0) : context.Copy(Register(reg, RegisterType.Gpr));
 
-            Operand[] sources = bindless ? [Src(x.Ra), Src(x.Ra + 1)] : [Src(x.Ra)];
+            Operand Ur(int ur) => ur == RegisterConsts.UniformZeroIndex ? Const(0) : context.Copy(Register(ur, RegisterType.Uniform));
+
+            Operand[] sources = inUniform ? [Ur(x.Bits(40, 46)), Src(x.Ra)] : bindless ? [Src(x.Ra), Src(x.Ra + 1)] : [Src(x.Ra)];
 
             if (query == 0)
             {

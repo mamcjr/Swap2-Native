@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home's library order (MainActivity.sortOrder, LibraryOrder) -->
+<resources>
+    <string name="s2_sort">Сортировка</string>
+    <string name="s2_sort_title">Сортировать игры</string>
+    <string name="s2_sort_name_asc">Название (A–Z)</string>
+    <string name="s2_sort_name_desc">Название (Z–A)</string>
+    <string name="s2_sort_release_asc">Дата выхода (сначала старые)</string>
+    <string name="s2_sort_release_desc">Дата выхода (сначала новые)</string>
+    <string name="s2_sort_played_asc">Последний запуск (сначала давние)</string>
+    <string name="s2_sort_played_desc">Последний запуск (сначала недавние)</string>
+    <string name="s2_sort_now">Сортировать игры: %1$s</string>
+</resources>

@@ -1,0 +1,9 @@
+# What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
+# <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
+# A table of its own, not game.tsv rows: game.tsv is part of a pack's rewrite key (pack_android.py rewrite_key), and a change here must not make packs stale.
+
+status	bring-up
+
+# Memory: the game makes a constant 4,655 MB GPU memory pool and a 350 MB one, and its GPU allocations total 7 GB (upstream's Mac runs, README.md Performance); on the phone 6.0 GB resident 300 s into the opening (README.md, Android)
+required	ram_gib	10	Memory: the game makes about 5 GB of GPU memory pools and 7 GB of GPU allocations, which a phone with less than about 12 GB cannot give it
+degraded	ram_gib	14	Memory: tested on a 16 GB phone only; with less, Android may stop the game when memory runs short

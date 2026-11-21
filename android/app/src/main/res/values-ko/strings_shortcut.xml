@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">홈 화면에 추가</string>
+    <string name="s2_shortcut_add_note">이 게임을 시작하는 바로가기를 휴대폰 홈 화면에 추가합니다</string>
+    <string name="s2_shortcut_unsupported">이 휴대폰의 홈 화면 앱은 바로가기를 지원하지 않습니다.</string>
+    <string name="s2_shortcut_gone">%1$s이(가) 더 이상 %2$s에 없습니다. 이 바로가기를 쓰려면 게임을 다시 추가하세요.</string>
+    <string name="s2_shortcut_missing">%1$s을(를) 찾을 수 없습니다: %2$s</string>
+    <string name="s2_shortcut_blocked_title">홈 화면에 바로가기가 없나요?</string>
+    <string name="s2_shortcut_blocked">Xiaomi, Redmi, POCO 휴대폰에서는 홈 화면 바로가기 권한이 있어야 바로가기가 추가됩니다. %1$s의 앱 권한(기타 권한)에서 허용한 뒤 바로가기를 다시 추가하세요.</string>
+    <string name="s2_shortcut_permissions">앱 권한</string>
+</resources>

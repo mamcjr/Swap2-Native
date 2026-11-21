@@ -130,11 +130,22 @@ static int qs_run_cb(void *c, qs_sub *s) {
     g_last_serial = s->serial; g_last_fence = s->fence;
     return parked;
 }
+// A frame capture or its replay holds the park time (vka_worker_park_hold): it is wall time, and their steps between submissions (seconds of readbacks) would run it out
+// before the producer is submitted, releasing the consumer early in the middle of the frame being captured or replayed. 0 = no limit (vka_qsched.h qs_poll)
+// It holds the polls too: a parked queue goes on (its wait holds now: its producer replayed, its event word written by the CPU) only at the capture's or replay's own
+// steps (vka_worker_poll_now), not whenever the worker happens to look (every job and every millisecond), so the live frame and its replay release each park at the same
+// point between the game's CPU writes. The safety valves (a present, a CPU wait for a held fence, a queue finalized, a backlog) still release at once
+static uint64_t g_park_cfg; static _Atomic int g_park_hold;
+static uint64_t g_poll_req, g_poll_done;   // (under g_mu) polls asked for by vka_worker_poll_now, and the last one the worker made
+void vka_worker_park_hold(int on) {
+    atomic_store(&g_park_hold, on != 0); if (g_qs_on >= 0) __atomic_store_n(&g_qs.park_ns, on ? 0 : g_park_cfg, __ATOMIC_RELAXED);
+    if (!on && g_up > 0) { pthread_mutex_lock(&g_mu); g_kick = 1; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu); }   // (the waits that hold by now go on)
+}
 static int qs_on(void) {
     if (g_qs_on < 0) {
         const char *e = getenv("DM_VK_EVENT_WAIT"); g_qs_on = !e || atoi(e);
         e = getenv("DM_VK_EVENT_PARK_MS"); double ms = e ? atof(e) : 200; if (!(ms >= 0)) ms = 200;
-        g_qs.run = qs_run_cb; g_qs.done = qs_done_cb; g_qs.now = qs_now_cb; g_qs.cpu_want = qs_want_cb; g_qs.timeout = qs_timeout_cb; g_qs.park_ns = (uint64_t)(ms * 1e6);
+        g_qs.run = qs_run_cb; g_qs.done = qs_done_cb; g_qs.now = qs_now_cb; g_qs.cpu_want = qs_want_cb; g_qs.timeout = qs_timeout_cb; g_qs.park_ns = g_park_cfg = (uint64_t)(ms * 1e6); if (atomic_load(&g_park_hold)) g_qs.park_ns = 0;
         e = getenv("DM_VK_EVENT_LOG"); g_evlog = e ? atoi(e) : 0; if (g_evlog > 0) g_qs.note = qs_note_cb;
         VLOG("GPU waits across NVN queues: %s", g_qs_on ? "a wait parks its queue until its producer is replayed (DM_VK_EVENT_WAIT=0: every wait passes)" : "every wait passes (DM_VK_EVENT_WAIT=0)");
     }
@@ -155,9 +166,10 @@ void vka_worker_cpu_wait(uint64_t fence) {
     uint64_t pm = atomic_load(&g_park_min), rp = atomic_load(&g_replaying);
     if (pm <= fence || (rp && rp <= fence)) { atomic_store(&g_force_req, 1); pthread_mutex_lock(&g_mu); pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu); }
 }
-static void qs_step(void) {   // a CPU wait's release, or the parked queues whose waits hold now
+static void qs_step(int asked) {   // a CPU wait's release, or the parked queues whose waits hold now (held: only when a poll was asked for)
     if (!qs_parked(&g_qs)) { atomic_store(&g_force_req, 0); return; }
-    if (atomic_load(&g_force_req) && !cpu_defer() && atomic_exchange(&g_force_req, 0)) qs_force_all(&g_qs, QS_WHY_CPU_WAIT); else qs_poll(&g_qs);   // (deferred: the request stays)
+    if (atomic_load(&g_force_req) && !cpu_defer() && atomic_exchange(&g_force_req, 0)) qs_force_all(&g_qs, QS_WHY_CPU_WAIT);   // (deferred: the request stays)
+    else if (asked || !atomic_load(&g_park_hold)) qs_poll(&g_qs);
     qs_publish();
 }
 // After a job: a park that holds back a fence a CPU thread already blocked on is released (a queue-level wait, or a submission behind a park, never asks qs_cpu_passes;
@@ -186,6 +198,7 @@ static void *worker_main(void *arg) {
         pthread_mutex_lock(&g_mu);
         int have = 0; job_t j = {0};
         for (;;) {
+            if (g_poll_req != g_poll_done) break;   // (a poll asked for: vka_worker_poll_now, with no job queued)
             if (g_qout != g_qin) { j = g_q[g_qout % NJOB]; have = 1; g_taking = 1; break; }
             int parked = qon && qs_parked(&g_qs);
             if (!parked) { pthread_cond_wait(&g_cv, &g_mu); continue; }
@@ -195,17 +208,18 @@ static void *worker_main(void *arg) {
             pthread_cond_timedwait(&g_cv, &g_mu, &dl);
             break;
         }
-        g_kick = 0;
+        g_kick = 0; uint64_t preq = g_poll_req;
         pthread_mutex_unlock(&g_mu);
         uint64_t t1 = wns(), c1 = have && j.kind == J_SUB ? thread_cpu_ns() : 0; g_idle_ns += t1 - t0;
-        if (qon) qs_step();
+        if (qon) qs_step(preq != g_poll_done);
+        if (preq != g_poll_done) { pthread_mutex_lock(&g_mu); g_poll_done = preq; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu); }   // (what it released is replayed by now)
         if (!have) continue;
         aff_check();
         if (j.kind == J_SUB && qon) {
             qs_sub *q = calloc(1, sizeof *q);
             q->serial = j.serial; q->fence = j.fence; q->frame = j.frame; q->origin_ll = j.origin_ll; q->h = j.h; q->nh = j.nh; q->ws = j.ws; q->nws = j.nws;
             q->w0kind = j.w0kind; q->w0word = j.w0word; q->w0mode = j.w0mode; q->w0value = j.w0value; q->w0fence = j.w0fence;
-            qs_submit(&g_qs, q); qs_poll(&g_qs); qs_publish();
+            qs_submit(&g_qs, q); if (!atomic_load(&g_park_hold)) qs_poll(&g_qs); qs_publish();
         } else if (j.kind == J_SUB) {
             vka_rp_queue_activate(j.serial); vka_rp_set_queue_origin(j.origin_ll);
             vka_gp_sub_frame(j.frame); vka_exec_sub_frame(j.frame); vka_rp_sub_begin();
@@ -280,8 +294,34 @@ static void fence_syncs(const uint8_t *p, uint64_t fence, int depth, job_t *j, i
 }
 
 // ---------- The mtl_* calls of the host's submit (hle_nvn.c nvnQueueSubmitCommands) and present ----------
-void mtl_queue_activate(uint64_t serial) { if (up()) g_pend_serial = serial; else vka_rp_queue_activate(serial); }
-void mtl_set_queue_origin_lower_left(int on) { if (up()) g_pend_origin = on != 0; else vka_rp_set_queue_origin(on); }
+static uint64_t g_act_serial; static int g_act_origin = 1;   // the queue and origin of the submission being made (the capture's CAP_SUBQ)
+void mtl_queue_activate(uint64_t serial) { g_act_serial = serial; if (up()) g_pend_serial = serial; else vka_rp_queue_activate(serial); }
+void mtl_set_queue_origin_lower_left(int on) { g_act_origin = on != 0; if (up()) g_pend_origin = on != 0; else vka_rp_set_queue_origin(on); }
+void vka_worker_active_queue(uint64_t *serial, int *origin_ll) { *serial = g_act_serial; *origin_ll = g_act_origin; }
+// The GPU idle for every submission handed to it, a parked queue left parked (the capture's step at each submit, and the replayer's between submits). mtl_finish waits
+// for the last fence reserved, and a CPU wait for a fence a park holds back releases the park (the safety valve above): a capture that waited that way at each submit ran
+// the parked consumer at the next submit, before its producer and after the game's CPU writes in between, so the frame it captured was not the frame the game draws, and
+// its replay, in submission order on one queue, was neither. Here: every queued job taken (a parked submission waits in the scheduler, not in the queue), the fences below
+// the lowest park done (their CPU-side effects run), then the queue idle for what was handed after the park without a signal of its own. Again until nothing moved meanwhile
+// (a park released by its producer's event, polled by the worker)
+// One poll of the parked queues on the worker (held: vka_worker_park_hold), returning once it is made and what it released has been replayed (handed to the queue)
+void vka_worker_poll_now(void) {
+    if (!up() || g_qs_on <= 0) return;
+    pthread_mutex_lock(&g_mu); uint64_t me = ++g_poll_req; pthread_cond_broadcast(&g_cv);
+    while (g_poll_done < me) pthread_cond_wait(&g_cv, &g_mu);
+    pthread_mutex_unlock(&g_mu);
+}
+void mtl_finish_handed(void) {
+    if (!up() || g_qs_on <= 0) { mtl_finish(); return; }   // (no scheduler: nothing parks)
+    for (int k = 0; k < 64; k++) {
+        pthread_mutex_lock(&g_mu); while (g_qout != g_qin) pthread_cond_wait(&g_cv, &g_mu); pthread_mutex_unlock(&g_mu);
+        uint64_t pm = atomic_load(&g_park_min), last = vka_fence_last(), f = pm && pm != UINT64_MAX && pm - 1 < last ? pm - 1 : last;
+        vka_wait_done(f, UINT64_MAX);   // (below every park: none is released)
+        if (vka_ok()) vka_queue_idle();
+        pthread_mutex_lock(&g_mu); int still = g_qout == g_qin && !g_taking && atomic_load(&g_replaying) == 0 && atomic_load(&g_park_min) == pm; pthread_mutex_unlock(&g_mu);
+        if (still) return;
+    }
+}
 void mtl_queue_forget(uint64_t serial) { if (up()) { job_t j = {J_FORGET}; j.serial = serial; push(&j); } else vka_rp_queue_forget(serial); }
 void mtl_sub_begin(void) {
     if (!up()) { uint64_t fp = vka_host_fp(NULL); vka_rp_sub_begin(); vka_fp_restore(fp); return; }

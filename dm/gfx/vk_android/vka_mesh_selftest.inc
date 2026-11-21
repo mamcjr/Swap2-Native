@@ -1,7 +1,11 @@
 // Game-independent coverage through the production recording, shader, compute and draw paths.
 #include "vka_mesh_test_spv.h"
+// With DM_VK_MESH_PACK set the selftest's task and mesh computes run packed two workgroups a subgroup (vka_mesh.inc), made before their first dispatch: the same five
+// pictures are then the packed modules' check on the device (an odd count, 3, has its last workgroup's second half repeat the first)
+extern int vka_mesh_pack_sync; uint64_t vka_mesh_packed_count(void);
 static int mesh_selftest(tex_t *t, uint8_t *memory) {
     if (V.mesh) { VRED("mesh selftest needs DM_VK_MESH=0 to exercise emulation"); return 1; }
+    vka_mesh_pack_sync = 1; uint64_t packed0 = vka_mesh_packed_count();
     const uint32_t *code[4] = {SPV_MESH_TASK_COMPUTE, SPV_MESH_MESH_COMPUTE, SPV_MESH_MESH_VERTEX, SPV_MESH_FRAGMENT};
     const size_t len[4] = {sizeof SPV_MESH_TASK_COMPUTE, sizeof SPV_MESH_MESH_COMPUTE, sizeof SPV_MESH_MESH_VERTEX, sizeof SPV_MESH_FRAGMENT};
     size_t blob = 0, at[4]; for (int i = 0; i < 4; i++) { at[i] = blob; blob = (blob + len[i] + 15) & ~(size_t)15; }
@@ -56,5 +60,7 @@ static int mesh_selftest(tex_t *t, uint8_t *memory) {
         VLOG("mesh selftest %s: %s",test==0?"task payload/empty task/primitive interpolation":test==1?"zero tasks":test==2?"nonzero first":test==3?"GPU-written indirect arguments":"multiple output batches",failed?"FAILED":"passed");
         bad+=failed;
     }
+    vka_mesh_pack_sync = 0;
+    if (VKA_ENV("DM_VK_MESH_PACK", 0)) VLOG("mesh selftest: %llu task/mesh dispatches packed two workgroups a subgroup (DM_VK_MESH_PACK)", (unsigned long long)(vka_mesh_packed_count() - packed0));
     mtl_prog_release(&p);return bad;
 }

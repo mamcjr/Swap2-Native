@@ -3,6 +3,10 @@
 // compute/indirect/vertex-read barriers. Output storage is reused only after its draw.
 // Phase 3 (a draw without a task shader, vka_mesh.inc DM_VK_MESH_FUSE): phases 0, 1 and 2 for
 // the first batch in one dispatch, so such a draw records one controller dispatch instead of three.
+// Phase 4 (a draw with a task shader, vka_mesh.inc DM_VK_MESH_FUSE_TASK): phases 1 and 2 for the first batch in one
+// dispatch, after the task compute.
+// info[20..22]: the same dispatch as info[0..2] for a module whose workgroups run two to a 64-lane subgroup
+// (vka_mesh_pack.h, DM_VK_MESH_PACK): half the workgroups, rounded up.
 layout(local_size_x=1) in;
 layout(set=0,binding=385,std430) readonly buffer Payload { uint payload[]; };
 layout(set=0,binding=386,std430) buffer Offsets { uint offsets[]; };
@@ -15,6 +19,7 @@ void begin() {
     info[10]=info[17]==0u ? count : 0u;
     info[19]=first;
     info[0]=info[10]; info[1]=1u; info[2]=1u;
+    info[20]=(info[0]+1u)/2u; info[21]=1u; info[22]=1u;
     info[4]=0u; info[5]=0u;
     info[6]=0u; info[7]=1u; info[8]=0u; info[9]=0u;
 }
@@ -42,6 +47,7 @@ void batch(uint base) {
     uint total=info[4];
     uint count=base<total ? min(info[15],total-base) : 0u;
     info[0]=count; info[1]=1u; info[2]=1u; info[5]=base;
+    info[20]=(count+1u)/2u; info[21]=1u; info[22]=1u;
     info[6]=count*info[13]*info[14];
     info[7]=1u; info[8]=0u; info[9]=0u;
 }
@@ -49,5 +55,6 @@ void main() {
     if (control.phase == 0u) begin();
     else if (control.phase == 1u) groups();
     else if (control.phase == 3u) { begin(); groups(); batch(0u); }
+    else if (control.phase == 4u) { groups(); batch(0u); }
     else batch(control.batch_base);
 }

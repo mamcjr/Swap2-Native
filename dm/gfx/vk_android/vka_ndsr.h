@@ -16,7 +16,8 @@ uint32_t *vka_ndsr_words(int packed, uint16_t tex_b, uint16_t img_b, uint16_t ba
 // The module's specialization constants (constant_id 0, 1, 2, 3)
 enum { VKA_NDSR_ENC_LINEAR = 0, VKA_NDSR_ENC_SQRT = 1 };
 enum { VKA_NDSR_MAP_FULL = 0, VKA_NDSR_MAP_PUSH = 1 };
-enum { VKA_NDSR_KERNEL_EASU = 0, VKA_NDSR_KERNEL_BILINEAR = 1, VKA_NDSR_KERNEL_NEAREST = 2 };
+enum { VKA_NDSR_KERNEL_EASU = 0, VKA_NDSR_KERNEL_BILINEAR = 1, VKA_NDSR_KERNEL_NEAREST = 2, VKA_NDSR_KERNEL_EASU_FULL = 3 };   // EASU: the lighter one; EASU_FULL: AMD's
+enum { VKA_NDSR_KERNEL_NOOP = 4 };   // the temporal path (DM_VK_NDSR=gsr2) wrote the output: the network's dispatch runs fsr/ndsr_noop.comp
 enum { VKA_NDSR_PACK_NONE = 0, VKA_NDSR_PACK_B10G11R11 = 1, VKA_NDSR_PACK_RGBA8 = 2 };   // PACK (the packed variant only): the output's format
 // The packed store for an output of VkFormat vkformat (VKA_NDSR_PACK_*): B10G11R11_UFLOAT_PACK32 (122) and R8G8B8A8_UNORM (37); NONE for any other
 int vka_ndsr_pack_of(int vkformat);
@@ -30,4 +31,7 @@ int vka_ndsr_pack_of(int vkformat);
 // has stage_writes bind it through an R32_UINT view (vka_tex.c id_view: the pair learned, the image remade with storage use through it). rt is left as it was when the
 // result is VK_NULL_HANDLE. cb: the replay's command buffer (the bound textures' images and sizes)
 VkPipeline vka_ndsr_pipeline(const vka_dstate *d, vka_shader *cs, const vka_layout *lay, const vka_res *r, int n, vka_imgrt *rt, VkCommandBuffer cb);
+// The render targets the replay sets (vka_exec.c OP_SET_RT, before the pass opens): the temporal path (DM_VK_NDSR=gsr2) and DM_VK_NDSR_CAM_LOG take the scene's depth from
+// the last D32F depth target of the network input's size this frame. Records only while one of them is on (a test and a return otherwise)
+void vka_ndsr_note_rt(const p_set_rt *rt);
 #endif

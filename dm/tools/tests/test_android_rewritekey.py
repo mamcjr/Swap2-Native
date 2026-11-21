@@ -98,6 +98,7 @@ class Rows(Tree):
             (b'x\tbuild\x0bbuild\tv2\n', b'x\tbuild\x0bbuild\tv2\n'),   # splitlines would split there: the line is kept whole
             (b'build\xc2\xa0\tv3\n# Pok\xc3\xa9mon build\n# Pok\xc3\xa9mon\n', b'build\xc2\xa0\tv3\n# Pok\xc3\xa9mon build\n'),   # non-ASCII with build: whole
             (b'build\tv4\r\r\n', b'build\tv4\r\n'),   # a second \r is no line end here, and patch_nso.py splits at it
+            (b'build\tv1\t1.0.0\tmain=aa\nfps_decouple\tsead \n# x fps_decouple\tsead\nfps_limit\t30\n', b'build\tv1\t1.0.0\tmain=aa\nfps_decouple\tsead\n'),   # the opt-in to sead's rate gate the rewriter reads
         ]
         for b, want in cases:
             self.assertEqual(pack_android.build_rows(b), want, b)

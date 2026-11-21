@@ -213,7 +213,8 @@ final class Readiness {
         return out;
     }
 
-    /** The game's status on Android (its readiness.tsv status row): a game in bring-up gets a warning of its own, whatever the phone has */
+    /** The game's status on Android (its readiness.tsv status row): a game in bring-up is said so in the readiness report, as information: it no longer warns before
+     *  every start (the user, 2026-11-18: "remova essa warning"); what the phone itself lacks (required / degraded rows) still does */
     static Check status(String status) { return status(status, null); }
 
     /** The same, worded for the screen by w (null: English only) */
@@ -222,7 +223,7 @@ final class Readiness {
         String t = say(w, "status_title", "Status on Android");
         if (status.equals("bring-up")) {
             String m = "This game is still being brought up on Android: it may stop or draw wrongly on any phone, this one included.";
-            return new Check("Status on Android", Status.WARNING, m, null, null, t, say(w, "bring_up", m));
+            return new Check("Status on Android", Status.INFO, m, null, null, t, say(w, "bring_up", m));
         }
         return new Check("Status on Android", Status.INFO, status, null, null, t, null);
     }

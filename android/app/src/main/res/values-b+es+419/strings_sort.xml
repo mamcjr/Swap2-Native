@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home's library order (MainActivity.sortOrder, LibraryOrder) -->
+<resources>
+    <string name="s2_sort">Ordenar</string>
+    <string name="s2_sort_title">Ordenar juegos</string>
+    <string name="s2_sort_name_asc">Nombre (A–Z)</string>
+    <string name="s2_sort_name_desc">Nombre (Z–A)</string>
+    <string name="s2_sort_release_asc">Fecha de lanzamiento (más antiguos primero)</string>
+    <string name="s2_sort_release_desc">Fecha de lanzamiento (más recientes primero)</string>
+    <string name="s2_sort_played_asc">Última partida (más antigua primero)</string>
+    <string name="s2_sort_played_desc">Última partida (más reciente primero)</string>
+    <string name="s2_sort_now">Ordenar juegos: %1$s</string>
+</resources>

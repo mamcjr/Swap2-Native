@@ -437,6 +437,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Validation:** POCO F7 Ultra (Adreno 830, 891.14) with `DM_VK_ALIAS=ahb`, 2026-11-13: the probe passes with a device address, Zelda's title at 60 fps and Kokiri Forest from a save at 27-31 fps, 1,625 MiB of pools as hardware buffers, no red line of its own. **Open:** no Mali or Xclipse has run it; what such a phone reports is in its log's `guest memory` line. A dma-heap allocation imported as `DMA_BUF` is the fallback to write if the probe fails there ([plan](../PLANO-HIBRIDO-MALI-XCLIPSE-2026-11-13.md)).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
 
+### Advertised placed maps that reject the guest pools' remaps
+
+- **Symptom:** (Android, PanVK on a Mali; possibly other Mali / Xclipse drivers) the driver advertises `VK_EXT_map_memory_placed`, every guest pool's placed remap fails with `VK_ERROR_MEMORY_MAP_FAILED`, and the GPU sees no game memory (black picture, lost device).
+- **Cause:** the extension bit was trusted; the pools' own sequence (map, unmap, placed remap at an aligned reserved address, placed unmap, map) was never tried before the first pool.
+- **Fix:** `vka_dev.c` runs that sequence on one 64 KiB buffer of the pools' memory type right after the device is made (`vka_remap_probe.h` `vka_guest_remap_probe`, from Banana Native v0.3.44, MIT); when it fails the run goes on as a driver without placed maps (the exported or hardware-buffer alias, each probed itself), with a `[RED]` line. `DM_VK_REMAP_PROBE=0` (restart) trusts the extension bit. A further diagnostic (`vka_placed_probe_n`, Banana v0.3.43) maps 64 KiB and 32 MiB placed test allocations on a driver that advertises placed maps and logs whether they land (`DM_VK_PLACED_PROBE=0` skips it).
+- **Found on:** upstream issue #92 (Mali-G77, PanVK). Phone check pending: on Qualcomm's and Turnip's drivers the log must read `guest placed memory: passed guest-buffer map/remap`.
+
 ### Fixed maps in the guest block never merged with their neighbours (Android)
 
 - **Symptom:** the `[vk] memory maps:` lines' `guest block anonymous` count climbs at every area change and never falls; with the other sources the process reaches `vm.max_map_count` (65,530): `[RED] guest_release mmap ...: ENOMEM`, `FATAL guest_release mprotect ... errno=12`, or a crash inside the GPU driver first.
@@ -492,6 +499,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Cause (open):** the process runs out of memory maps (Android's limit is about 65,530), not of memory. At the peak, 18,286 maps were `[anon:scudo:secondary]`, in pairs of about 32 KB and 624 KB allocations (8,700 of each, each with a guard map), plus 21,054 unnamed anonymous maps, mostly 8 KB guards. It happens with Turnip Gen8 V32 at the end of [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md)'s opening video (its NDVE compute chain), and not with Qualcomm's 891.11 driver, where the maps stay at about 15,400 and RSS at 3.5 GB. Who allocates the pairs (Turnip itself, or host objects that Turnip turns into allocations) is not known.
 - **Workaround:** the game runs on Qualcomm's 891.11 (`DM_VK_DRIVER` in its `env-<title ID>.txt`).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (POCO F7 Ultra, Adreno 830).
+
+### The driver's memory by object type (DM_VK_MEMREPORT)
+
+- **Symptom:** (Android) out of memory or a lost GPU after a scene load (the Mali-G720 tablet in Ocarina of Time) with the host's own `memory:` line far below what the system says the process holds.
+- **Cause:** the driver's own allocations (pipelines' scratch blocks, descriptor pools, command buffers) are not in the host's counts; DroidPlay Core found Qualcomm's pipelines holding 12-24 MiB of scratch each for shaders that spill a few bytes (2.3 of 2.4 GB of pipeline memory at Ocarina of Time's title on an Adreno 740).
+- **Fix:** a diagnostic, not a fix: `DM_VK_MEMREPORT=1` (restart) enables `VK_EXT_device_memory_report` where the driver has it (`vka_memreport.h`, from DroidPlay Core `151f1557`, MIT) and logs the live bytes and counts by Vulkan object type each time the total passes another 256 MB, at a failed allocation, and every 10 s of allocations. DroidPlay's fix (a pipeline with a scratch block kept only while draws use it) is the candidate once a report shows pipelines dominating (open).
+- **Found on:** DroidPlay Core (Ocarina of Time, Brilliant Diamond). Not measured here yet.
 
 ### Completion readbacks survive a guest waiter's pool
 

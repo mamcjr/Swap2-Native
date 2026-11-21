@@ -7,6 +7,9 @@
 #include <sys/mman.h>
 #include <stdatomic.h>
 #include <time.h>
+#if PLAT_ANDROID && defined(__aarch64__)
+#include "lse_unaligned.h"
+#endif
 
 static _Atomic uint64_t g_watch_last_ns;
 static _Atomic uint64_t g_watch_count;
@@ -142,6 +145,26 @@ static struct sigaction crash_prev[NSIG];   // the handlers before ours (crash_i
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
+#if PLAT_ANDROID && defined(__aarch64__)
+    // An LSE atomic (LDADD / SWP / CAS ...) at an address that is not a multiple of its size, on a core without FEAT_LSE2 (Armv8.2: Snapdragon 888 class, Cortex-X1 / A78):
+    // the game's code is built for cores that do it as one access, here it is an alignment fault. Done again in software, atomically on the aligned 16-byte block
+    // (lse_unaligned.h), and the game goes on after it. Adapted from Banana Native (MIT) commit e6b6f0d0, dm/host/crash.c
+    if (sig == SIGBUS && si->si_code == BUS_ADRALN) {
+        uint32_t insn = 0;
+        if (!plat_mem_read(PLAT_UC_PC(uc), &insn, sizeof insn)) {
+            lse_regs r; for (int i = 0; i < 31; i++) r.x[i] = PLAT_UC_X(uc, i);
+            r.x[31] = 0; r.sp = PLAT_UC_SP(uc);
+            if (lse_emulate(insn, &r, (uint64_t)(uintptr_t)si->si_addr)) {
+                for (int i = 0; i < 31; i++) PLAT_UC_X(uc, i) = r.x[i];
+                PLAT_UC_PC(uc) += 4;
+                static _Atomic unsigned n_lse; unsigned n = atomic_fetch_add(&n_lse, 1);
+                if (n == 0 || n == 999 || n == 99999) fprintf(stderr, "[dm] unaligned atomic %#x at %#llx (pc %#llx) done in software: this CPU has no FEAT_LSE2; %u so far\n",
+                                                              insn, (unsigned long long)(uintptr_t)si->si_addr, (unsigned long long)PLAT_UC_PC(uc) - 4, n + 1);
+                return;
+            }
+        }
+    }
+#endif
     if (sig == SIGSEGV || sig == SIGBUS) {
         int is_write = (int)((PLAT_UC_ESR(uc) >> 6) & 1);   // The WnR bit of ESR
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;

@@ -1,5 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+precision highp float;   // (the default, said for the mediump in fsr_easu_light.h)
+precision highp int;
 // FSR 1 EASU in place of agl's NDSR upscaler network (agl_ndsr*.pck; Zelda: Ocarina of Time's fa3033d05c0a41d6) on the Vulkan replay, DM_VK_NDSR=fsr
 // (vka_ndsr.c). It takes the network's own descriptors: the network's input (a combined 2D sampler) and its output (a 2D storage image), and agl's push
 // bank c24 (read only with MAP = 1). Bindings 100 / 101 / 102 are placeholders: vka_ndsr.c ndsr_words rewrites them to the entry's own binding numbers,
@@ -7,7 +9,8 @@
 // stride over gl_NumWorkGroups, so any group count covers the image. Sizes come from the bound images (textureSize / imageSize), so any scene size works.
 // Specialization constants: ENC 0 = the input holds the colour, 1 = it holds sqrt(colour) (agl's light upscaler: a335c1db6270c355 packs sqrt as RGB9E5),
 // and the output is the colour (max(c, 0) squared); MAP 0 = the whole input onto the whole output, 1 = agl's push bank (experimental, see main);
-// KERNEL 0 = EASU, 1 = bilinear, 2 = nearest (explicit fetches, independent of the game sampler).
+// KERNEL 0 = the lighter EASU (fsr_easu_light.h), 1 = bilinear, 2 = nearest (these three: explicit fetches, independent of the game sampler), 3 = AMD's full
+// EASU (FsrEasuF, gathers of footprints kept inside the image; DM_VK_EASU_FULL=1).
 // PACKED (a compile-time variant, ndsr_spv.py): the output is an R32_UINT view of the network's image and each texel is stored as its format's 32-bit word, for an
 // output format without storage support (B10G11R11_UFLOAT on Adreno: a float store into it has no view to go through). PACK (constant_id 3) names that format:
 // 1 = B10G11R11_UFLOAT (R in bits 0-10, G 11-21, B 22-31: 5-bit exponents, 6 / 6 / 5-bit mantissas, no sign), 2 = R8G8B8A8_UNORM.
@@ -35,6 +38,9 @@ AF4 FsrEasuGF(AF2 p) { return textureGather(src, clamp(p, g_lo, g_hi), 1); }
 AF4 FsrEasuBF(AF2 p) { return textureGather(src, clamp(p, g_lo, g_hi), 2); }
 #include "ffx_fsr1.h"
 vec3 fetch(ivec2 t, ivec2 isz) { return texelFetch(src, clamp(t, ivec2(0), isz - 1), 0).rgb; }
+ivec2 g_last;   // the input's last texel (the lighter EASU's fetches are kept inside the image)
+mediump vec3 EasuLightTap(ivec2 p) { return texelFetch(src, clamp(p, ivec2(0), g_last), 0).rgb; }
+#include "fsr_easu_light.h"
 // Bilinear at input pixel position pp (texel centres at integers), from texel fetches
 vec3 bilinear(vec2 pp, ivec2 isz) {
     vec2 f = floor(pp), w = pp - f; ivec2 i = ivec2(f);
@@ -55,7 +61,7 @@ void store(ivec2 p, vec3 c) {
 void main() {
     ivec2 isz = textureSize(src, 0), osz = imageSize(dst);
     if (isz.x <= 0 || isz.y <= 0 || osz.x <= 0 || osz.y <= 0) return;
-    g_lo = AF2(1.0) / AF2(isz); g_hi = AF2(1.0) - g_lo;
+    g_lo = AF2(1.0) / AF2(isz); g_hi = AF2(1.0) - g_lo; g_last = isz - 1;
     // con0: input pixel (texel centres at integers) = output pixel * con0.xy + con0.zw (EASU's con0)
     AU4 c0, c1, c2, c3;
     FsrEasuCon(c0, c1, c2, c3, AF1(isz.x), AF1(isz.y), AF1(isz.x), AF1(isz.y), AF1(osz.x), AF1(osz.y));
@@ -82,7 +88,8 @@ void main() {
         if (same) c = fetch(q, isz);
         else if (KERNEL == 1) c = bilinear(vec2(q) * k0.xy + k0.zw, isz);
         else if (KERNEL == 2) c = fetch(ivec2(floor(vec2(q) * k0.xy + k0.zw + 0.5)), isz);
-        else FsrEasuF(c, AU2(q), c0, c1, c2, c3);
+        else if (KERNEL == 3) FsrEasuF(c, AU2(q), c0, c1, c2, c3);
+        else c = EasuLight(vec2(q) * k0.xy + k0.zw);
         c = max(c, AF3(0.0));
         if (ENC == 1) c *= c;
         store(q + org, c);

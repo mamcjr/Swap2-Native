@@ -98,6 +98,12 @@ def header(g):
     if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval must be game or display: {pi}')
     ft = g.get('fps_target', '0')   # frame rate cap of the rewriter's frame step (FRAME_STEP in the profile's patches.py: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0) or of the engine's own frame limit (hle_fpslock.c): 0 = the game's own step, 30 / 60
     if ft not in ('0', '30', '60'): sys.exit(f'{g.id}: fps_target must be 0, 30 or 60: {ft}')
+    # fps_decouple sead: the game's speed follows its measured frame rate through sead's frame-rate controller, which the rewriter gates in main only for a profile with this key
+    # (dm/tools/nso_code.py sead_find, hle_fpslock.c sead_rate; pack_android.py build_rows keys it, so only that profile's packs are rewritten); a build's own place is an OBS row of its patches.py
+    dec = g.values('fps_decouple') if g.get('fps_decouple', '') else []
+    for r in dec:
+        if r != ['sead']: sys.exit(f"{g.id}: fps_decouple takes sead (the rewriter finds the controller; a build's own place is an OBS row of the profile's patches.py): {r}")
+    if len(dec) > 1: sys.exit(f'{g.id}: one fps_decouple row: {dec}')
     fh = g.get('fps_hold', 'on')   # whether the frame step may hold a frame longer than the cap's vsyncs when frames come late (hle_nvn.c fstep_tick): on / off
     if fh not in ('on', 'off'): sys.exit(f'{g.id}: fps_hold must be on or off: {fh}')
     utp = g.get('ue_texture_pool', '0')   # Unreal's r.Streaming.PoolSize in MB, raised to this on the Mac (hle_uecvar.c; DM_UE_TEXTURE_POOL overrides, and turns it on for iOS): 0 = the game's own pool

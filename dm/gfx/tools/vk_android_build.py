@@ -599,9 +599,20 @@ def finish(key, w, job, c1):
     # compute module, the shuffle and integer-output modules). fm is the module as it was before: what the facts and the variants' choices are read from, so they stay
     # what they were (a promoted temporary would show a store of integer bits or of a constant that the translator's form hides). A module without a raw helper is not
     # touched, and its library entry stays byte for byte the same
-    fm, raw = m, None
+    # Render scale helpers (vk_android_spv.py unit_render_scale): each call of the translator's TexelFetchScale / TextureSizeUnscale becomes its argument (the replay's
+    # render scale is always 1.0), then the module's single-store temporaries become values (promote_locals): Koei Tecmo's compute shaders went from up to 49,754
+    # Function variables to 4,806 (Qualcomm's 891.14 compiler took 32-59 s on each of the five largest, on the replay thread). A module without such a helper is
+    # not touched. Not after hmma_lds, as raw_global_memory below: modules with the HMMA helper lowered were not checked with promoted values on the devices
+    fm, raw, rscale = m, None, None
+    if not hmma:
+        x = spv.Module(m.data()); n = spv.unit_render_scale(x)
+        if n:
+            fm = spv.Module(m.data())
+            promoted, _ = spv.promote_locals(x)
+            m.header, m.ins = x.header, x.ins; m.index()
+            rscale = {'calls': n, 'promoted': promoted}
     if not hmma and spv.raw_helpers(m):
-        fm = spv.Module(m.data())
+        if fm is m: fm = spv.Module(m.data())
         raw = spv.raw_global_memory(m, {e['id'] for e in binds if e['kind'] == abi.KIND_GMEM_MAP})
     # A mesh program's plane stores into a workgroup copy, handed to the outputs by one loop after the body (vk_android_spv.py defer_mesh_plane_stores): the driver
     # inlines the store chain once instead of at each of its calls. Before the fallback is lowered from the module, so both have it
@@ -639,7 +650,7 @@ def finish(key, w, job, c1):
             e['bytes'] = sp['bytes']; shared = sp['workgroup']
     refl = {'key': key, 'stage': stage, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'c1': c1.hex(), 'local': job.get('local') or [1, 1, 1], 'shared': shared,
             'notes': res['notes'], 'vs_pad': pad, 'mesh': res.get('mesh'), 'ps_prim': prim, 'caps_dropped': dropped, 'caps_added': added, 'precise': n_precise, 'hmma_lds': hmma, 'shuffle_cse': list(scse), 'base_instance': base_inst[0], 'base_instance_left': base_inst[1], 'drv_reads': drv_reads(binds, fm), 'tf': job.get('tf'), **fa,
-            'mesh_fallback': mesh_fallback, 'raw': raw, 'mesh_defer': defer,
+            'mesh_fallback': mesh_fallback, 'raw': raw, 'render_scale': rscale, 'mesh_defer': defer,
             'bindings': [{kk: v for kk, v in e.items() if kk not in ('id', 'tbind', 'index')} for e in binds]}
     loose = os.environ.get('DMSH_VK_LOOSE') == '1'
     return 'ok', '', (refl, [(variant, len(data), *pack_module(data), data if loose else None) for variant, data in mods])   # compressed here, in parallel
@@ -1091,6 +1102,8 @@ if _raw:
     _rl = [x['key'] for x in okr if x.get('raw') and (x['raw']['untouched'] or x['raw']['unlooped'] or x['raw']['promote_skipped'])]
     if _rl: print(f"[RED] raw global memory helpers of a shape the passes do not know, left as the translator wrote them (untouched {sum(r['untouched'] for r in _raw)} shaders, "
                   f"unrolled searches {sum(r['unlooped'] for r in _raw)}, functions not promoted {sum(r['promote_skipped'] for r in _raw)}): {len(_rl)} shaders, e.g. " + ', '.join(sorted(_rl)[:5]))
+_rs = [x['render_scale'] for x in okr if x.get('render_scale')]   # (vk_android_spv.py unit_render_scale)
+if _rs: print(f"render scale helper calls replaced by their argument (unit_render_scale): {sum(r['calls'] for r in _rs)} in {len(_rs)} shaders; variables promoted {sum(r['promoted'] for r in _rs)}")
 _dfr = [x['mesh_defer'] for x in okr if x.get('mesh_defer')]   # (vk_android_spv.py defer_mesh_plane_stores)
 if _dfr: print(f"mesh plane stores deferred to one scatter: {len(_dfr)} mesh programs, {sum(d['calls'] for d in _dfr)} calls, at most {max(d['bytes'] for d in _dfr)} workgroup bytes added")
 print(f'library: game {GAME.id}, inputs {INPUTS}, chain {CHAIN}, vk chain {VKV}' + (f' (tools {TOOLS}, vk_android_same.tsv)' if TOOLS != VKV else ''))

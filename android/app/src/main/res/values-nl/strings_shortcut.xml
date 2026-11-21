@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">Toevoegen aan startscherm</string>
+    <string name="s2_shortcut_add_note">Een snelkoppeling op het startscherm van de telefoon die deze game start</string>
+    <string name="s2_shortcut_unsupported">De startscherm-app van deze telefoon accepteert geen snelkoppelingen.</string>
+    <string name="s2_shortcut_gone">%1$s staat niet meer in %2$s. Voeg de game opnieuw toe om deze snelkoppeling te gebruiken.</string>
+    <string name="s2_shortcut_missing">%1$s niet gevonden: %2$s</string>
+    <string name="s2_shortcut_blocked_title">Geen snelkoppeling op het startscherm?</string>
+    <string name="s2_shortcut_blocked">Op Xiaomi-, Redmi- en POCO-telefoons voegt het startscherm alleen snelkoppelingen toe met de toestemming Snelkoppelingen op startscherm. Sta die toe voor %1$s in de app-machtigingen (Andere machtigingen) en voeg de snelkoppeling daarna opnieuw toe.</string>
+    <string name="s2_shortcut_permissions">App-machtigingen</string>
+</resources>

@@ -213,7 +213,7 @@ void hid_keys_init(void) {
 //   saves a host texture's level 0 raw, every slice (a cube's six faces) (nvn_mtl.m dm_gfx_texraw), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
 //   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "fps <n>" sets the frame rate cap while the game runs
-//   (0 = the game's own, 15 to 60: hle_fpslock.c dm_fps_target_set), "#…" is ignored.
+//   (0 = the game's own, 15 to 60: hle_fpslock.c dm_fps_target_set), "decouple 0|1" turns sead's rate gate off or on (hle_fpslock.c nxhost_fps_decouple_set), "#…" is ignored.
 //   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script.
 // On Android (the launcher sets DM_CTL=<app files>/ctl.txt, android/tools/nxctl.sh appends to it) the reader starts at the file's end, so a previous run's lines are not
 // replayed; "env" lines go to the replay (dm_gfx_ctl_env: applied at the next frame boundary, VKA_ENV switches read again), and the replay takes "capture <n>",
@@ -242,6 +242,7 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "memdump ", 8)) { void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path); char *e2, *e3; uint64_t a = strtoull(line + 8, &e2, 16), n = strtoull(e2, &e3, 0);
                                                      while (*e3 == ' ') e3++; dm_ctl_memdump(a, n, e3); continue; }
                 if (!strncmp(line, "cvari ", 6)) { void dm_ctl_cvar_i32(uint64_t off, int32_t v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_i32(off, (int32_t)strtol(e2, NULL, 0)); continue; }
+                if (!strncmp(line, "decouple ", 9)) { void nxhost_fps_decouple_set(int on); nxhost_fps_decouple_set(atoi(line + 9) != 0); LOG("DM_CTL: decouple %d", atoi(line + 9) != 0); continue; }
                 if (!strncmp(line, "fps ", 4)) { void dm_fps_target_set(int t, const char *src); dm_fps_target_set(atoi(line + 4), "DM_CTL fps"); LOG("DM_CTL: fps %d", atoi(line + 4)); continue; }
                 if (!strncmp(line, "cvarf ", 6)) { void dm_ctl_cvar_f32(uint64_t off, float v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_f32(off, strtof(e2, NULL)); continue; }
 #if defined(__ANDROID__)

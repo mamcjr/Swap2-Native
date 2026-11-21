@@ -7,6 +7,7 @@
 #if defined(__ANDROID__)
 #include "vka.h"
 #include "vka_texown.h"
+#include "vka_wbfollow.h"
 #include "../nvn/nvn_mtl.h"
 #include "../tex/nvn_deswizzle.h"
 #include "../nvn/dmsh_abi_vk.h"
@@ -1821,6 +1822,8 @@ void mtl_tex_release(tex_t *t) {
 // Linear textures the GPU wrote in this submission. Metal makes a linear texture on the pool buffer, so what the GPU renders there is in guest memory for the CPU to read
 // (agl reads small linear render targets back on the CPU, such as a 1x1 R16F one in Donkey Kong Bananza's level); here the image is copied back into the storage
 static vka_img **g_wb; static int g_nwb, g_wbcap;
+// A linear texture whose GPU writes are copied back into its storage (vka_tex_writeback): one level-free, single-sample colour texture of plain texels
+static int img_wb_kind(const vka_img *im) { return (im->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && im->mem && im->samples == 1 && im->f.kind < 3 && im->f.bw == 1; }
 static int lin_room(void); static int is_linear(const vka_img *im);   // (Linear textures' diagnostics, below)
 void vka_img_written_at(vka_img *im, const char *file, int line) {
     if (!im) return;
@@ -1838,7 +1841,7 @@ void vka_img_written_at(vka_img *im, const char *file, int line) {
     }
     im->gpu_owned = 1;
     img_touch(im);
-    if ((im->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) && im->mem && !im->wb_pending && im->samples == 1 && im->f.kind < 3 && im->f.bw == 1) {
+    if (img_wb_kind(im) && !im->wb_pending) {
         if (g_nwb == g_wbcap) { g_wbcap = g_wbcap ? 2 * g_wbcap : 32; g_wb = realloc(g_wb, (size_t)g_wbcap * sizeof *g_wb); }
         im->wb_pending = 1; im->refs++; g_wb[g_nwb++] = im;
     }
@@ -1856,6 +1859,7 @@ void vka_tex_writeback(VkCommandBuffer cb) {
         if (!any) { vka_barrier(cb); any = 1; }
         VkBufferImageCopy c = {o, (uint32_t)(row / bpb), h, {im->aspect, 0, 0, 1}, {0, 0, 0}, {im->w, h, 1}};
         vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, b, 1, &c);
+        im->wb_fence = vka_fence_last();   // (the submission this copy is recorded in, as vka_img_written's last_fence: vka_wbfollow.h)
         static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VLOG("linear texture serial %llu %ux%u format %#x: the GPU's content copied back into its storage", (unsigned long long)im->serial, im->w, h, im->d.format);
         unref_locked(im);
     }
@@ -2048,6 +2052,11 @@ static void pfb_consume_locked(void) {
     for (int k = 0; k < PFB_RING; k++) {
         if (!g_pfb_r[k].busy || g_pfb_r[k].fence > done) continue;
         const uint32_t *wd = (const uint32_t *)(g_pfb_ring.ptr + (size_t)k * PFB_BYTES);
+        // The readback copied out in one memcpy before the scan (after DroidPlay Core c1abc57d, MIT idea): Arm's Mali has no memory type both cached and coherent, so the
+        // ring can be uncached host memory, where the scan's 4-byte loads cost ~70 ns each (DroidPlay: 2.3 ms for 33,792 words against 0.33 ms on an Adreno). The slot
+        // is not written again until it is reused (its fence is done), so the copy is the readback. DM_VK_POOL_SNAP=0 (live) scans in place, as before
+        static uint32_t snap[PFB_BYTES / 4];
+        if (g_pfb_r[k].n <= PFB_BYTES && VKA_ENV("DM_VK_POOL_SNAP", 1)) { memcpy(snap, wd, g_pfb_r[k].n & ~3u); wd = snap; }
         for (uint32_t i = 0, nw = g_pfb_r[k].n / 4; i < nw; i++)
             for (uint32_t x = wd[i]; x; x &= x - 1) { g_pfb_bits++; pfb_hit((int)(i * 32 + (uint32_t)__builtin_ctz(x)), frame, fence); }
         g_pfb_r[k].busy = 0; g_pfb_nrb++;
@@ -2176,7 +2185,16 @@ static VkSampler sampler_of(const samp_par *p, int iv) {
         ci.magFilter = ci.minFilter = VK_FILTER_NEAREST; ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
         ci.borderColor = white ? VK_BORDER_COLOR_INT_OPAQUE_WHITE : opaque ? VK_BORDER_COLOR_INT_OPAQUE_BLACK : VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
     }
-    if (p->reduction) VRED_ONCE("sampler reduction mode %d not applied", p->reduction);
+    // Reduction (from Banana Native 02d081a2, MIT): a filtered sample takes the min or max of the texels it covers instead of their weighted average (NVN 1 min, 2 max:
+    // Vulkan's own numbers), what a depth pyramid or a max-depth target is built with. samplerFilterMinmax guarantees it for the depth formats and R32_SFLOAT among others
+    // (Vulkan 1.2 "Required Format Support"). A comparison sampler must keep the weighted average (VUID-VkSamplerCreateInfo-compareEnable-01423): there the comparison
+    // wins and the reduction is logged. An integer view's twin filters nearest, where the reduction changes nothing; it is chained all the same
+    VkSamplerReductionModeCreateInfo red = {VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO, .reductionMode = (VkSamplerReductionMode)p->reduction};
+    if (p->reduction == 1 || p->reduction == 2) {
+        if (!V.minmax) VRED_ONCE("sampler reduction mode %d not applied: the device has no samplerFilterMinmax", p->reduction);
+        else if (ci.compareEnable) VRED_ONCE("sampler reduction mode %d with a depth comparison: Vulkan allows no reduction there, the comparison is kept", p->reduction);
+        else ci.pNext = &red;
+    } else if (p->reduction) VRED_ONCE("sampler reduction mode %d not applied: not an NVN reduction mode", p->reduction);
     VkSampler s = VK_NULL_HANDLE;
     if (vk.vkCreateSampler(V.dev, &ci, NULL, &s)) return VK_NULL_HANDLE;
     g_samp = realloc(g_samp, (size_t)(g_nsamp + 1) * sizeof *g_samp); g_samp[g_nsamp++] = (samp_ent){*p, iv, s};
@@ -2478,6 +2496,7 @@ VkSampler vka_samp_id_rec(int id, int iv) {
     return m->s[iv] = vka_samp_id(id, iv);
 }
 static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage, vka_img **imo) {
+    int writes = wbf_view_writes(storage); storage &= VKA_VIEW_STORAGE;   // (VKA_VIEW_RO: a shader image the shader only reads; Banana Native #276)
     pthread_mutex_lock(&g_tmu);
     if (id <= 0 || id >= g_ntreg || !g_treg[id].t.serial) { pthread_mutex_unlock(&g_tmu); return VK_NULL_HANDLE; }
     treg_ent e = g_treg[id];
@@ -2513,8 +2532,9 @@ static VkImageView id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage,
     }
     if (storage && !(im->usage & VK_IMAGE_USAGE_STORAGE_BIT)) { pthread_mutex_lock(&g_tmu); int ok = img_storage_upgrade(im, cb); pthread_mutex_unlock(&g_tmu); if (!ok) return VK_NULL_HANDLE; }
     // Bound as a shader image: the GPU writes it (nvn_mtl.m mtl_tex_gpu_owned: ShaderWrite usage), so its storage is no longer its content. Without this a CPU write near a
-    // tracked image's pages re-uploaded stale storage over what a compute pass wrote (DKB's 1x1 R16F texture, re-uploaded in the level)
-    if (storage) vka_img_written(im);
+    // tracked image's pages re-uploaded stale storage over what a compute pass wrote (DKB's 1x1 R16F texture, re-uploaded in the level). Only a binding the shader writes
+    // (DMSH_VK_BF_RW, or a host pass's output): a shader image only read is not a write (vka_wbfollow.h wbf_view_writes: Mario Tennis Fever's glyph cache)
+    if (writes) vka_img_written(im);
     if (!storage && !(im->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) return VK_NULL_HANDLE;
     if (over) {   // (the image as it is now: remade above when it had no storage use, with the formats learned by then)
         pthread_mutex_lock(&g_tmu); int listed = img_lists(im, over); pthread_mutex_unlock(&g_tmu);
@@ -2780,8 +2800,9 @@ void vka_tex_prepare(VkCommandBuffer cb) {
     // Tracked images whose pages the CPU wrote since their last upload (a write to a protected page moves the dirty clock, so nothing is scanned while it stands still)
     // Sparse pools' textures also when a mapping request came since (the page table's generation moved)
     static uint64_t seen, vseen; uint64_t now = nvn_dirty_now(), vnow = nvn_sparse_gen();
-    if (now != seen || vnow != vseen) {
-        seen = now; vseen = vnow;
+    static int g_wbf_wait; static uint64_t g_wbf_up, g_wbf_waits; int g_wbf_on = VKA_ENV("DM_VK_WB_FOLLOW", 1) != 0; uint64_t wbf_done = vka_done();   // g_wbf_wait: a GPU-written linear texture waited for its copy-back in the last scan
+    if (now != seen || vnow != vseen || g_wbf_wait) {
+        seen = now; vseen = vnow; g_wbf_wait = 0;
         for (int i = 0; i < g_nlive; i++) {
             vka_img *im = g_live[i];
             if (img_pool_dead(im)) continue;
@@ -2792,11 +2813,21 @@ void vka_tex_prepare(VkCommandBuffer cb) {
                 if (g_reup++ < 8) VLOG("sparse texture serial %llu %ux%u format %#x: its mappings or pages changed, re-uploaded", (unsigned long long)im->serial, im->w, im->h, im->d.format);
                 continue;
             }
-            if (!im->track || im->gpu_owned || !im->mem) continue;
+            if (!im->track || !im->mem) continue;
+            // A GPU-written image's content is the GPU's, except a linear one's once its copy-back has run: then the CPU's later writes to the storage are uploaded (vka_wbfollow.h,
+            // Banana Native #276: Mario Tennis Fever clears its 8192x2048 R8 glyph cache on the GPU and rasterizes glyphs into it on the CPU; skipped, every text box was blank).
+            // While the copy-back is queued or on the GPU the image waits, and the scan runs again at the next prepare even if the CPU writes nothing more (g_wbf_wait)
+            if (!wbf_follows(im->gpu_owned, img_wb_kind(im) && g_wbf_on, im->wb_pending, im->wb_fence, wbf_done)) {
+                if (g_wbf_on && im->gpu_owned && img_wb_kind(im) && (im->wb_pending || wbf_done < im->wb_fence)) { g_wbf_wait = 1; g_wbf_waits++; }
+                continue;
+            }
+            int wbf = im->gpu_owned;
             uint64_t size = im->L.size;
             size_t lo, hi;
             if (!nvn_dirty_bounds_since(im->span, im->mem, size, im->stamp, &lo, &hi)) continue;
             tex_t t = {0}; t.serial = im->serial; t.d = im->d; t.L = im->L; t.mem = (uint8_t *)im->mem;
+            if (wbf) { uint64_t k = ++g_wbf_up; if (k <= 4 || !(k & (k - 1))) VLOG("texture serial %llu %ux%u format %#x: the CPU wrote it after its copy-back, its written part uploaded (%llu so far; %llu scans waited for a copy-back; DM_VK_WB_FOLLOW=0 turns this off)",
+                                                                         (unsigned long long)im->serial, im->w, im->h, im->d.format, (unsigned long long)k, (unsigned long long)g_wbf_waits); }
             int rows = VKA_ENV("DM_VK_ROWS", 1);
             // (the rows path's re-uploads were not counted in g_reup until 2026-11-07: the packaged-textures line's "re-uploads on pool content change" left out every
             // partial re-upload of a linear texture, which read as "the CPU's writes were never seen")
@@ -2881,6 +2912,26 @@ int vka_cap_sreg(int id, samp_par *p, int *n) {
 int vka_cap_cpuw(uint64_t serial) {
     pthread_mutex_lock(&g_tmu);
     int r = vksm_get(&g_cpuw, serial) != NULL;
+    pthread_mutex_unlock(&g_tmu);
+    return r;
+}
+// With the pool reads reported ("Texture pool reads"), a registered texture's slot names its image only once the image is made: one a draw binds, or one whose read of
+// the null view a submission reported (PFB_WANT, made at the next vka_tex_prepare). A live frame's slots name the images earlier frames asked for; a replayer that only
+// registers the textures starts with the null view in every slot read through the pool alone (lightmaps behind handles in material records), and its first replay reads 0
+// there. vka_cap_slot_named: whether texture ID id's slot names its image now (the capture writes it with each registry entry); vka_cap_slot_want: the replayer's ask
+// for that image, taken as a reported read is (write_tex makes it at the next vka_tex_prepare, with the same first content as a live first use)
+int vka_cap_slot_named(int id) {
+    pthread_mutex_lock(&g_tmu);
+    int r = 0;
+    if (id > 0 && id < g_ntreg && g_treg[id].t.serial && !g_treg[id].img) { smap_ent *se = map_get(g_treg[id].t.serial); r = se && se->im && !(g_pfb_st && (g_pfb_st[id] & PFB_NULL)); }
+    pthread_mutex_unlock(&g_tmu);
+    return r;
+}
+int vka_cap_slot_want(int id) {
+    if (pfb_avail() <= 0 || tex_eager()) return 0;   // (eager slots: write_tex makes every registered texture's image anyway)
+    pthread_mutex_lock(&g_tmu);
+    int r = g_pfb_st && id > 0 && id < g_ntreg && g_treg[id].t.serial && !g_treg[id].img;
+    if (r) { if (!(g_pfb_st[id] & PFB_WANT)) { g_pfb_st[id] |= PFB_WANT; g_pfb_wants++; } dirty(&g_tdirty, &g_ntd, &g_tdcap, &g_tdflag, 1 << 20, id); }
     pthread_mutex_unlock(&g_tmu);
     return r;
 }

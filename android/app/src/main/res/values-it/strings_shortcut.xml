@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">Aggiungi alla schermata Home</string>
+    <string name="s2_shortcut_add_note">Una scorciatoia sulla schermata Home del telefono che avvia questo gioco</string>
+    <string name="s2_shortcut_unsupported">L\'app della schermata Home di questo telefono non accetta scorciatoie.</string>
+    <string name="s2_shortcut_gone">%1$s non è più in %2$s. Aggiungi di nuovo il gioco per usare questa scorciatoia.</string>
+    <string name="s2_shortcut_missing">%1$s non trovato: %2$s</string>
+    <string name="s2_shortcut_blocked_title">Nessuna scorciatoia nella schermata Home?</string>
+    <string name="s2_shortcut_blocked">Sui telefoni Xiaomi, Redmi e POCO la schermata Home aggiunge scorciatoie solo con l\'autorizzazione Scorciatoie nella schermata Home. Consentila per %1$s nelle autorizzazioni dell\'app (Altre autorizzazioni), poi aggiungi di nuovo la scorciatoia.</string>
+    <string name="s2_shortcut_permissions">Autorizzazioni app</string>
+</resources>

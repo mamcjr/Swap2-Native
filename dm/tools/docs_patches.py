@@ -17,7 +17,8 @@ SDK = REPO / 'dm/tools/sdk_patches.py'
 HOST = ['dm/host', 'dm/gfx', 'dm/ios']   # tracked files only: dm/host/gen and other build output are git-ignored
 HOST_EXT = ('.c', '.m', '.mm', '.h', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
-TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
+TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor',
+          'k_tsr_cam': 'scene camera block layout for the temporal NDSR path'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
 NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'core_mask', 'ideal_core', 'fastboot_env'}   # sys_resource, core_mask, ideal_core: the NPDM's values; fastboot_env: a test-run preset (DM_FASTBOOT), not a change to how the game runs
 
@@ -84,7 +85,10 @@ HOST_BINDING = [
      'why': "UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply"}),
     ('k_nier_dr', '', '', {'what': "NieR's frame interval and dynamic-resolution floor at fixed addresses", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'checked': "both releases' mains, where these rows were found",
-     'why': "the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses"}),
+     'why': "the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses"}),    ('k_tsr_cam', '', '', {'what': "Ocarina of Time's scene context block layout (the camera's rows) for the temporal path in agl's NDSR slot (vka_ndsr.c, DM_VK_NDSR=gsr2, DM_VK_NDSR_CAM_LOG)",
+     'now': 'build', 'goal': 'engine', 'purpose': 'rendering',
+     'why': "gsys's scene context block: if Donkey Kong Bananza and Mario Kart World lay it out the same, the block could be found by its size and its vertex shaders' reads instead of a build ID",
+     'blocked': 'the layout is not yet checked on this build (DM_VK_NDSR_CAM_LOG on a phone); one gsys game read so far'}),
 ]
 # Translator rules keyed by one shader's code hash: (the start of the rule's comment, entry)
 SHADER_BINDING = [
@@ -122,6 +126,8 @@ SWITCH_BINDING = [
      'why': "the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key"}),
     ('ue_texture_pool', '', {'what': "Unreal's texture streaming pool", 'now': 'game', 'goal': 'game', 'purpose': 'memory', 'why': "the game's own budget, raised to its Windows value"}),
     ('present_interval', '', {'what': 'one frame per display tick', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'right only for games whose logic does not count frames'}),
+    ('fps_decouple', '', {'what': "sead's frame-rate controller at the measured rate, its sdiv and its locked path, for a game whose speed follows that rate (sead)", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+     'why': "whether the game steps its world by the rate sead's controller hands it is the game's own (Ocarina of Time's framework turns it back into a present interval): the rewriter finds the controller in any main (nso_code.py sead_find, sead_locked) but gates it only for a profile with this key"}),
     ('fps_hold', '', {'what': 'no frame held past the cap', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's pacing"}),
     ('fps_target', '', {'what': 'frame rate target', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'a choice per game'}),
     ('ue_fps_cvar', '', {'what': "the game's own Unreal frame-limit variable", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py)"}),

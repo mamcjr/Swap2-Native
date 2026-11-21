@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">添加到主屏幕</string>
+    <string name="s2_shortcut_add_note">在手机主屏幕上添加启动此游戏的快捷方式</string>
+    <string name="s2_shortcut_unsupported">此手机的桌面应用不支持快捷方式。</string>
+    <string name="s2_shortcut_gone">%1$s 已不在 %2$s 中。请重新添加游戏后再使用此快捷方式。</string>
+    <string name="s2_shortcut_missing">找不到 %1$s：%2$s</string>
+    <string name="s2_shortcut_blocked_title">主屏幕上没有快捷方式？</string>
+    <string name="s2_shortcut_blocked">在小米、Redmi 和 POCO 手机上，只有获得“桌面快捷方式”权限后桌面才会添加快捷方式。请在 %1$s 的应用权限（其他权限）中允许该权限，然后重新添加快捷方式。</string>
+    <string name="s2_shortcut_permissions">应用权限</string>
+</resources>

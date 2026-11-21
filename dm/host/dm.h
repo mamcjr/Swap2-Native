@@ -97,7 +97,7 @@ int dm_sdk_major(void);   // SDK major version from the sdk module's version str
 int dm_sdk_ounce(void);   // 1 when the sdk module was built for the Switch 2 (its spec string "spec: Ounce", loader.c)
 int dm_sdk_nvn2_item(unsigned item, int *out);   // a constant NVN2's own nvnDeviceGetInteger answers for item, read from the sdk module (loader.c); 0 when it has none
 #define DM_SDK_OLD(major) ((major) > 0 && (major) <= 10)   // SDK 10 and older: NVN API 53, the shared-font address points at the TTF itself
-int dm_main_imports(const char *prefix);   // main imports a symbol whose name starts with prefix (loader.c)
+int dm_game_imports(const char *prefix);   // main or an NRO imports a symbol whose name starts with prefix (loader.c)
 void *guest_sym(const char *name);
 module_t *module_of(const void *p);
 // Gate dispatch: rewritten svc / timer reads come in through the common entry, ret_addr = the return point of that gate block, regs points to the saved x0..x30
@@ -108,7 +108,9 @@ enum { OBS_UE_MALLOC = 21,                                       // Unreal's FMa
        OBS_REGION_ASK = 22, OBS_REGION_GOT = 23, OBS_REGION_FREE = 24,   // the SDK's address regions, gates the rewriter places by symbol in every sdk (patch_nso.py "Address regions", hle_svc.c)
        OBS_STDALLOC_INIT = 25,                                         // StandardAllocator::Initialize's entry, the same way: its callback writes the size (hle_svc.c)
        OBS_UE_REGION = 26,                                             // the store of Unreal's engine region size before nninitStartup reserves it: the register its upper bits name (dm/tools/ue_region.py, hle_svc.c)
-       OBS_MAX = 27 };
+       OBS_SEAD_RATE = 27,                                             // sead's frame-rate controller's sdiv of 60 by its interval: N, M, C in the upper bits (nso_code.py sead_find, hle_fpslock.c sead_rate)
+       OBS_SEAD_LOCKED = 28,                                           // the same controller's locked path, its load of the stored rate: C and the rate's offset / 4 in the upper bits (nso_code.py sead_locked)
+       OBS_MAX = 29 };
 // A gate number's bits from 8 up are a parameter for its callback (OBS_REGION_GOT: the register that holds the address). Callbacks read the registers; a write to x0–x29 takes
 // effect when the gate returns (entry.S restores them from the frame), which OBS_STDALLOC_INIT and OBS_UE_REGION do
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param));
@@ -140,6 +142,9 @@ uint64_t crash_watch_progress_count(void);
 void crash_dump_now(const char *why);   // Dump state on demand (threads + graphics wait points), without exiting
 // Diagnostic switches: read once from environment variables when main starts (getenv takes the libc global environment lock, and on a hot path it would make all guest threads queue up)
 extern uint64_t g_t0_ns;   // Host start time (now_ns), used for relative times in the log
+extern uint64_t g_host_t0_ns;   // When the host itself started (now_ns in host_preload). g_t0_ns is the process's creation, which on Android can be minutes earlier (the
+                                // game's :game process may be one the zygote forked in advance): clocks of the run (DM_NVN_CAPTURE=@<seconds>) count from here
+static inline double dm_rel_s(void) { return (double)(now_ns() - g_t0_ns) / 1e9; }   // seconds since the host started, as the log's own relative times
 extern struct dm_flags { int thr, svc, fs, dbg, imports, bootprof; } g_flag;
 void *objmap_get(const void *guest); void objmap_put(const void *guest, void *host); void *objmap_del(const void *guest);
 void hle_signal_system_event(void *g);   // hle_thread.c: signal a service-layer SystemEvent (any thread)
@@ -149,6 +154,7 @@ int hle_signal_bound_system_event(void *g);   // hle_thread.c: signal a service-
 uint64_t hle_system_event_binding(void *g);   // Opaque lifetime ID of a binding, 0 if unbound; a rebind gets a new ID even if its address and handle are reused
 int hle_signal_system_event_binding(uint64_t binding);   // Signal only this binding lifetime (any thread); 0 after its write handle closes
 uint32_t hle_dup_readable_handle(uint32_t h);   // hle_thread.c: a second read end of a kernel event (the copy a service hands its client), 0 if h is no read end
+uint32_t hle_new_event(uint32_t *write_end);   // hle_thread.c: a new kernel event's read end (a service's handle copied to its client); its write end in *write_end, none when NULL (never signaled)
 // Page fault hook / hook before the host writes guest memory (crash.c; used for write-protect dirty page tracking)
 void dm_fault_hook_register(int (*fn)(void *addr, int is_write, void *uc));
 void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len));

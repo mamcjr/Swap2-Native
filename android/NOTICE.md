@@ -26,9 +26,24 @@ build shader libraries is the same GPL combined work.
 compiled into the present's FSR 1 upscale (`dm/gfx/vk_android/fsr/`, SPIR-V in `vka_present_fsr.h` and `vka_ndsr_spv.h`). The other third-party code the
 APK carries (libadrenotools, zstd, Ryujinx's shader library) is listed with its license in [dm/third_party/README.md](../dm/third_party/README.md).
 
+The Vulkan replay's stand-in for NVN2's DLSS (`dm/gfx/vk_android/vka_dlss.c`, ported from Banana Native, MIT) and the temporal path in agl's NDSR slot
+(`DM_VK_NDSR=gsr2`, `vka_ndsr.c`) run Qualcomm's [Snapdragon Game Super Resolution 2](https://github.com/SnapdragonStudios/snapdragon-gsr) (GSR2) 3-pass shaders,
+adapted to compute passes in [`dm/gfx/vk_android/gsr2`](../dm/gfx/vk_android/gsr2/NOTICE.md) and compiled into the host (`gsr2/vka_gsr2_spv.h`):
+Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved, under the BSD-3-Clause license, whose full text, conditions and disclaimer are in
+[`dm/gfx/vk_android/gsr2/LICENSE`](../dm/gfx/vk_android/gsr2/LICENSE) and apply to the shaders in source and binary form. Its FSR 1 mode uses AMD's FidelityFX FSR 1
+headers (MIT, [dm/third_party/fidelityfx-fsr1](../dm/third_party/fidelityfx-fsr1/LICENSE.txt)), as the present's FSR 1 does. Its FSR 3.1 mode (`vka_fsr3.c`) runs AMD FidelityFX
+Super Resolution 3.1's upscaler passes from the FidelityFX SDK 1.1.4, compiled to SPIR-V (`dm/gfx/vk_android/fsr3/*.h`): Copyright (c) Advanced Micro Devices, Inc., under the MIT
+license in [dm/third_party/fidelityfx-fsr3](../dm/third_party/fidelityfx-fsr3/LICENSE.txt).
+
 Some fixes follow other projects' findings without copying their code: [kartnative](https://github.com/pahorema/kartnative) by pahorema (MIT) for
 GPU-written sparse textures (`dm/gfx/vk_android/vka_tex.c`) and the per-primitive header of mesh programs (`dm/gfx/tools/shader_split.py`), and
 [switch2mac](https://github.com/azmasm/switch2mac) by azmasm (MIT outside `nx2_lower`) for the SPIR-V mesh entry points marked in the translator. Thanks to them.
+
+Code adapted from later [Banana Native](https://github.com/moceure/BananaNative) releases (MIT, Copyright (c) 2026 seedds), each marked with the commit at the place:
+`dm/host/lse_unaligned.h`, its test `dm/host/tests/t_lse_unaligned.c` and the unaligned-atomic branch of `on_crash` in `dm/host/crash.c` (v0.3.40, commit `e6b6f0d0`).
+`vka_spv_gs_fill` in `dm/gfx/vk_android/vka_spvpatch.c` and its use in `vka_shader.c` (`gs_fill`): a geometry shader that emits nothing emits a degenerate primitive (commit `0749171c`).
+`android/host/adreno_binder_compat.c` (`libbinder_compat_hook.so`) and its test `dm/tools/tests/test_android_binder_compat.py`: the API 36 Binder annotation Qualcomm's 891.x drivers import, for Android 15 and older (commit `f71720e0`).
+Sampler min / max reduction in `vka_tex.c` `sampler_of` (commit `02d081a2`). The drawn depth copy: `dm/gfx/vk_android/vka_t2tpath.h`, `vka_depthcopy.h`, `vka_depthcopy_spv.h` (its GLSL rebuilt here) and the `copy_t2t` hook in `vka_exec.c` (commit `a4a64a03`). The measured timestamp tick: `dm/gfx/vk_android/vka_tstick.h`, its test `dm/host/tests/t_android_tstick.c` (unchanged) and `tick_sample` in `vka_exec.c` (commit `5e4212d1`). The custom-driver check: `dm/gfx/vk_android/vka_driverpath.h`, its test `dm/host/tests/t_android_driverpath.c` (unchanged), `vka_driver_mapped` in `vka_driver.c` and the advertised placed-map test maps in `vka_dev.c` (v0.3.43, `af1ed596`). The guest remap probe `dm/gfx/vk_android/vka_remap_probe.h` (unchanged) and its use in `vka_dev.c` (v0.3.44, `f03e6671`).
 
 `Lossless.dll` belongs to Lossless Scaling (proprietary, sold separately). It is never in this repository or in an APK: the user supplies their own copy, which the
 launcher finds on the phone or lets the user pick, and copies into the app's private files.
@@ -53,6 +68,8 @@ trademarks of Nintendo.
 
 Queue dependency scheduling, texture-object ownership and file-backed pools were adapted from BananaNative v0.2.8 (moceure, MIT), revision `7ea6a966e4be51d5e2ac0be08543ff44c036e447`. File-backed pool helpers originate in AnkaNative v0.2.2, Copyright (c) 2026 EddizEge, MIT. Their notices are preserved in the source.
 
-**bcdec 0.985** (Sergii "iOrange" Kudlai, MIT or the Unlicense) decodes BC1-BC7 texture blocks on the CPU on GPUs without BC textures (ARM Mali, Samsung Xclipse). See `dm/third_party/bcdec/LICENSE`. The hardware-buffer guest memory backing follows the route DroidPlay Core (enjoyerofslop, MIT) uses for its raw global memory.
+**bcdec 0.985** (Sergii "iOrange" Kudlai, MIT or the Unlicense) decodes BC1-BC7 texture blocks on the CPU on GPUs without BC textures (ARM Mali, Samsung Xclipse). See `dm/third_party/bcdec/LICENSE`. The hardware-buffer guest memory backing follows the route DroidPlay Core (enjoyerofslop, MIT) uses for its raw global memory. Recording the pipeline build a crash was in, at any length, keyed by driver and host build (`dm/gfx/vk_android/vka_deadly.h`, `vka_pso.c` `deadly_*`), follows DroidPlay Core commit `1ae945d2`; the idea only, written here without its code. From DroidPlay Core (enjoyerofslop, MIT), each marked at the place: `vka_spv_shuffle_xor` in `dm/gfx/vk_android/vka_spvpatch.c` (shuffles as ShuffleXor on Qualcomm's V@07xx drivers, commit `8115593e`, adapted to this replay's module path); `dm/gfx/vk_android/vka_memreport.h` (`DM_VK_MEMREPORT`, from `gfx_vk_memreport.inc` of commit `151f1557`, the full report only); the texture pool readback copied out before its scan in `vka_tex.c` follows commit `c1abc57d` (the idea only).
+
+From the erickmendes22 Swap2-Native fork (MIT per file): the per-draw GPU timestamps of `dm/gfx/vk_android/vka_gprof.c` (`DM_VK_GPUPROF_DRAWS`) follow its `vka_gprof.c` (branch `ocarina-v11-ios-perf-from-v101`, commits `2b098ec5`, `4ed24d0e`), rewritten for every game and pass.
 
 **dav1d 1.5.4** (VideoLAN and dav1d contributors, BSD 2-Clause) is included for AV1 software decoding and midstream hardware recovery. See `dm/third_party/dav1d/COPYING` and `THANKS.md`; this Android build uses its C implementation.

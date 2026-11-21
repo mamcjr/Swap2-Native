@@ -1,0 +1,5 @@
+#version 450
+// agl's NDSR network dispatch when its output was already written by the temporal upscaler (vka_ndsr.c, DM_VK_NDSR=gsr2): the dispatch keeps its slot, descriptors and
+// group count, and runs this, which reads and writes nothing (it uses none of the network's bindings, so it fits the network's pipeline layout). Our own shader (MIT, Swap2-Native)
+layout(local_size_x = 1, local_size_y = 1) in;
+void main() {}

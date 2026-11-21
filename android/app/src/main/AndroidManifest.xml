@@ -40,6 +40,17 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <!-- A Home screen shortcut to a game (GameShortcuts, ShortcutLaunch): the opening, then the game. Not exported: the launcher starts a shortcut as this app.
+             A task of its own (taskAffinity ""), so the launcher's clearing of the shortcut's task never reaches Home or a running game -->
+        <activity
+            android:name=".ShortcutLaunch"
+            android:exported="false"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.Banana"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
         <!-- No intent filters: Android 15 checks an explicit intent against an exported component's filters when it has any (and never matches one with no
              action, Daijisho's -e game {file.path}), so the frontends' alias has none and takes every form (FRONTENDS.md) -->
         <activity-alias

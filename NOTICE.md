@@ -15,9 +15,10 @@ Swap2-Native is a fork of [Banana Native](https://github.com/moceure/BananaNativ
 - **The APK as a whole is distributed under GPL-3.0-or-later**, because it links LSFG and carries the on-device packer's translator. Whoever passes an APK on
   must offer its complete source (this repository at the commit in the build tag). Details: [android/NOTICE.md](android/NOTICE.md).
 - **Third-party code** keeps its own license, listed in [dm/third_party/README.md](dm/third_party/README.md) with each license file in its folder: AMD
-  FidelityFX FSR 1 (MIT), libadrenotools and liblinkernsbypass (BSD 2-Clause; `libadrenotools/src/hook/kgsl.h` is a Linux kernel interface header,
+  FidelityFX FSR 1 and FSR 3.1 (MIT), libadrenotools and liblinkernsbypass (BSD 2-Clause; `libadrenotools/src/hook/kgsl.h` is a Linux kernel interface header,
   `GPL-2.0 WITH Linux-syscall-note`), zstd (BSD, dual-licensed with GPLv2, used under BSD), libvpx, FLIP, stb_vorbis, Vulkan-Headers and Ryujinx's shader
-  library (MIT outside `InstEmitAmpereMesh.cs`).
+  library (MIT outside `InstEmitAmpereMesh.cs`); outside it, Qualcomm's Snapdragon GSR2 shaders in `dm/gfx/vk_android/gsr2` (BSD-3-Clause, its
+  [LICENSE](dm/gfx/vk_android/gsr2/LICENSE)).
 - **Interface art and sounds** are the project's own, released with it; the Zelda-themed touch artwork depicts Nintendo trademarks for identification only
   ([android/NOTICE.md](android/NOTICE.md#interface-art-and-sounds)). Swap2-Native is not affiliated with Nintendo.
 

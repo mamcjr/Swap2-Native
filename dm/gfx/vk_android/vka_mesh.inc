@@ -3,8 +3,10 @@
 // GPU-only during replay and reused in queue order with barriers, not copied to the CPU.
 #include "vka_mesh_control_spv.h"
 #include "vka_mesh_compact_spv.h"
-// The fallback's info block (scratch of the draw): the controller's records and the host's parameters (mesh_emulate)
-enum { MESH_INFO = 80 };
+#include "vka_mesh_pack.h"
+// The fallback's info block (scratch of the draw): the controller's records and the host's parameters (mesh_emulate); words 0-19 are the report (its copy: 80 bytes),
+// 20-22 the dispatch of a packed module (DM_VK_MESH_PACK: half the workgroups, rounded up, selftest/mesh_control.comp)
+enum { MESH_INFO = 96 };
 void *vka_static_block(VkDeviceSize n, vka_span *out);   // vka_shader.c: a host-visible block of its own
 void vka_static_block_free(void *h);
 static vka_span g_mesh_output, g_mesh_payload, g_mesh_offsets;
@@ -129,17 +131,17 @@ static int mesh_control_init(void) {
 // (mesh_rep_copy) may have read g_mesh_info by transfer before the pass, which the controller now rewrites (a write after a read: mesh_barrier has the transfer stage)
 // The fallback's work per frame (vka_mesh_stats, every 300 frames with the replay's statistics): emulated draws by kind (a task shader or not, the count direct or read by the
 // GPU), their output batches, and the controller and task/mesh compute dispatches they record
-static uint64_t g_mesh_n[4], g_mesh_batches, g_mesh_ctl, g_mesh_cs, g_mesh_fused, g_mesh_compacted;
+static uint64_t g_mesh_n[4], g_mesh_batches, g_mesh_ctl, g_mesh_cs, g_mesh_fused, g_mesh_compacted, g_mesh_packed, g_mesh_cpu, g_mesh_fused_task;
 void vka_mesh_stats(char *b, size_t n, double frames) {
-    static uint64_t n0[4], b0, c0, s0, f0, k0;
+    static uint64_t n0[4], b0, c0, s0, f0, k0, p0, u0, t0;
     uint64_t d = g_mesh_n[0] + g_mesh_n[1] + g_mesh_n[2] + g_mesh_n[3] - n0[0] - n0[1] - n0[2] - n0[3];
     if (n) b[0] = 0;
     if (frames > 0 && d)
         snprintf(b, n, "task/mesh fallback per frame: %.1f draws (%.1f direct and %.1f indirect without a task shader, %.1f direct and %.1f indirect with one), %.1f output batches, "
-                 "%.1f controller and %.1f task/mesh compute dispatches; %.1f draws with the controller's phases in one dispatch (DM_VK_MESH_FUSE), %.1f batches compacted (DM_VK_MESH_COMPACT)",
+                 "%.1f controller and %.1f task/mesh compute dispatches (%.1f of them two workgroups a subgroup, DM_VK_MESH_PACK); %.1f draws with the controller's phases in one dispatch (DM_VK_MESH_FUSE), %.1f task draws with its last two (DM_VK_MESH_FUSE_TASK), %.1f draws without the controller (DM_VK_MESH_CPU), %.1f batches compacted (DM_VK_MESH_COMPACT)",
                  d / frames, (g_mesh_n[0] - n0[0]) / frames, (g_mesh_n[1] - n0[1]) / frames, (g_mesh_n[2] - n0[2]) / frames, (g_mesh_n[3] - n0[3]) / frames,
-                 (g_mesh_batches - b0) / frames, (g_mesh_ctl - c0) / frames, (g_mesh_cs - s0) / frames, (g_mesh_fused - f0) / frames, (g_mesh_compacted - k0) / frames);
-    memcpy(n0, g_mesh_n, sizeof n0); b0 = g_mesh_batches; c0 = g_mesh_ctl; s0 = g_mesh_cs; f0 = g_mesh_fused; k0 = g_mesh_compacted;
+                 (g_mesh_batches - b0) / frames, (g_mesh_ctl - c0) / frames, (g_mesh_cs - s0) / frames, (g_mesh_packed - p0) / frames, (g_mesh_fused - f0) / frames, (g_mesh_fused_task - t0) / frames, (g_mesh_cpu - u0) / frames, (g_mesh_compacted - k0) / frames);
+    memcpy(n0, g_mesh_n, sizeof n0); b0 = g_mesh_batches; c0 = g_mesh_ctl; s0 = g_mesh_cs; f0 = g_mesh_fused; k0 = g_mesh_compacted; p0 = g_mesh_packed; u0 = g_mesh_cpu; t0 = g_mesh_fused_task;
 }
 static int mesh_control(uint32_t phase, uint32_t base, const VkDescriptorBufferInfo *source, int lead) {
     int was_on = R.on; vka_rp_end(); g_mesh_ctl++;
@@ -242,6 +244,215 @@ static int mesh_compact(const vka_shader *ms, uint32_t capacity, uint32_t prims,
     return 1;
 }
 
+// ---------- Two workgroups a subgroup (DM_VK_MESH_PACK, live, default 0) ----------
+// NVN2's task and mesh programs are 32-invocation workgroups (one Ampere warp; Ocarina of Time: all 500 mesh and 18 of its 20 task programs), and their compute forms
+// keep that size: on a GPU whose compute subgroups are 64 lanes (Qualcomm's Adreno driver, fixed; Turnip, pinned) each workgroup is one wave with lanes 32-63 off, half
+// of every instruction the fallback's heaviest kernels issue spent on nothing. vka_mesh_pack.h rewrites a module into 64-invocation workgroups holding two of the
+// program's workgroups, one per 32-lane half (exact for a library built for 64 lanes, whose warp instructions already keep to their half; the header says why), and the
+// batch is dispatched from the controller's packed record (info[20..22]: half the workgroups, rounded up). Made from the library's module the first time a program is
+// dispatched with the switch on, on a thread of its own (DM_VK_MESH_PACK=1: the library's module runs until then) or on the replay thread (=2, and in the mesh
+// selftest: the first dispatch waits for it); a module the rewrite leaves (a guest atomic, another local size), one over the shared memory limit and every module on a
+// device without 64-lane compute subgroups keep the library's pipeline. A module with an add to guest memory (Ocarina of Time: 25 of 520) is packed only with
+// DM_VK_MESH_PACK_ADDS=1 (restart for a program already made; default 0): its repeated workgroup's add is made 0 and its result taken from its twin by a shuffle,
+// which no test has run on 64-lane subgroups yet (the pack check leaves out modules that write guest memory). Not measured on a phone yet (2026-11-20): docs/ANALISE-MESH-ADRENO-2026-11-20.md
+uint64_t vka_mesh_packed_count(void);
+int vka_mesh_pack_sync;   // the mesh selftest (vka_mesh_selftest.inc): packed pipelines made before their first dispatch
+typedef struct { vka_shader *s; VkPipelineLayout layout; _Atomic int state; VkPipeline p; int checks; } mesh_pk;   // state: 1 queued or being made, 2 made, -1 the library's; checks: DM_VK_MESH_PACK_CHECK's
+enum { MESH_NPK = 2048 };
+static mesh_pk g_mesh_pk[MESH_NPK]; static unsigned g_mesh_npk;
+static mesh_pk *g_mesh_pkq[MESH_NPK]; static unsigned g_mesh_pkq_h, g_mesh_pkq_t; static int g_mesh_pk_thread;
+static pthread_mutex_t g_mesh_pk_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_mesh_pk_cv = PTHREAD_COND_INITIALIZER;
+static int g_mesh_pk_dev = -1; static uint32_t g_mesh_pk_pin; static int g_mesh_pk_full;
+static int mesh_pack_device(void) {   // compute subgroups of 64 lanes, one per 64-invocation workgroup
+    if (g_mesh_pk_dev >= 0) return g_mesh_pk_dev;
+    uint32_t pin = vka_shader_sg_pin(DMSH_VK_STAGE_CS);
+    int fixed = V.subgroup_min == 64 && V.subgroup_max == 64;
+    int ok = (V.subgroup_stages & VK_SHADER_STAGE_COMPUTE_BIT) && (pin == 64 || (!pin && fixed));
+    VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceFeatures2 f2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f13};
+    vk.vkGetPhysicalDeviceFeatures2(V.pd, &f2);   // (vka_dev.c enables every feature the device has)
+    g_mesh_pk_pin = pin == 64 ? 64 : 0;
+    g_mesh_pk_full = f13.computeFullSubgroups && (pin == 64 || V.subgroup_max == 64);   // (full subgroups need a local size that is a multiple of the largest subgroup)
+    g_mesh_pk_dev = ok;
+    VLOG("task/mesh fallback, two workgroups a subgroup (DM_VK_MESH_PACK): %s (compute subgroups %u-%u, pinned %u, full subgroups %s)",
+         ok ? "on this device" : "not on this device: its compute subgroups are not 64 lanes", V.subgroup_min, V.subgroup_max, pin, g_mesh_pk_full ? "required" : "not required");
+    return ok;
+}
+static VkPipeline mesh_pack_make(vka_shader *s, VkPipelineLayout layout, char *why, size_t whyn) {
+    uint64_t t0 = now_ns();
+    if ((s->e->flags & DMSH_VK_F_SUBGROUP) && s->lib->h->subgroup_size != 64) { snprintf(why, whyn, "a library built for %u-lane subgroups", s->lib->h->subgroup_size ? s->lib->h->subgroup_size : 32); return VK_NULL_HANDLE; }
+    for (unsigned i = 0; i < s->e->bind_count; i++) if (s->b[i].kind == DMSH_VK_KIND_SHARED_SPILL) { snprintf(why, whyn, "shared memory in the spill buffer"); return VK_NULL_HANDLE; }
+    const char *ov = getenv("DM_VK_SPV_OVERRIDE");
+    if (ov && *ov) {   // (an override module is dispatched as it is: vka_shader.c spv_override)
+        char p[1100]; snprintf(p, sizeof p, "%s/%016llx_%u.spv", ov, (unsigned long long)s->key, (unsigned)DMSH_VK_MOD_MESH_COMPUTE);
+        FILE *f = fopen(p, "rb"); if (f) { fclose(f); snprintf(why, whyn, "a DM_VK_SPV_OVERRIDE module"); return VK_NULL_HANDLE; }
+    }
+    const dmsh_vk_module *m = vka_shlib_module(s->lib, s->e, DMSH_VK_MOD_MESH_COMPUTE);
+    size_t nb = 0; uint32_t *w = m ? vka_shlib_spirv(s->lib, m, &nb, why, whyn) : NULL;
+    if (!w) { if (!m) snprintf(why, whyn, "no compute module"); return VK_NULL_HANDLE; }
+    size_t on = 0; vka_mesh_pack_stats st;
+    uint32_t *o = vka_mesh_pack(w, nb / 4, DMSH_VK_MESH_OUT + 3, VKA_ENV("DM_VK_MESH_PACK_ADDS", 0), &on, &st, why, whyn);
+    free(w);
+    if (!o) return VK_NULL_HANDLE;
+    if (st.wg_bytes > V.props.limits.maxComputeSharedMemorySize) { free(o); snprintf(why, whyn, "%u bytes of shared memory packed, the device at most %u", st.wg_bytes, V.props.limits.maxComputeSharedMemorySize); return VK_NULL_HANDLE; }
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = on * 4, .pCode = o};
+    VkResult r = vk.vkCreateShaderModule(V.dev, &mi, NULL, &mod); free(o);
+    if (r) { snprintf(why, whyn, "vkCreateShaderModule %d", r); return VK_NULL_HANDLE; }
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rsg = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = 64};
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = layout,
+        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = g_mesh_pk_pin ? &rsg : NULL,
+                  .flags = g_mesh_pk_full ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = mod, .pName = "main"}};
+    VkPipeline p = VK_NULL_HANDLE;
+    r = vk.vkCreateComputePipelines(V.dev, VK_NULL_HANDLE, 1, &ci, NULL, &p);
+    vk.vkDestroyShaderModule(V.dev, mod, NULL);
+    if (r) { snprintf(why, whyn, "vkCreateComputePipelines %d", r); return VK_NULL_HANDLE; }
+    static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 64)
+        VLOG("task/mesh fallback: %s %016llx packed two workgroups a subgroup (%u bytes of shared memory, %u chains and %u builtin loads rewritten), made in %.0f ms",
+             s->e->stage == DMSH_VK_STAGE_TS ? "task" : "mesh", (unsigned long long)s->key, st.wg_bytes, st.chains, st.loads, (now_ns() - t0) / 1e6);
+    return p;
+}
+static void mesh_pack_one(mesh_pk *k) {
+    char why[256] = "";
+    VkPipeline p = mesh_pack_make(k->s, k->layout, why, sizeof why);
+    if (!p) { static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 32) VLOG("task/mesh fallback: %016llx keeps the library's module (DM_VK_MESH_PACK): %s", (unsigned long long)k->s->key, why); }
+    k->p = p; atomic_store_explicit(&k->state, p ? 2 : -1, memory_order_release);
+}
+static void *mesh_pack_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&g_mesh_pk_mu);
+        while (g_mesh_pkq_h == g_mesh_pkq_t) pthread_cond_wait(&g_mesh_pk_cv, &g_mesh_pk_mu);
+        mesh_pk *k = g_mesh_pkq[g_mesh_pkq_h++ % MESH_NPK];
+        pthread_mutex_unlock(&g_mesh_pk_mu);
+        mesh_pack_one(k);
+    }
+    return NULL;
+}
+uint64_t vka_mesh_packed_count(void) { return g_mesh_packed; }   // (the selftest's count; the replay thread's)
+// The packed pipeline of s with the layout of its dispatch; VK_NULL_HANDLE: the library's (the switch off, the device, the module, or not made yet)
+static VkPipeline mesh_pack_get(vka_shader *s, VkPipelineLayout layout, mesh_pk **ent) {
+    *ent = NULL;
+    int mode = VKA_ENV("DM_VK_MESH_PACK", 0);
+    if (!mode || VKA_ENV("DM_VK_MESH_TRACE_MS", 0) || !mesh_pack_device()) return VK_NULL_HANDLE;
+    uint64_t h = ((uint64_t)(uintptr_t)s * 0x9E3779B97F4A7C15ull) ^ (uint64_t)(uintptr_t)layout;
+    mesh_pk *k = NULL; int fresh = 0;
+    pthread_mutex_lock(&g_mesh_pk_mu);
+    for (unsigned i = (unsigned)(h >> 53) & (MESH_NPK - 1), j = 0; j < MESH_NPK; j++, i = (i + 1) & (MESH_NPK - 1)) {
+        if (g_mesh_pk[i].s == s && g_mesh_pk[i].layout == layout) { k = &g_mesh_pk[i]; break; }
+        if (!g_mesh_pk[i].s) {
+            if (2 * (g_mesh_npk + 1) > MESH_NPK) break;   // (full: the library's)
+            k = &g_mesh_pk[i]; k->s = s; k->layout = layout; atomic_store(&k->state, 1); g_mesh_npk++; fresh = 1; break;
+        }
+    }
+    int sync = mode == 2 || vka_mesh_pack_sync;
+    if (fresh && !sync) {
+        if (!g_mesh_pk_thread) { pthread_t t; if (!pthread_create(&t, NULL, mesh_pack_worker, NULL)) { pthread_detach(t); g_mesh_pk_thread = 1; } }
+        if (g_mesh_pk_thread) { g_mesh_pkq[g_mesh_pkq_t++ % MESH_NPK] = k; pthread_cond_signal(&g_mesh_pk_cv); }
+        else sync = 1;
+    }
+    pthread_mutex_unlock(&g_mesh_pk_mu);
+    if (!k) return VK_NULL_HANDLE;
+    if (fresh && sync) mesh_pack_one(k);
+    if (atomic_load_explicit(&k->state, memory_order_acquire) != 2) return VK_NULL_HANDLE;
+    *ent = k; return k->p;
+}
+
+// ---------- The packed modules' check on the device (DM_VK_MESH_PACK_CHECK=<n>, live, default 0; diagnostic, slow) ----------
+// Each packed program's first n dispatches (task and mesh) that write no guest memory (draw_writes) also run the library's module on the same inputs: the words the
+// dispatch writes (its workgroups' payload or output slots, from the start of the buffer, at most the 64 MiB of the reference buffer) are filled with a sentinel before
+// each run, the library's result copied aside, and the packed result compared with it (selftest/mesh_packcheck.comp). Logged per dispatch: "pack check ... differ" in
+// red with the first differing word, a count of the dispatches that matched every word. Proof on the device's own subgroups of what the lavapipe test
+// (t_android_meshpack_lvp.c) proves only for modules without subgroup operations. A program dispatched twice: GPU time is not representative with it on
+#include "vka_mesh_packcheck_spv.h"
+enum { MESH_NCHK = 256 };
+static vka_layout g_mesh_chk_layout; static VkPipeline g_mesh_chk_pipeline;
+static VkBuffer g_mesh_ref; static VkDeviceMemory g_mesh_ref_mem; static VkDeviceSize g_mesh_ref_size;
+static vka_span g_mesh_chk_res; static _Atomic uint8_t g_mesh_chk_busy[MESH_NCHK]; static unsigned g_mesh_chk_next;
+static _Atomic uint64_t g_mesh_chk_ok, g_mesh_chk_bad;
+static int mesh_check_init(void) {
+    static int failed;
+    if (g_mesh_chk_pipeline) return 1;
+    if (failed) return 0;
+    failed = 1;
+    g_mesh_ref_size = g_mesh_output_size;
+    VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = g_mesh_ref_size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    if (vk.vkCreateBuffer(V.dev, &bi, NULL, &g_mesh_ref)) return 0;
+    VkMemoryRequirements mr; vk.vkGetBufferMemoryRequirements(V.dev, g_mesh_ref, &mr);
+    uint32_t mt = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0); if (mt == UINT32_MAX) mt = vka_mem_type(mr.memoryTypeBits, 0, 0);
+    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt};
+    if (mt == UINT32_MAX || vk.vkAllocateMemory(V.dev, &ai, NULL, &g_mesh_ref_mem) || vk.vkBindBufferMemory(V.dev, g_mesh_ref, g_mesh_ref_mem, 0)) {
+        vk.vkDestroyBuffer(V.dev, g_mesh_ref, NULL); g_mesh_ref = VK_NULL_HANDLE; return 0; }
+    if (!vka_static((VkDeviceSize)MESH_NCHK * 16, V.sb_align, &g_mesh_chk_res)) return 0;
+    VkDescriptorSetLayoutBinding bindings[4];
+    for (unsigned i = 0; i < 4; i++) bindings[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+    vka_layout *l = &g_mesh_chk_layout;
+    l->push = V.push_desc && V.max_push >= 4; l->ndesc = 4;
+    VkDescriptorSetLayoutCreateInfo di = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .flags = l->push ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0, .bindingCount = 4, .pBindings = bindings};
+    if (vk.vkCreateDescriptorSetLayout(V.dev, &di, NULL, &l->set0)) return 0;
+    VkPushConstantRange push = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &l->set0, .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
+    if (vk.vkCreatePipelineLayout(V.dev, &pi, NULL, &l->layout)) return 0;
+    VkShaderModule mod = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo mi = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof vka_mesh_packcheck_spv, .pCode = vka_mesh_packcheck_spv};
+    if (vk.vkCreateShaderModule(V.dev, &mi, NULL, &mod)) return 0;
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = l->layout,
+        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = mod, .pName = "main"}};
+    VkResult r = vk.vkCreateComputePipelines(V.dev, VK_NULL_HANDLE, 1, &ci, NULL, &g_mesh_chk_pipeline);
+    vk.vkDestroyShaderModule(V.dev, mod, NULL);
+    if (r) { VRED("task/mesh pack check pipeline: %d", r); return 0; }
+    failed = 0;
+    VRED_ONCE("task/mesh fallback: packed modules checked against the library's (DM_VK_MESH_PACK_CHECK): each checked dispatch runs twice, GPU times are not representative");
+    return 1;
+}
+static int mesh_check_take(void) {
+    for (unsigned k = 0; k < MESH_NCHK; k++) {
+        unsigned i = (g_mesh_chk_next + k) % MESH_NCHK;
+        if (!atomic_exchange(&g_mesh_chk_busy[i], 1)) {
+            g_mesh_chk_next = i + 1;
+            uint32_t *r = (uint32_t *)(g_mesh_chk_res.ptr + (size_t)i * 16); r[0] = 0; r[1] = UINT32_MAX; r[2] = r[3] = 0;   // (host writes, visible at the submission)
+            return (int)i;
+        }
+    }
+    return -1;
+}
+typedef struct { int slot, stage; uint64_t key; } mesh_chk;
+static void mesh_check_report(void *arg) {   // the completion thread
+    mesh_chk *c = arg; uint32_t r[4]; memcpy(r, g_mesh_chk_res.ptr + (size_t)c->slot * 16, 16);
+    atomic_store_explicit(&g_mesh_chk_busy[c->slot], 0, memory_order_release);
+    if (r[0]) {
+        uint64_t nb = atomic_fetch_add(&g_mesh_chk_bad, 1) + 1;
+        if (nb <= 64) VRED("task/mesh pack check: %s %016llx, %u workgroups, %u words: %u differ from the library's module, the first at word %u", c->stage == 6 ? "task" : "mesh",
+                           (unsigned long long)c->key, r[3], r[2], r[0], r[1]);
+    } else {
+        uint64_t ok = atomic_fetch_add(&g_mesh_chk_ok, 1) + 1;
+        if (!(ok & (ok - 1))) VLOG("task/mesh pack check: %llu dispatches matched the library's module word for word (%s %016llx: %u workgroups, %u words), %llu differed",
+                                   (unsigned long long)ok, c->stage == 6 ? "task" : "mesh", (unsigned long long)c->key, r[3], r[2], (unsigned long long)atomic_load(&g_mesh_chk_bad));
+    }
+    free(c);
+}
+static void mesh_check_pass(uint32_t mode, const vka_span *target, VkDeviceSize size, uint32_t words, int slot) {
+    VkDescriptorBufferInfo bi[4] = {{target->buf, target->off, size}, {g_mesh_ref, 0, g_mesh_ref_size}, {g_mesh_info.buf, g_mesh_info.off, MESH_INFO}, {g_mesh_chk_res.buf, g_mesh_chk_res.off, (VkDeviceSize)MESH_NCHK * 16}};
+    VkWriteDescriptorSet wr[4];
+    for (unsigned i = 0; i < 4; i++) wr[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = i, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[i]};
+    const vka_layout *l = &g_mesh_chk_layout;
+    if (l->push) vk.vkCmdPushDescriptorSetKHR(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, l->layout, 0, 4, wr);
+    else {
+        VkDescriptorSet set = set_alloc(l->set0); if (!set) return;
+        for (unsigned i = 0; i < 4; i++) wr[i].dstSet = set;
+        vk.vkUpdateDescriptorSets(V.dev, 4, wr, 0, NULL);
+        vk.vkCmdBindDescriptorSets(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, l->layout, 0, 1, &set, 0, NULL);
+    }
+    g_pd[1].n = 0;   // (set 0 replaced: the draws' last compute push is gone, as after mesh_control)
+    uint64_t lim = (size < g_mesh_ref_size ? size : g_mesh_ref_size) / 4;
+    uint32_t pc[4] = {mode, words, (uint32_t)slot, lim > UINT32_MAX ? UINT32_MAX : (uint32_t)lim};
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mesh_chk_pipeline);
+    vk.vkCmdPushConstants(g_cb, l->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    vk.vkCmdDispatch(g_cb, 256, 1, 1);
+    vka_barrier(g_cb);
+}
+
 static void mesh_report(void *arg) {
     const uint32_t *p = arg;
     if (p[17]) VRED("task/mesh fallback refused unsupported count (flags %#x, %u tasks, %u requested mesh workgroups)", p[17], p[10], p[18]);
@@ -341,8 +552,37 @@ static int mesh_compute(vka_dstate *d, vka_shader *s, int stage) {
     if (make_images(d, sh, 1)) { vka_rp_end(); make_images(d, sh, 0); }
     VkPipeline p = vka_cs_pipeline(s, &lay); if (!p) return 0;
     if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, NULL)) return 0;
-    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
-    vk.vkCmdDispatchIndirect(g_cb, g_mesh_info.buf, g_mesh_info.off); g_mesh_cs++;
+    // DM_VK_MESH_PACK: two of the program's workgroups a 64-lane subgroup, from the controller's packed record (mesh_pack_get)
+    mesh_pk *pke; VkPipeline pk = mesh_pack_get(s, lay.layout, &pke);
+    // DM_VK_MESH_PACK_CHECK: the library's module first, on the same inputs, its result kept aside (mesh_check_pass)
+    int chk = -1; const vka_span *target = stage == 7 ? &g_mesh_output : &g_mesh_payload;
+    VkDeviceSize tsize = stage == 7 ? g_mesh_output_size : g_mesh_payload_size;
+    uint32_t twords = ((const uint32_t *)g_mesh_info.ptr)[stage == 7 ? 12 : 11];   // (the host's parameters: the output stride, the payload words; the controller leaves them)
+    int nchk = pk ? VKA_ENV("DM_VK_MESH_PACK_CHECK", 0) : 0;
+    if (nchk > 0 && pke->checks < nchk && twords && !draw_writes(sh, d) && mesh_check_init() && (chk = mesh_check_take()) >= 0) {
+        pke->checks++;
+        vka_barrier(g_cb);
+        mesh_check_pass(2, target, tsize, twords, chk);
+        g_pd[1].n = 0; if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, NULL)) return 0;
+        vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+        vk.vkCmdDispatchIndirect(g_cb, g_mesh_info.buf, g_mesh_info.off);
+        vka_barrier(g_cb);
+        mesh_check_pass(0, target, tsize, twords, chk);
+        mesh_check_pass(2, target, tsize, twords, chk);
+        g_pd[1].n = 0; if (!bind_sets(d, sh, &lay, VK_PIPELINE_BIND_POINT_COMPUTE, NULL)) return 0;
+    }
+    vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, pk ? pk : p);
+    vk.vkCmdDispatchIndirect(g_cb, g_mesh_info.buf, g_mesh_info.off + (pk ? 4u * VKA_MESH_PACK_INFO_DISPATCH : 0)); g_mesh_cs++; if (pk) g_mesh_packed++;
+    if (chk >= 0) {
+        vka_barrier(g_cb);
+        mesh_check_pass(1, target, tsize, twords, chk);
+        VkBufferMemoryBarrier hb = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .buffer = g_mesh_chk_res.buf, .offset = g_mesh_chk_res.off + (VkDeviceSize)chk * 16, .size = 16};
+        vk.vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1, &hb, 0, NULL);
+        mesh_chk *c = malloc(sizeof *c);
+        if (c) { *c = (mesh_chk){chk, stage, s->key}; vka_after(vka_fence_last() + 1, mesh_check_report, c); }
+        else atomic_store(&g_mesh_chk_busy[chk], 0);
+    }
     if (vka_gp_active) vka_gp_compute(s->key, 0, 0, 0, 1);   // DM_VK_GPUPROF: the step the barrier below ends names the task or mesh program it ran
     // The task and mesh shaders run here as compute with the game's own bindings, so they may store to its storage buffers and images and to raw global memory. mesh_barrier
     // covers only the fallback's four buffers: those guest writes were made visible only by the full barrier a later pass ended with, and not at all to the pulling
@@ -353,6 +593,45 @@ static int mesh_compute(vka_dstate *d, vka_shader *s, int stage) {
     if (draw_writes(sh, d) && VKA_ENV("DM_VK_MESH_GUEST_BAR", 1)) { g_mesh_guest_bar++; vka_barrier(g_cb); }
     else mesh_barrier();
     return 1;
+}
+
+// ---------- A direct draw without a task shader, without the controller (DM_VK_MESH_CPU, live, default 0) ----------
+// Such a draw has exactly count mesh groups, which the CPU knows when it records: what the controller's phase 3 computes on one GPU thread (the count's check, the
+// groups, each batch's dispatch and draw records) is written here into the batch's info block (host-visible scratch, made visible by the submission), one block a
+// batch. Per draw that is one dispatch and one barrier fewer (the controller's, and its wait); a batch still ends the pass (the compute) and has the fallback's barrier
+// before its compute (the last batch's pulling draw read the output buffer) and after it. No report is read back (the counts are the CPU's: a count over 65535 or a
+// first past 32 bits is refused here, in red, as the controller refuses it). Indirect draws and task draws keep the controller (their counts are the GPU's).
+// After erickmendes22's fork (its taskless direct dispatch, the idea only). 0 = the controller always
+static int mesh_cpu(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw, vka_shader *ms, vka_shader *fs,
+                    uint32_t capacity, uint32_t prims, uint32_t topology, uint32_t pw, uint32_t stride) {
+    if (dw->count < 0 || dw->first < 0) return 0;
+    uint32_t count = (uint32_t)dw->count, first = (uint32_t)dw->first;
+    g_mesh_n[0]++; g_mesh_cpu++;
+    if (count > 65535 || (count && first > 0xffffffffu - (count - 1))) {
+        static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 16) VRED("task/mesh fallback refused unsupported count (%u mesh groups, first %u; DM_VK_MESH_CPU)", count, first);
+        return 1;
+    }
+    int ok = 0; g_mesh_aux = 1;
+    for (uint32_t base = 0; base < count; base += capacity) {
+        uint32_t n = count - base < capacity ? count - base : capacity;
+        if (!vka_scratch(MESH_INFO, V.sb_align, &g_mesh_info)) goto out;
+        uint32_t *ip = (uint32_t *)g_mesh_info.ptr; memset(ip, 0, MESH_INFO);
+        ip[0] = n; ip[1] = ip[2] = 1; ip[4] = count; ip[5] = base; ip[6] = n * prims * topology; ip[7] = 1;   // (the controller's begin, groups and batch)
+        ip[10] = count; ip[11] = pw; ip[12] = stride / 4; ip[13] = prims; ip[14] = topology; ip[15] = capacity; ip[16] = 0; ip[18] = count; ip[19] = first;
+        ip[VKA_MESH_PACK_INFO_DISPATCH] = (n + 1) / 2; ip[VKA_MESH_PACK_INFO_DISPATCH + 1] = ip[VKA_MESH_PACK_INFO_DISPATCH + 2] = 1;
+        int was_on = R.on; vka_rp_end();
+        if (!VKA_ENV("DM_VK_MESH_BARRIERS", 1) || !(was_on && rp_end_was_full())) mesh_barrier();   // (as mesh_control's lead barrier)
+        g_mesh_batches++;
+        if (!mesh_compute(d, ms, 7)) goto out;
+        g_mesh_compact_on = mesh_compact(ms, capacity, prims, topology);
+        g_mesh_pull = ms->mesh_vertex; g_mesh_fragment = fs;
+        p_draw draw = {topology == 1 ? NVN_DRAW_PRIMITIVE_POINTS : NVN_DRAW_PRIMITIVE_TRIANGLES, 0, (int)(capacity * prims * topology), 1, 0, 0};
+        vka_draw(d, rt, has_rt, sc, has_sc, &draw, NULL);
+        g_mesh_pull = g_mesh_fragment = NULL; g_mesh_compact_on = 0;
+    }
+    ok = 1;
+out:
+    g_mesh_aux = 0; g_mesh_pull = g_mesh_fragment = NULL; g_mesh_compact_on = 0; return ok;
 }
 
 static int mesh_emulate(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_scissor *sc, int has_sc, const p_draw *dw) {
@@ -403,6 +682,8 @@ static int mesh_emulate(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_s
     ip[11] = pw; ip[12] = stride / 4; ip[13] = prims; ip[14] = topology; ip[15] = capacity; ip[16] = ts != NULL;
     int trace_mesh = VKA_ENV("DM_VK_MESH_TRACE_MS", 0);
     if (trace_mesh) ip[12] = 0;   // unused by production modules/controller; diagnostic counter only
+    if (fit && !ts && !dw->ind && !trace_mesh && !VKA_ENV("DM_VK_MESH_TRACE_GLOBAL", 0) && !VKA_ENV("DM_VK_MESH_DIAG_STAGE", 0) && VKA_ENV("DM_VK_MESH_CPU", 0))
+        return mesh_cpu(d, rt, has_rt, sc, has_sc, dw, ms, fs, capacity, prims, topology, pw, stride);
     VkDescriptorBufferInfo source;
     if (dw->ind) {
         VkBuffer buffer; VkDeviceSize offset;
@@ -449,6 +730,9 @@ static int mesh_emulate(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_s
     // reads or writes the fallback's buffers in between. Ocarina of Time's Kokiri Forest: 135 emulated draws a frame by the scarecrow, 538 fallback dispatches, 17.9 of the
     // frame's 53 ms of GPU time, most of it the GPU emptying around one-thread dispatches (the plan of 2026-11-15). 0 = the three phases one by one, as before
     int fuse = !ts && VKA_ENV("DM_VK_MESH_FUSE", 1);
+    // DM_VK_MESH_FUSE_TASK (live, default 0): a draw with a task shader runs the controller's phases 1 and 2 for its first batch (the groups, the batch's records) in one
+    // dispatch after the task compute, phase 4, with one barrier after it instead of two (nothing runs between them). 0 = one by one, as before
+    int fuse_task = ts && VKA_ENV("DM_VK_MESH_FUSE_TASK", 0);
     g_mesh_n[(ts ? 2 : 0) + (dw->ind ? 1 : 0)]++;
     if (fuse) {
         if (!mesh_control(3, 0, &source, 1)) goto out;
@@ -458,7 +742,8 @@ static int mesh_emulate(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_s
         if (!mesh_control(0, 0, &source, 1)) goto out;
         if (diag_stage == -1) { ok = 1; goto out; }
         if (ts && !mesh_compute(d, ts, 6)) goto out;
-        if (!mesh_control(1, 0, &source, 0)) goto out;
+        if (!mesh_control(fuse_task ? 4 : 1, 0, &source, 0)) goto out;
+        if (fuse_task) g_mesh_fused_task++;
     }
     reported = 1;
     // Only DM_VK_MESH_REPORT_COPY=0 (explicitly the old behaviour) reads the scratch span late. With the copy on and no slot (the ring full, or its buffer not made),
@@ -478,7 +763,7 @@ static int mesh_emulate(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_s
     for (uint32_t base = 0; base < cover; base += capacity) {
         // (the fused controller wrote the first batch's records: the report's copy only read them, so the batch needs no controller and no barrier before its compute)
         g_mesh_batches++;
-        if ((!(fuse && !base) && !mesh_control(2, base, &source, base || copied)) || !mesh_compute(d, ms, 7)) goto out;
+        if ((!((fuse || fuse_task) && !base) && !mesh_control(2, base, &source, base || copied)) || !mesh_compute(d, ms, 7)) goto out;
         if (diag_stage == 2) continue;
         g_mesh_compact_on = mesh_compact(ms, capacity, prims, topology);
         g_mesh_pull = ms->mesh_vertex; g_mesh_fragment = fs;

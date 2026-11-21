@@ -47,6 +47,7 @@ typedef struct {
     uint32_t fifo[8], fhead, fcount;          // acquirable indices
     uint32_t pend[CV_BUFS], phead, pcount;    // released, waiting for a picture
     cv_pic held[CV_HOLD]; int nheld;
+    int ev_low;              // the submission-ready event was cleared for a full queue: it rises again when room comes back (drain)
     int eos_pending, eos_drain;   // eos_drain: the platform decoder still holds pictures of a stream that has ended (the host's queue was full)
     struct { int on; uint32_t run; uint64_t wall0, last_acq; int64_t pts0; } clk;   // the movie clock: picture time pts0 + (now - wall0) is due now
     struct { uint64_t t0, dec, acq, shown, drop; int64_t pts0, pts; int any; } st;   // the rate line's counts since t0, the times of the first and last picture shown
@@ -124,7 +125,10 @@ static void cv_rate_log(cv_dec *d, uint64_t now) {   // the movie's rate line (E
 }
 
 // Pictures and end of stream into the released buffers, in order (decoder lock held); with the movie clock only into those the game has acquired
-static void drain(cv_dec *d) {
+// The event says a packet can come: it rises when one was taken (took) or room came back, not at every release. Mario Tennis Fever's player counts each signal as one packet
+// it may send and ignores a refusal (nro0+0xd16130): raised at every release, its count grew past what the queue holds and the packets it sent then were lost (ported from
+// Banana Native's hle_codec_video.c, eden/v0.3.42)
+static void drain(cv_dec *d, int took) {
     uint64_t now = now_ns();
     if (d->eos_drain) cv_take_mc(d, true);
     while (d->pcount && (d->nheld || d->eos_pending) && !(cv_clk_enabled() && d->buf[d->pend[d->phead]].queued)) {
@@ -146,7 +150,10 @@ static void drain(cv_dec *d) {
         spt_fire(d, i);
     }
     cv_rate_log(d, now);
-    if (d->event) { if (d->nheld < CV_HOLD) hle_signal_system_event(d->event); else hle_clear_system_event(d->event); }
+    if (d->event) {
+        if (d->nheld >= CV_HOLD) { hle_clear_system_event(d->event); d->ev_low = 1; }
+        else if (took || d->ev_low) { hle_signal_system_event(d->event); d->ev_low = 0; }
+    }
 }
 
 HLE_FORCE("_ZN2nn5codec5video10InitializeEv", "the decoder service is the host's (hle_codec_video.c)", Result, h_cv_init, void) { return 0; }
@@ -280,6 +287,15 @@ static Result cv_dec_reset(void *t) {   // Stop / Flush: pictures not yet given 
     pthread_mutex_unlock(&d->mu);
     return 0;
 }
+// A started decoder that has room takes packets, whatever became of the signal Initialize gave. Mario Tennis Fever's player (nro0+0xd19d18) clears that one and drops it while
+// it is not yet started, then counts only later signals: with none at Start it never sent a packet, and every movie stayed black with the game waiting behind it (Banana Native)
+static Result cv_dec_start(void *t) {
+    cv_dec *d = cv_of(t); if (!d) return 0;
+    pthread_mutex_lock(&d->mu);
+    if (d->event && d->nheld < CV_HOLD) { hle_signal_system_event(d->event); d->ev_low = 0; }
+    pthread_mutex_unlock(&d->mu);
+    return 0;
+}
 static Result cv_dec_event(void **out, void *t) { cv_dec *d = cv_of(t); *out = d ? d->event : NULL; return d ? 0 : CV_R(2004); }
 static int cv_hold(cv_dec *d, vpx_image_t *c, uint8_t *nv12, int64_t ts) {   // a decoded picture (one of the two) waits for a buffer (decoder lock held); 0 when the host holds no more
     d->st.dec++;
@@ -312,7 +328,7 @@ static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t s
     cv_dec *d = cv_of(t); if (!d) return CV_R(2004);
     pthread_mutex_lock(&d->mu);
     if (d->nheld >= CV_HOLD) cv_clk_skip(d, now_ns());   // pictures the clock has overtaken make room: the decoder catches up while the game draws slower than the movie
-    if (d->nheld >= CV_HOLD) { if (d->event) hle_clear_system_event(d->event); pthread_mutex_unlock(&d->mu); return CV_BUSY; }
+    if (d->nheld >= CV_HOLD) { if (d->event) { hle_clear_system_event(d->event); d->ev_low = 1; } pthread_mutex_unlock(&d->mu); return CV_BUSY; }
     int got = 0;
     if (CV_MC(d) && d->avc) {   // the platform decoder reorders: pictures leave in presentation order, all of them at the end of the stream
         if (size && mavc_decode(d->avc, data, (int)size, ts / 1000) < 0) { static int n; if (n++ < 4) LOG("[RED] nn::codec %s: the host decoder could not decode a packet", k_cv_name[d->codec]); }
@@ -324,7 +340,7 @@ static Result cv_dec_submit(uint64_t *out, void *t, const void *data, uint64_t s
     }
     if (eos && !(CV_MC(d) && d->avc)) { if (got) d->held[d->nheld - 1].eos = 1; else d->eos_pending = 1; }
     *out = ++d->submits;
-    drain(d);
+    drain(d, 1);
     pthread_mutex_unlock(&d->mu);
     return 0;
 }
@@ -337,7 +353,7 @@ static Result cv_dec_acq(uint32_t *idx, cv_sync *sync, void *t) {
     uint64_t now = now_ns();
     if (d->clk.last_acq && now - d->clk.last_acq > (uint64_t)CV_CLK_GAP) cv_clk_reset(d);   // a pause: the movie clock starts again at the next picture shown
     d->clk.last_acq = now; d->st.acq++;
-    drain(d);   // the buffer may take its picture now
+    drain(d, 0);   // the buffer may take its picture now
     pthread_mutex_unlock(&d->mu);
     return 0;
 }
@@ -347,7 +363,7 @@ static void cv_dec_rel(void *t, uint32_t i, cv_sync sync) {
     d->buf[i].gen++; d->buf[i].filled = 0;
     if (d->pcount < CV_BUFS) { d->pend[(d->phead + d->pcount) % CV_BUFS] = i; d->pcount++; }
     if (d->fcount < 8) { d->fifo[(d->fhead + d->fcount) % 8] = i; d->fcount++; d->buf[i].queued = 1; } else LOG("[RED] nn::codec: acquirable queue full at release %u", i);
-    drain(d);
+    drain(d, 0);
     pthread_mutex_unlock(&d->mu);
 }
 static Result cv_dec_props(uint16_t *w, uint16_t *h, uint16_t *cw, uint16_t *ch, int64_t *ts, bool *eos, void *t, uint32_t i) {
@@ -367,7 +383,7 @@ static Result cv_dec_encrypted(void) { static int once; if (!once++) LOG("[RED] 
     HLE_FORCE(s_fin, "frees the host decoder", Result, h_cv_##tag##fin, void *t) { return cv_dec_fin(t); } \
     HLE_FORCE(s_reg, "a buffer of the host decoder, acquirable at once", Result, h_cv_##tag##reg, void *t, uint32_t i, void *pool, uint32_t pidx) { return cv_dec_reg(t, i, pool, pidx); } \
     HLE_FORCE(s_unreg, "the buffer leaves the host decoder", Result, h_cv_##tag##unreg, void *t, uint32_t i) { return cv_dec_unreg(t, i); } \
-    HLE_FORCE(s_start, "the host decoder decodes on submission", Result, h_cv_##tag##start, void *t) { (void)t; return 0; } \
+    HLE_FORCE(s_start, "the host decoder decodes on submission; a started decoder with room signals", Result, h_cv_##tag##start, void *t) { return cv_dec_start(t); } \
     HLE_FORCE(s_stop, "drops undelivered pictures", Result, h_cv_##tag##stop, void *t) { return cv_dec_reset(t); } \
     HLE_FORCE(s_flush, "drops undelivered pictures", Result, h_cv_##tag##flush, void *t) { return cv_dec_reset(t); } \
     HLE_FORCE(s_ev, "signalled while the host decoder takes packets", Result, h_cv_##tag##event, void **out, void *t) { return cv_dec_event(out, t); } \

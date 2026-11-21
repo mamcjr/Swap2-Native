@@ -1850,6 +1850,98 @@ def raw_global_memory(m, tables=None):
     return st
 
 
+# ---------- Render scale helpers at scale 1 (unit_render_scale) ----------
+# The translator wraps the coordinates of every integer-coordinate texture fetch and image access of a compute or pixel shader in a call of TexelFetchScale, and every
+# texture size query in TextureSizeUnscale (Ryujinx TexturePass.cs, HelperFunctionManager.cs): the helper reads the texture's render scale from the support buffer and
+# returns its argument when the scale is 1.0, as it always is here (the replay writes 1.0 into each render_scale entry, vka_bind.c; this host never scales textures).
+# Each call passes its arguments through fresh Function variables, and the driver inlines the helper at every call: Koei Tecmo's KTGL compute shaders call it once
+# per fetch coordinate, 2,926 to 5,224 times (Hyrule Warriors: Age of Imprisonment's 0b22caa9738d37f5: 5,224 calls, 49,754 Function variables, 235,667 instructions),
+# and Qualcomm's compiler (891.14) took 32-59 s on each of them on the replay thread. Here each call of such a helper becomes the load of its first argument, which is
+# what the helper returns at scale 1, and the helper goes; promote_locals then turns the call's temporaries (and every other single-store temporary) into values.
+SUPPORT_RENDER_SCALE = 5   # Ryujinx SupportBufferField.RenderScale: the support buffer's member (float4[73], .x read)
+GLSL_FABS = 4
+F32_ONE = 0x3f800000
+
+
+def render_scale_helper(m, fid):
+    """True when function fid is the translator's TexelFetchScale or TextureSizeUnscale: it returns a 32-bit int, its parameters are Function pointers, it writes
+    nothing but its own variables and calls nothing, and its first conditional branch, on (render scale == 1.0) with the scale (or its absolute value) loaded from
+    the support buffer's RenderScale member, goes to a block that returns the load of its first parameter"""
+    a, e = m.function_range(fid)
+    body = m.ins[a:e + 1]
+    rt = body[0][1]
+    if m.int_type(rt) != (32, 1): return False
+    params, k = [], 1
+    while body[k][0] & 0xffff == OP_FUNCTION_PARAMETER: params.append(body[k]); k += 1
+    if len(params) not in (2, 3) or any(m.op(p[1]) != OP_TYPE_POINTER or m.types[p[1]][2] != SC_FUNCTION for p in params): return False
+    if m.pointee(params[0][1])[1] != rt: return False
+    sb = next((v for v, (p, sc) in m.vars.items() if sc == SC_UNIFORM and m.names.get(v) == 'support_buffer'), None)
+    if sb is None: return False
+    own = {x[2] for x in body if x[0] & 0xffff == OP_VARIABLE}
+    defs, stores, blocks, cur = {}, {}, {}, None
+    for x in body[k:]:
+        op = x[0] & 0xffff
+        if op == OP_LABEL: cur = x[1]; blocks[cur] = []; continue
+        if cur is not None: blocks[cur].append(x)
+        if op == OP_STORE:
+            if x[1] not in own: return False
+            stores.setdefault(x[1], []).append(x[2])
+        elif op in (OP_FUNCTION_CALL, OP_IMAGE_WRITE, OP_IMAGE_TEXEL_POINTER, OP_KILL, OP_TERMINATE_INVOCATION, OP_DEMOTE_TO_HELPER, OP_CONTROL_BARRIER, OP_MEMORY_BARRIER, 63) \
+                or 227 <= op <= 242 or op in _OPS_FROM_1: return False   # (63 OpCopyMemory, 227-242 atomics)
+        if len(x) > 2 and op not in NO_RESULT_OPS: defs[x[2]] = x
+
+    def resolve(i):   # through loads of a variable of its own stored once, and copies
+        for _ in range(64):
+            x = defs.get(i)
+            if x is None: return i, None
+            op = x[0] & 0xffff
+            if op == OP_LOAD and len(x) == 4 and len(stores.get(x[3], ())) == 1: i = stores[x[3]][0]; continue
+            if op == OP_COPY_OBJECT: i = x[3]; continue
+            return i, x
+        return i, None
+    br = next((x for x in body[k:] if x[0] & 0xffff == OP_BRANCH_CONDITIONAL), None)
+    if br is None: return False
+    _, cmp_ = resolve(br[1])
+    if cmp_ is None or cmp_[0] & 0xffff != OP_FORD_EQUAL: return False
+
+    def is_one(i):
+        i, _ = resolve(i); c = m.consts.get(i)
+        return c is not None and m.op(c[0]) == OP_TYPE_FLOAT and c[1] == [F32_ONE]
+
+    def is_scale(i):
+        _, x = resolve(i)
+        if x is not None and x[0] & 0xffff == OP_EXT_INST and x[4] == GLSL_FABS and len(x) == 6: _, x = resolve(x[5])
+        if x is None or x[0] & 0xffff != OP_LOAD: return False
+        ch = defs.get(x[3])
+        if ch is None or ch[0] & 0xffff not in (OP_ACCESS_CHAIN, OP_IN_BOUNDS_ACCESS_CHAIN) or ch[3] != sb or len(ch) < 5: return False
+        c = m.consts.get(ch[4])
+        return c is not None and c[1] == [SUPPORT_RENDER_SCALE]
+    if not ((is_one(cmp_[4]) and is_scale(cmp_[3])) or (is_one(cmp_[3]) and is_scale(cmp_[4]))): return False
+    t = blocks.get(br[2], [])
+    return (len(t) == 2 and t[0][0] & 0xffff == OP_LOAD and len(t[0]) == 4 and t[0][3] == params[0][2] and t[0][1] == rt
+            and t[1][0] & 0xffff == OP_RETURN_VALUE and t[1][1] == t[0][2])
+
+
+def unit_render_scale(m):
+    """Each call of a render scale helper (render_scale_helper) replaced by the load of its first argument, the value the helper returns at render scale 1.0, and the
+    helpers removed. → the number of calls replaced (0: the module is left as it is)"""
+    ent = m.entry_function() if m.entry else None
+    hs = {x[2] for x in m.ins if x[0] & 0xffff == OP_FUNCTION and x[2] != ent}
+    hs = {f for f in hs if render_scale_helper(m, f)}
+    if not hs: return 0
+    calls = 0
+    for x in m.ins:
+        if x[0] & 0xffff == OP_FUNCTION_CALL and x[3] in hs:
+            x[:] = [4 << 16 | OP_LOAD, x[1], x[2], x[4]]; calls += 1
+    for f in hs:
+        a, e = m.function_range(f)
+        gone = {y[2] for y in m.ins[a:e + 1] if len(y) > 2 and (y[0] & 0xffff) not in NO_RESULT_OPS} | {y[1] for y in m.ins[a:e + 1] if y[0] & 0xffff == OP_LABEL} | {f}
+        del m.ins[a:e + 1]
+        m.ins = [y for y in m.ins if not (y[0] & 0xffff in (OP_NAME, OP_DECORATE) and y[1] in gone)]
+    m.index()
+    return calls
+
+
 # ---------- Mesh plane stores deferred to one scatter (defer_mesh_plane_stores) ----------
 # A Switch 2 mesh program writes its outputs through the translator's plane stores (SpirvMeshEntry.cs mesh_plane_store: the plane word and its value → a chain of
 # guarded stores, one per plane, into the mesh outputs). Drivers inline every function call, so each call site carries the whole chain: Ocarina of Time's foliage

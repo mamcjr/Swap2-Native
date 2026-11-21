@@ -34,6 +34,21 @@ static char g_tag[96];   // the custom driver in use (file-name safe), empty for
 
 const char *vka_driver_tag(void) { return g_tag[0] ? g_tag : NULL; }
 
+// Whether the custom driver is what runs (from Banana Native v0.3.43, community PR 409): adrenotools hands back the system's driver when the custom library does not load,
+// logging only to logcat, and the host went on saying "custom (DM_VK_DRIVER)". The custom library is what runs when its file is mapped in the process (vka_driverpath.h)
+#include "vka_driverpath.h"
+static char g_dir[1024], g_name[256];   // the folder and library adrenotools was asked for
+void vka_driver_lib(const char **dir, const char **name) { *dir = g_tag[0] ? g_dir : NULL; *name = g_tag[0] ? g_name : NULL; }
+// 1: the custom driver's library is mapped (call after vkCreateInstance); 0: not (adrenotools fell back to the system's); -1: not known (no custom driver, maps not readable)
+int vka_driver_mapped(void) {
+    if (!g_tag[0]) return -1;
+    char folder[256]; vkdp_last(g_dir, folder, sizeof folder);
+    FILE *f = fopen("/proc/self/maps", "re"); if (!f) return -1;
+    char ln[1024]; int m = 0;
+    while (!m && fgets(ln, sizeof ln, f)) { size_t n = strlen(ln); if (n && ln[n - 1] == '\n') ln[--n] = 0; m = vkdp_line_maps(ln, n, folder, g_name); }
+    fclose(f); return m;
+}
+
 // "libraryName" from a driver folder's meta.json: the one string value the loader needs (a small JSON file; no parser for one key)
 static int meta_library(const char *dir, char *out, size_t cap) {
     char p[1024]; snprintf(p, sizeof p, "%s/meta.json", dir);
@@ -152,6 +167,7 @@ static void *driver_open(void) {
     const char *base = dir + strlen(dir) - 1; while (base > dir && base[-1] != '/') base--;   // the folder's name, else the library's
     char b[128]; snprintf(b, sizeof b, "%.*s", (int)(dir + strlen(dir) - 1 - base), base);
     set_tag(b[0] ? b : name);
+    snprintf(g_dir, sizeof g_dir, "%s", dir); snprintf(g_name, sizeof g_name, "%s", name);
     DLOG("custom GPU driver: %s%s (hooks in %s), its own pipeline cache file (vk_pipelines-%s" VKA_PCACHE_GEN "[" VKA_PCACHE_PFB "].bin unless DM_VK_PCACHE names one)", dir, name, hook, g_tag);
     return lib;
 }

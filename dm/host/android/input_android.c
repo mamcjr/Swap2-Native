@@ -310,18 +310,47 @@ static void cpu_line(const char *what) {
     else LOG("[lifecycle] %s: threads' CPU since the process started %.2f s (%d threads)%s%s", what, (double)total / hz, threads, tlen ? "; busiest: " : "", tl);   // the first line: no earlier reading
     memcpy(g_cpu, cur, (size_t)n * sizeof cur[0]); g_ncpu = n; g_cpu_at = now;
 }
-static void suspend_apply(const char *why) {
-    int want = g_bg || g_pause;
-    if (want == g_susp) return;
-    g_susp = want;
-    if (want) {
-        dm_focus_set(2); dm_focus_set(3); audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); dm_guest_suspend(1); crash_watch_hold(1);
-        cpu_line(why);
-    } else {
-        cpu_line(why);
-        crash_watch_hold(0); dm_guest_suspend(0); dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); audio_apply(); dm_focus_set(2);
-        if (g_resumed) dm_focus_set(1);
+// Suspending and resuming run on a lifecycle thread of their own, never on the launcher's UI thread that reports the events: dm_gfx_suspend(1) waits for the submission in
+// progress and the GPU work in flight, and the replay can be inside the driver's compiler for a minute (Hyrule Warriors: Age of Imprisonment's KTGL compute pipelines, 32-59 s
+// each on Qualcomm 891.14): the in-game panel's Pause then held the UI thread and Android reported the game "not responding" (2026-11-17). Android, unlike iOS, does not
+// require the GPU to be idle when an activity stops. The UI thread only records the wanted state (g_bg, g_pause) under g_lc_mu; the thread applies it without the lock and
+// sets g_susp, so events that arrive meanwhile are never kept waiting, and a Pause and its Continue that both come during one drain end in one resume after it
+static pthread_cond_t g_lc_cv = PTHREAD_COND_INITIALIZER;
+static const char *g_lc_why;
+static void *lifecycle_main(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&g_lc_mu);
+    for (;;) {
+        int want;
+        while ((want = g_bg || g_pause) == g_susp) pthread_cond_wait(&g_lc_cv, &g_lc_mu);
+        const char *why = g_lc_why ? g_lc_why : want ? "paused" : "continued";
+        if (want) {
+            g_susp = 1; audio_apply();
+            pthread_mutex_unlock(&g_lc_mu);
+            dm_focus_set(2); dm_focus_set(3); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); dm_guest_suspend(1); crash_watch_hold(1);
+            cpu_line(why);
+            pthread_mutex_lock(&g_lc_mu);
+        } else {
+            pthread_mutex_unlock(&g_lc_mu);
+            cpu_line(why);
+            crash_watch_hold(0); dm_guest_suspend(0); dm_gfx_suspend(0); guest_clock_freeze_for(1, 0);
+            pthread_mutex_lock(&g_lc_mu);
+            g_susp = 0; audio_apply(); dm_focus_set(2);
+            if (g_resumed) dm_focus_set(1);
+        }
     }
+    return NULL;
+}
+static void lifecycle_start(void) {
+    pthread_t th;
+    if (pthread_create(&th, NULL, lifecycle_main, NULL)) { LOG("[RED] lifecycle: no thread for suspending and resuming; pause and background do nothing"); return; }
+    pthread_setname_np(th, "dm-lifecycle"); pthread_detach(th);
+}
+static void suspend_apply(const char *why) {   // under g_lc_mu: hands the wanted state to the lifecycle thread
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, lifecycle_start);
+    g_lc_why = why;
+    pthread_cond_signal(&g_lc_cv);
 }
 void nxhost_audio_interrupt(bool on) {
     pthread_mutex_lock(&g_lc_mu);

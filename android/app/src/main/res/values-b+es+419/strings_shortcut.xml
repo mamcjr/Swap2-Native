@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">Agregar a la pantalla principal</string>
+    <string name="s2_shortcut_add_note">Un acceso directo en la pantalla principal del teléfono que inicia este juego</string>
+    <string name="s2_shortcut_unsupported">La app de pantalla principal de este teléfono no acepta accesos directos.</string>
+    <string name="s2_shortcut_gone">%1$s ya no está en %2$s. Agrega el juego de nuevo para usar este acceso directo.</string>
+    <string name="s2_shortcut_missing">No se encontró %1$s: %2$s</string>
+    <string name="s2_shortcut_blocked_title">¿No aparece el acceso directo en la pantalla principal?</string>
+    <string name="s2_shortcut_blocked">En los teléfonos Xiaomi, Redmi y POCO, la pantalla principal solo agrega accesos directos con el permiso Accesos directos en la pantalla principal. Permítelo para %1$s en los permisos de la app (Otros permisos) y vuelve a agregar el acceso directo.</string>
+    <string name="s2_shortcut_permissions">Permisos de la app</string>
+</resources>

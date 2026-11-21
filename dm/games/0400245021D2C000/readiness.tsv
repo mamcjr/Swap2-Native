@@ -1,0 +1,9 @@
+# What this game needs of an Android phone, for the launcher's readiness check (android/README.md "Readiness check"; the format in dm/games/README.md "Readiness rows").
+# <required|degraded> <TAB> <fact> <TAB> <at least> <TAB> <title>: <why>. Facts: what vka_readiness.c reports, ram_gib (ActivityManager totalMem in GiB) and android.sdk.
+# A table of its own, not game.tsv rows: game.tsv is part of a pack's rewrite key (pack_android.py rewrite_key), and a change here must not make packs stale.
+
+# Profile from upstream Banana Native, not yet played here: the bring-up warning on every phone
+status	bring-up
+
+# Memory: the profile gives the game the Switch 2's 9 GiB (app_pool 0x240000000, as on the console), which a phone of less than about 12 GB cannot back (upstream's Mac runs: 5.6 GB resident in the first habitat). Not measured on a phone yet
+required	ram_gib	10	Memory: the game is given the Switch 2's 9 GB, which a phone with less than about 12 GB cannot give it

@@ -1,0 +1,36 @@
+#version 450
+// agl's NDSR slot on a temporal upscaler (vka_ndsr.c, DM_VK_NDSR=gsr2): the inputs GSR2 3-pass takes (vka_dlss.c vka_dlss_gsr2_views), made from the network's input
+// colour and the scene's depth. Our own shader (MIT, Swap2-Native), in the DLSS stand-in's layout (combined samplers 0..3, storage images 4 and 5, 128 bytes of push constants).
+//   pass 0: the colour, linear: the network input's texel squared when sqrt_in (agl's light upscaler packs sqrt(colour) as RGB9E5, blend a335c1db6270c355), into binding 4
+//   pass 1: camera motion from depth: this texel's point (its device depth) taken to this frame's clip space, through r = prev_VP * inverse(VP) (vka_tsr_cam.h, computed
+//           in double on the CPU, the depth mode folded in) to the previous frame's, the motion in texels, previous minus current (DLSS's convention), into binding 4 (.xy); the depth, reversed
+//           (near larger) as GSR2 reads it, into binding 5 (.x). Only the camera moves things here: what moves by itself (Link, NPCs, foliage) is GSR2's depth and
+//           velocity rejection's to catch. The CPU reference is vka_tsr_cam.h vka_tsr_motion_ref (t_android_tsr_cam.c)
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D depthTex;   // the scene's D32F (depth aspect), render size
+layout(set = 0, binding = 1) uniform sampler2D colourTex;  // the network's input
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D out0;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D out1;
+layout(push_constant) uniform P { mat4 r; ivec2 size; int pass; int yup; int zero_one; int rev; int sqrt_in; } pc;   // r: row-major on the CPU, so the GLSL column-major mat4 is its transpose
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, pc.size))) return;
+    if (pc.pass == 0) {
+        vec3 c = max(texelFetch(colourTex, p, 0).rgb, vec3(0.0));
+        if (pc.sqrt_in != 0) c *= c;
+        imageStore(out0, p, vec4(c, 1.0));
+        return;
+    }
+    float z = texelFetch(depthTex, p, 0).x;
+    vec2 uv = (vec2(p) + 0.5) / vec2(pc.size);
+    vec4 c = vec4(2.0 * uv.x - 1.0, pc.yup != 0 ? 1.0 - 2.0 * uv.y : 2.0 * uv.y - 1.0, z, 1.0);   // (the depth as stored: r has GL's 2z - 1 folded in, vka_tsr_reproj)
+    vec4 q = c * pc.r;   // (row vector times the transpose: r times the column c)
+    vec2 m = vec2(0.0);
+    if (q.w > 1e-8) {
+        vec2 n = q.xy / q.w;
+        vec2 puv = vec2(0.5 * n.x + 0.5, pc.yup != 0 ? 0.5 - 0.5 * n.y : 0.5 * n.y + 0.5);
+        m = (puv - uv) * vec2(pc.size);
+    }
+    imageStore(out0, p, vec4(m, 0.0, 1.0));
+    imageStore(out1, p, vec4(pc.rev != 0 ? z : 1.0 - z, 0.0, 0.0, 1.0));
+}

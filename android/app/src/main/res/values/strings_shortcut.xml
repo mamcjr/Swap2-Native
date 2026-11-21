@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen shortcuts to a game (GameShortcuts, ShortcutLaunch; the Manage sheet's Add to Home screen) -->
+<resources>
+    <string name="s2_shortcut_add">Add to Home screen</string>
+    <string name="s2_shortcut_add_note">A shortcut on the phone\'s Home screen that starts this game</string>
+    <string name="s2_shortcut_unsupported">This phone\'s Home screen app does not accept shortcuts.</string>
+    <string name="s2_shortcut_gone">%1$s is no longer in %2$s. Add the game again to use this shortcut.</string>
+    <string name="s2_shortcut_missing">%1$s was not found: %2$s</string>
+    <string name="s2_shortcut_blocked_title">No shortcut on the Home screen?</string>
+    <string name="s2_shortcut_blocked">On Xiaomi, Redmi and POCO phones the Home screen adds shortcuts only with the permission Home screen shortcuts. Allow it for %1$s in its app permissions (Other permissions), then add the shortcut again.</string>
+    <string name="s2_shortcut_permissions">App permissions</string>
+</resources>

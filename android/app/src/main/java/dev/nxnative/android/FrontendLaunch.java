@@ -48,7 +48,7 @@ public final class FrontendLaunch extends Activity {
             String id = null, err = null;
             try { id = Pack.titleIdOf(game); } catch (IOException e) { err = e.getMessage(); }   // a .nup's TOC is hashed: off the main thread
             String fid = id, ferr = err;
-            Game g = ferr == null ? ready(game, fid) : null;
+            Game g = ferr == null ? ready(this, game, fid) : null;
             runOnUiThread(() -> {
                 if (isFinishing()) return;
                 if (ferr != null) fail(ferr);
@@ -79,14 +79,14 @@ public final class FrontendLaunch extends Activity {
      * The game's card when it can start now: its card (or a new one, saved, when its pack is found), a game this APK has, no save backup or restore working, a pack
      * that reads, is of this title and of this game build and rewritten with the mods there are now (PackCheck.playBlocking), has a RomFS for it and this version's shader library. null: Home asks (launch)
      */
-    private Game ready(File game, String id) {
+    static Game ready(android.content.Context c, File game, String id) {
         if (Profile.missing(id, "This game") != null) return null;
-        List<Game> list = Game.load(this);
+        List<Game> list = Game.load(c);
         List<String> dirs = new ArrayList<>();
         for (Game g : list) dirs.add(g.gameDir);
         int at = Frontend.card(dirs, game.getPath());
         Game card = at >= 0 ? list.get(at) : null;
-        File packDir = card != null ? new File(card.packDir) : Folders.packFor(this, game, id);
+        File packDir = card != null ? new File(card.packDir) : Folders.packFor(c, game, id);
         if (packDir == null || SaveUi.busy(id)) return null;
         Pack p;
         try {
@@ -96,14 +96,14 @@ public final class FrontendLaunch extends Activity {
         } catch (IOException e) {
             return null;
         }
-        if (PackCheck.playBlocking(this, p, game) != null || Pack.libraryProblem(packDir, id) != null) return null;
+        if (PackCheck.playBlocking(c, p, game) != null || Pack.libraryProblem(packDir, id) != null) return null;
         if (card != null) return card;
         Game g = new Game(id, p.name.isEmpty() ? id : p.name, game.getPath(), packDir.getPath());
         synchronized (Game.class) {
-            List<Game> now = Game.load(this);
+            List<Game> now = Game.load(c);
             now.removeIf(x -> Frontend.same(x.gameDir, game.getPath()));
             now.add(g);
-            Game.save(this, now);
+            Game.save(c, now);
         }
         return g;
     }
@@ -113,7 +113,7 @@ public final class FrontendLaunch extends Activity {
             if (!g.titleId.equalsIgnoreCase(tid)) continue;
             File game = new File(g.gameDir);
             new Thread(() -> {
-                Game r = ready(game, g.titleId);
+                Game r = ready(this, game, g.titleId);
                 runOnUiThread(() -> { if (isFinishing()) return; if (r != null) play(r); else home(game); });
             }, "nx-frontend").start();
             return;

@@ -10,10 +10,12 @@ Only the files the Android host needs to load a custom Vulkan driver (`ADRENOTOO
 `GPL-2.0 WITH Linux-syscall-note`, as its SPDX line says). Left out: the BCn enabler, the GSL-allocation hook, the tools.
 
 Changed here: `hook_fopen` in `src/hook/hook_impl.cpp` redirects only `qgl_config.txt` (`/data/vendor/gpu` and `/data/misc/gpu`), and only when the redirected copy
-opens; upstream redirected every path but `/proc` and `/sys`. `main_hook.c` has the Binder stub its comment describes. `src/hook/file_redirect_hook.c` is upstream's
+opens; upstream redirected every path but `/proc` and `/sys`. `main_hook.c` has the Binder stub its comment describes (in the loader's namespace, where the driver
+does not see it); for a custom driver on API < 36, `hook_android_dlopen_ext` also loads `libbinder_compat_hook.so` (`android/host/adreno_binder_compat.c`, after
+Banana Native `f71720e0`) into the driver's namespace with `RTLD_GLOBAL`, so Qualcomm's 891.x drivers find the API 36 Binder annotation they import. `src/hook/file_redirect_hook.c` is upstream's
 `fopen` interposer (`dm/gfx/vk_android/vka_driver.c` `DM_QGL`).
 
-`android/host/CMakeLists.txt` builds `libnxadreno.so` (driver.cpp + linkernsbypass) and the hook libraries `libhook_impl.so`, `libmain_hook.so` and
-`libfile_redirect_hook.so`. The host (`dm/gfx/vk_android/vka_driver.c`) opens `libnxadreno.so` only when `DM_VK_DRIVER` names a driver or `DM_QGL` is set, so the
+`android/host/CMakeLists.txt` builds `libnxadreno.so` (driver.cpp + linkernsbypass) and the hook libraries `libhook_impl.so`, `libmain_hook.so`,
+`libfile_redirect_hook.so` and `libbinder_compat_hook.so`. The host (`dm/gfx/vk_android/vka_driver.c`) opens `libnxadreno.so` only when `DM_VK_DRIVER` names a driver or `DM_QGL` is set, so the
 system driver path without them loads none of this code
 (linkernsbypass's constructor changes the protection of `dlopen`'s page).

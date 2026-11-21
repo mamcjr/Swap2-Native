@@ -361,6 +361,13 @@ To enroll a cut for any game's own module:
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (SDK 22.2.8).
 - **Check:** `patch_nso.py` prints `<module>: N key-A pointer authentication instructions → key B`; a two-thread `pacia` / `pacib` test on the phone shows which keys are per thread.
 
+### Atomics at an unaligned address on a core without FEAT_LSE2 (Android)
+
+- **Symptom:** `CRASH sig=7` with `fault: code 1 (BUS_ADRALN)` at an LSE atomic (`ldadd` / `ldclr` / `swp` / `cas` ...) whose address is not a multiple of the access size, on a Snapdragon 888 class phone (Cortex-X1, A78, A55: Armv8.2) and not on newer ones. Banana Native's case on Ocarina of Time: `ldadd w9, w8, [x8]` at `main+0x104e4c`, x8 = `0x...5f1`.
+- **Cause:** Switch 2 code relies on FEAT_LSE2 (Armv8.4), with which an unaligned atomic that stays inside one 16-byte block is one atomic access; before it every unaligned LSE atomic is an alignment fault. Ocarina of Time embeds an object at +0xd1 of another and adds to its reference count with `ldadd`, so the address is odd. The code and the address are the game's own: the host handed it nothing wrong.
+- **Fix:** on Android arm64, `crash.c` `on_crash` decodes the instruction at a `BUS_ADRALN` (`lse_unaligned.h`: LDADD, LDCLR, LDEOR, LDSET, LDSMAX, LDSMIN, LDUMAX, LDUMIN, SWP and CAS, 32 and 64 bit, every acquire / release form, also with the result register XZR) and does it again atomically on the aligned 16-byte block holding the bytes (`ldaxp` / `stlxp`, so an aligned atomic on a neighbouring word stays ordered with it). It writes the old value to the register and goes on at the next instruction. Bytes across a 16-byte block are done under a lock, atomic only against another such access. Each access costs one signal; the log line `[dm] unaligned atomic ... done in software: this CPU has no FEAT_LSE2` comes at the 1st, 1,000th and 100,000th. Unit test: `t_lse_unaligned`. Ported from Banana Native v0.3.40 (commit e6b6f0d0, MIT).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), in Banana Native (their issue #343, Galaxy S21 Ultra); not yet seen on this fork's test phones, and not checked on an Armv8.2 phone here (open).
+
 ## Relocations and module layout
 
 ### Packed relative relocations (DT_RELR)

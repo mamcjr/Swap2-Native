@@ -193,6 +193,12 @@ HLE_FORCE("_ZN2nn2oe34DisableAlbumImageTakenNotificationEv", "screenshot-taken n
 // the SDK otherwise dereferences the absent am SelfController at sdk+0x33b0f0.
 // As with Disable, there is no producer: the host has no Horizon album captures.
 HLE_FORCE("_ZN2nn2oe33EnableAlbumImageTakenNotificationEv", "screenshot-taken notifications (through am); the host takes no system screenshots", void, h_oe_AlbumNotifyOn, void) {}
+// Star Fox (SDK 21): the game marks the sections where it shows the player's own photographs (GameChat's camera pictures on screen); the system keeps those out of captures. No captures here
+HLE_FORCE("_ZN2nn2oe32BeginPresentPhotographedContentsEv", "photographed contents on screen: noted nowhere (no capture service)", void, h_oe_PhotoBegin, void) {}
+HLE_FORCE("_ZN2nn2oe30EndPresentPhotographedContentsEv", "photographed contents off screen", void, h_oe_PhotoEnd, void) {}
+HLE_FORCE("_ZN2nn2oe41ExitApplicationAndGoBackToInStoreDemoMenuEv", "the in-store demo's exit: the host runs no demo menu, the call is logged and ignored", void, h_oe_DemoExit, void) {
+    static int once; if (!once++) LOG("[RED] oe: ExitApplicationAndGoBackToInStoreDemoMenu called: ignored (no in-store demo menu)");
+}
 HLE_FORCE("_ZN2nn2oe24IsInStoreDemoModeEnabledEv", "retail store demo mode (through am); never", unsigned, h_oe_StoreDemo, void) { return 0; }
 HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi", "set the CPU/GPU clock config; the host does not scale clocks", void, h_oe_SetPerfCfg, int mode, int cfg) {
     LOG("oe::SetPerformanceConfiguration mode=%d cfg=%#x (ignored)", mode, cfg);

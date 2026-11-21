@@ -1104,3 +1104,171 @@ done:
     free(dset); free(dbind); free(pointee); free(alen); free(cval); free(ctype); free(mark);
     return out;
 }
+
+// vka_spv_gs_fill: a geometry shader that may end without emitting anything is made to emit one degenerate primitive instead (its vertices all at (0, 0, 0, -1), outside
+// the clip volume: the primitive covers nothing), so every input primitive has an output. Adreno renders in tiles: a binning pass runs the vertex and geometry stages to
+// sort the primitives into screen tiles, and the rendering pass runs them again. A geometry shader that decides by a float test whether to emit (Donkey Kong Bananza's
+// terrain culling shader 5d537f7630ec3671 emits only front-facing, on-screen triangles that cover a pixel) can decide differently in the two passes for a triangle on the
+// edge; with the camera inside the ground there are many, and Qualcomm's driver then draws stray triangles and stops the GPU for good (kgsl "possible gpu syncpoint
+// deadlock"). With a degenerate primitive in place of none it does not (Banana Native, Odin 2 Portal, Adreno 740).
+// Taken: one Geometry entry point, a points / line strip / triangle strip output whose OutputVertices holds one primitive, every OpEmitVertex / OpEndPrimitive in the entry
+// function (no streams), gl_Position as member 0 of an Output block or a BuiltIn Position Output variable, a vec4 of 32-bit floats. A Private flag is cleared at the start of
+// the entry function and set after each OpEmitVertex; before each OpReturn of the entry function, when it is still clear, the degenerate primitive is emitted (the other
+// outputs as they are). NULL with err empty: nothing to do (not such a shader); with err: not rewritten.
+// Adapted from Banana Native commit 0749171c (dm/gfx/vk_android/vka_spvpatch.c vka_spv_gs_fill, MIT), written against this file's helpers (it has no module table)
+uint32_t *vka_spv_gs_fill(const uint32_t *w, size_t nw, size_t *out_nw, char *err, size_t errn) {
+#define FAIL(...) do { snprintf(err, errn, __VA_ARGS__); goto fail; } while (0)
+    enum { GF_ModeOutputVertices = 26, GF_ModeOutputPoints = 27, GF_ModeOutputLineStrip = 28, GF_ModeOutputTriangleStrip = 29, GF_ExecGeometry = 3,
+           GF_OpEmitVertex = 218, GF_OpEndPrimitive = 219, GF_OpEmitStreamVertex = 220, GF_OpEndStreamPrimitive = 221, GF_OpNoLine = 317, GF_OpTypeVoid = 19,
+           GF_BIPosition = 0 };
+    vec_t o = {0}, decl = {0}; uint8_t *posblk = NULL; uint32_t *dop = NULL, *da1 = NULL, *da2 = NULL;
+    err[0] = 0;
+    if (!w || nw < 5 || w[0] != 0x07230203u || !w[3] || w[3] > (1u << 24)) FAIL("not SPIR-V");
+    uint32_t bound = w[3];
+    // Per id, for the types and globals: the defining opcode and two operands (a type: its words 2 and 3; OpVariable: its result type and storage class).
+    // posblk 1: a struct whose member 0 is BuiltIn Position; 2: an id decorated BuiltIn Position
+    if (!(posblk = calloc(bound, 1)) || !(dop = calloc(bound, 4)) || !(da1 = calloc(bound, 4)) || !(da2 = calloc(bound, 4))) FAIL("out of memory");
+    uint32_t ep = 0, ep_at = 0, neps = 0, nv = 0, maxv = 0, first_fn = 0, t_bool = 0, posvar_direct = 0;
+    for (size_t i = 5; i < nw;) {   // (an OpExecutionMode comes after its OpEntryPoint: the entry point is known by then)
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) FAIL("bad instruction length");
+        if (op == OpFunction) { first_fn = (uint32_t)i; break; }
+        if (op == OpEntryPoint && len >= 3) { neps++; if (w[i + 1] == GF_ExecGeometry) { ep = w[i + 2]; ep_at = (uint32_t)i; } }
+        if (op == OpExecutionMode && len >= 3 && ep && w[i + 1] == ep) {
+            uint32_t m = w[i + 2];
+            if (m == GF_ModeOutputVertices && len >= 4) maxv = w[i + 3];
+            else if (m == GF_ModeOutputPoints) nv = 1; else if (m == GF_ModeOutputLineStrip) nv = 2; else if (m == GF_ModeOutputTriangleStrip) nv = 3;
+        }
+        if (op == OpMemberDecorate && len >= 5 && w[i + 2] == 0 && w[i + 3] == DecBuiltIn && w[i + 4] == GF_BIPosition && w[i + 1] < bound) posblk[w[i + 1]] = 1;
+        if (op == OpDecorate && len >= 4 && w[i + 2] == DecBuiltIn && w[i + 3] == GF_BIPosition && w[i + 1] < bound) posblk[w[i + 1]] = 2;
+        if (op == OpTypeBool && len >= 2) t_bool = w[i + 1];
+        if (op >= GF_OpTypeVoid && op <= OpTypeForwardPointer && len >= 2 && w[i + 1] < bound) { uint32_t id = w[i + 1]; dop[id] = op; da1[id] = len >= 3 ? w[i + 2] : 0; da2[id] = len >= 4 ? w[i + 3] : 0; }
+        if (op == OpVariable && len >= 4 && w[i + 2] < bound) { uint32_t id = w[i + 2]; dop[id] = op; da1[id] = w[i + 1]; da2[id] = w[i + 3]; }
+        i += len;
+    }
+    if (!ep || neps != 1 || !nv || maxv < nv || !first_fn) goto none;
+    // The emits: all in the entry function, none to a stream
+    uint32_t fn = 0, nemit = 0;
+    for (size_t i = first_fn; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) FAIL("bad instruction length");
+        if (op == OpFunction && len >= 3) fn = w[i + 2];
+        if (op == GF_OpEmitStreamVertex || op == GF_OpEndStreamPrimitive) goto none;
+        if (op == GF_OpEmitVertex || op == GF_OpEndPrimitive) { if (fn != ep) goto none; nemit += op == GF_OpEmitVertex; }
+        i += len;
+    }
+    if (!nemit) goto none;
+    // gl_Position: an Output variable of a block with member 0 Position (a chain to member 0), or one decorated Position itself
+    uint32_t posvar = 0, v4 = 0;
+    for (uint32_t v = 1; v < bound && !posvar; v++) {
+        if (dop[v] != OpVariable || da2[v] != SCOutput || da1[v] >= bound || dop[da1[v]] != OpTypePointer) continue;
+        uint32_t t = da2[da1[v]];
+        if (t < bound && dop[t] == OpTypeStruct && posblk[t] == 1) { posvar = v; v4 = da1[t]; }
+        else if (posblk[v] == 2) { posvar = v; posvar_direct = 1; v4 = t; }
+    }
+    if (!posvar || v4 >= bound || dop[v4] != OpTypeVector || da2[v4] != 4) goto none;
+    uint32_t t_f = da1[v4];
+    if (t_f >= bound || dop[t_f] != OpTypeFloat || da1[t_f] != 32) goto none;
+    // Declarations, before the first function: the module's own types where it has them (a second integer, boolean or pointer type of the same kind is invalid)
+    uint32_t nb = bound, t_u = 0, p_priv = 0, p_out = 0;
+    for (uint32_t t = 1; t < bound && !t_u; t++) if (dop[t] == OpTypeInt && da1[t] == 32 && da2[t] == 0) t_u = t;
+    if (!t_u) { t_u = nb++; uint32_t x[4] = {4u << 16 | OpTypeInt, t_u, 32, 0}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); }
+    if (!t_bool) { t_bool = nb++; uint32_t x[2] = {2u << 16 | OpTypeBool, t_bool}; if (!put_n(&decl, x, 2)) FAIL("out of memory"); }
+    for (uint32_t t = 1; t < bound && !p_priv; t++) if (dop[t] == OpTypePointer && da1[t] == SCPrivate && da2[t] == t_u) p_priv = t;
+    if (!p_priv) { p_priv = nb++; uint32_t x[4] = {4u << 16 | OpTypePointer, p_priv, SCPrivate, t_u}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); }
+    if (!posvar_direct) {
+        for (uint32_t t = 1; t < bound && !p_out; t++) if (dop[t] == OpTypePointer && da1[t] == SCOutput && da2[t] == v4) p_out = t;
+        if (!p_out) { p_out = nb++; uint32_t x[4] = {4u << 16 | OpTypePointer, p_out, SCOutput, v4}; if (!put_n(&decl, x, 4)) FAIL("out of memory"); }
+    }
+    uint32_t u0 = nb++, u1 = nb++, f0 = nb++, fm1 = nb++, dead = nb++, flag = nb++;
+    { uint32_t x[] = {4u << 16 | OpConstant, t_u, u0, 0, 4u << 16 | OpConstant, t_u, u1, 1, 4u << 16 | OpConstant, t_f, f0, 0, 4u << 16 | OpConstant, t_f, fm1, 0xbf800000u,
+                      7u << 16 | OpConstantComposite, v4, dead, f0, f0, f0, fm1, 4u << 16 | OpVariable, p_priv, flag, SCPrivate};
+      if (!put_n(&decl, x, sizeof x / 4)) FAIL("out of memory"); }
+    // Copy: the flag in the entry point's interface from SPIR-V 1.4 (every global there), the declarations before the first function, the entry function rewritten
+    if (!put_n(&o, w, 5)) FAIL("out of memory");
+    int in_ep = 0, cleared = 0, nret = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *in = w + i;
+        if (i == first_fn && !put_n(&o, decl.w, decl.n)) FAIL("out of memory");
+        if (i == ep_at && w[1] >= 0x10400) {
+            size_t at = o.n; if (!put_n(&o, in, len) || !put(&o, flag)) FAIL("out of memory");
+            o.w[at] = (uint32_t)(o.n - at) << 16 | OpEntryPoint; i += len; continue;
+        }
+        if (op == OpFunction && len >= 3) { in_ep = w[i + 2] == ep; cleared = 0; }
+        if (in_ep && !cleared && op != OpFunction && op != OpFunctionParameter && op != OpLabel && op != OpVariable && op != OpLine && op != GF_OpNoLine) {
+            uint32_t x[3] = {3u << 16 | OpStore, flag, u0}; if (!put_n(&o, x, 3)) FAIL("out of memory"); cleared = 1;
+        }
+        if (in_ep && op == OpReturn) {
+            uint32_t ld = nb++, z = nb++, fill = nb++, merge = nb++;
+            uint32_t x[] = {4u << 16 | OpLoad, t_u, ld, flag, 5u << 16 | OpIEqual, t_bool, z, ld, u0, 3u << 16 | OpSelectionMerge, merge, 0,
+                            4u << 16 | OpBranchConditional, z, fill, merge, 2u << 16 | OpLabel, fill};
+            if (!put_n(&o, x, sizeof x / 4)) FAIL("out of memory");
+            for (uint32_t k = 0; k < nv; k++) {
+                uint32_t dst = posvar;
+                if (!posvar_direct) { dst = nb++; uint32_t c[5] = {5u << 16 | OpAccessChain, p_out, dst, posvar, u0}; if (!put_n(&o, c, 5)) FAIL("out of memory"); }
+                uint32_t st[4] = {3u << 16 | OpStore, dst, dead, 1u << 16 | GF_OpEmitVertex}; if (!put_n(&o, st, 4)) FAIL("out of memory");
+            }
+            uint32_t y[] = {1u << 16 | GF_OpEndPrimitive, 2u << 16 | OpBranch, merge, 2u << 16 | OpLabel, merge};
+            if (!put_n(&o, y, sizeof y / 4)) FAIL("out of memory");
+            nret++;
+        }
+        if (!put_n(&o, in, len)) FAIL("out of memory");
+        if (in_ep && op == GF_OpEmitVertex) { uint32_t x[3] = {3u << 16 | OpStore, flag, u1}; if (!put_n(&o, x, 3)) FAIL("out of memory"); }
+        i += len;
+    }
+    if (!nret) FAIL("no OpReturn in the entry function");
+    o.w[3] = nb;
+    free(decl.w); free(posblk); free(dop); free(da1); free(da2);
+    *out_nw = o.n; return o.w;
+none:
+fail:
+    free(decl.w); free(posblk); free(dop); free(da1); free(da2); free(o.w);
+    return NULL;
+#undef FAIL
+}
+
+// vka_spv_shuffle_xor (from DroidPlay Core 8115593e, MIT, spv_shx.h): every OpGroupNonUniformShuffle as OpGroupNonUniformShuffleXor by lane ^ index. Qualcomm's shader
+// compiler in its V@07xx drivers dies on the translator's shuffle (SIGSEGV at fault address 0x48 in libllvm-qgl.so inside vkCreate*Pipelines: a Retroid Pocket 5's
+// Adreno 650 at V@0746, a Retroid Pocket G2's Adreno 735 at V@0762), and builds the same module once each shuffle is a ShuffleXor. lane ^ (lane ^ index) = index, so the
+// same lane is read whatever the index: OpLoad of the SubgroupLocalInvocationId built-in, OpBitwiseXor with the index (an integer of 32 bits, as Shuffle's Id must be
+// unsigned), ShuffleXor by the result with the shuffle's own type, scope and value. Needs the built-in's Input variable and a 32-bit unsigned type (every translated
+// module with a shuffle has both: the translator computes the shuffle's lane from it); without them nothing is rewritten and err says why
+uint32_t *vka_spv_shuffle_xor(const uint32_t *w, size_t nw, size_t *out_nw, int *sites, char *err, size_t errn) {
+    *sites = 0; err[0] = 0;
+    if (nw < 5 || w[0] != 0x07230203) { snprintf(err, errn, "not SPIR-V"); return NULL; }
+    uint32_t lane_dec = 0, lane = 0, tu = 0, bound = w[3]; int nsh = 0;
+    for (int pass = 0; pass < 2; pass++)   // the decoration comes before the variable in a valid module, but a second pass costs nothing and holds for any order
+        for (size_t i = 5; i < nw;) {
+            uint32_t len = w[i] >> 16, op = w[i] & 0xffff; const uint32_t *x = w + i;
+            if (!len || i + len > nw) { snprintf(err, errn, "bad instruction at word %zu", i); return NULL; }
+            if (pass == 0) {
+                if (op == OpDecorate && len >= 4 && x[2] == DecBuiltIn && x[3] == BISubgroupLocalInvocationId) lane_dec = x[1];
+                else if (op == OpTypeInt && len == 4 && x[2] == 32 && x[3] == 0 && !tu) tu = x[1];
+                else if (op == OpGNUShuffle) nsh++;
+            } else if (op == 59 && len >= 4 && lane_dec && x[2] == lane_dec && x[3] == 1) lane = x[2];   // OpVariable %ptr %id Input
+            i += len;
+        }
+    if (!nsh) return NULL;   // nothing to do
+    if (!lane || !tu) { snprintf(err, errn, "%d shuffles but no %s", nsh, !lane ? "SubgroupLocalInvocationId Input variable" : "32-bit unsigned integer type"); return NULL; }
+    if (bound + 2u * (uint32_t)nsh < bound) { snprintf(err, errn, "id bound overflow"); return NULL; }
+    vec_t o = {0};
+    if (!put_n(&o, w, 5)) goto oom;
+    for (size_t i = 5; i < nw;) {
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff; const uint32_t *x = w + i; i += len;
+        if (op == OpGNUShuffle && len == 6) {   // OpGroupNonUniformShuffle %type %r %scope %value %index
+            uint32_t l = bound++, m = bound++;
+            uint32_t y[] = {4u << 16 | OpLoad, tu, l, lane,                                       // OpLoad %uint %l %lane
+                            5u << 16 | 198, tu, m, l, x[5],                                       // OpBitwiseXor %uint %m %l %index
+                            6u << 16 | OpGNUShuffleXor, x[1], x[2], x[3], x[4], m};               // OpGroupNonUniformShuffleXor %type %r %scope %value %m
+            if (!put_n(&o, y, sizeof y / 4)) goto oom;
+            (*sites)++;
+            continue;
+        }
+        if (!put_n(&o, x, len)) goto oom;
+    }
+    if (!*sites) { free(o.w); snprintf(err, errn, "%d shuffles of an unexpected length", nsh); return NULL; }
+    o.w[3] = bound;
+    *out_nw = o.n; return o.w;
+oom:
+    free(o.w); snprintf(err, errn, "out of memory"); return NULL;
+}

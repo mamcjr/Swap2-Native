@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home's library order (MainActivity.sortOrder, LibraryOrder) -->
+<resources>
+    <string name="s2_sort">並べ替え</string>
+    <string name="s2_sort_title">ゲームを並べ替え</string>
+    <string name="s2_sort_name_asc">名前（A→Z）</string>
+    <string name="s2_sort_name_desc">名前（Z→A）</string>
+    <string name="s2_sort_release_asc">発売日（古い順）</string>
+    <string name="s2_sort_release_desc">発売日（新しい順）</string>
+    <string name="s2_sort_played_asc">最後にプレイ（古い順）</string>
+    <string name="s2_sort_played_desc">最後にプレイ（新しい順）</string>
+    <string name="s2_sort_now">ゲームを並べ替え: %1$s</string>
+</resources>
