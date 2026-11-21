@@ -205,6 +205,13 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md): reported on 1.0.0 in [PR #190](https://github.com/seedds/nxnative/pull/190); the 1.3.0 bring-up passed that transition before this fix.
 - **Check:** `t_audio_spsc` covers a partially consumed buffer, queue wraparound, release notification, repeated Stop and buffers queued before Start, then runs its 100,000-buffer producer/consumer stress test.
 
+### AudioOut crackle with large device callbacks
+
+- **Symptom:** regular clicks over a route whose callbacks are long (upstream: a Bluetooth headset on an iPhone, 278 to 279 frames a callback against 240 on the speaker, 669 underruns against 4 in 8,000 callbacks). On Android an AAudio Bluetooth stream can ask for large bursts the same way.
+- **Cause:** a guest that keeps two short buffers in flight can enter a callback with one partly played block and one full one. When those are shorter than the request, the callback fills the gap with zeros before the guest can refill a buffer it got back.
+- **Fix:** when a guest AudioOut callback asks for more than 5 ms and ends inside a block, the block's tail (at most 480 frames, 10 ms) is copied and the block given back at once, so the guest refills it between callbacks; the next consumer, the silent sink included, plays that copy first. `GetAudioOutBufferCount` and the watchdog's queue depth count the staged block until it has played (`q_played`); Stop discards it with the queued audio. OutputStream and the host's renderer output keep releasing whole blocks (`hle_audio.c`).
+- **Found on:** upstream nxnative 2e86b714 (Need for Speed: Hot Pursuit Remastered 1.0.3 on an iPhone with Bluetooth earbuds); ported for the Android AAudio output, no game of this fork measured yet.
+
 ### RemoteIO's default I/O buffer duration
 
 - **Symptom:** crackling on iOS only.

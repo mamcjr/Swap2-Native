@@ -52,6 +52,13 @@ The SDK's movie library (`movie::Decoder`, `movie::Extractor`), which the host t
 - **Fix:** the host now does the same (`md_event` in `hle_movie.c`). When the client's entry is not a readable, 8-byte aligned pointer, it falls back to the entry's value at registration if that was one (Dread's case), and otherwise logs a red line.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md).
 
+### A video batch needs another output event per output
+
+- **Symptom:** a movie freezes on one picture while its music goes on; the client waits for an output the host already has queued (`DM_MOVIE_TRACE`: outputs left, no further `AcquireOutputBufferIndex`).
+- **Cause:** the output event is auto-cleared and its signals coalesce. `md_pump` (an H.264 drain above all) can queue several outputs before the client wakes, and a client that takes one output per event then waits for good once no decode is left to signal one.
+- **Fix:** a video `h_movie_AcqOut` that leaves outputs queued re-arms the output event through the deferred thread (`md_defer_at`, due at once). The deferred thread signals an output event only while outputs are queued, checked under the decoder's lock, so a re-arm never fires after `Flush` emptied the queue; a video `Flush` then waits out a signal already being delivered by taking the deferred queue's lock (`hle_movie.c`).
+- **Found on:** upstream nxnative (34fa4691 and d1d126e3: Super Mario Sunshine froze at the first M graffiti, issue #2990); ported for this fork's movie players (Fire Emblem, Mario Tennis, Hyrule Warriors, Yoshi, Ocarina of Time), none of which had shown it.
+
 ### `Flush`, `Stop` and `Start`
 
 - **Fix:** as with MediaCodec, `Flush` announces nothing, and no input or output index is handed out while the decoder is stopped. The "input available" after `Start` is signalled about 2 ms later from a guest thread, as the SDK's codec thread would. Pending signals are dropped at `Stop`, `Flush` and destruction.

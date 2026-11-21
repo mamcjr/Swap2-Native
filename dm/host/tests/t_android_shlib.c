@@ -157,6 +157,27 @@ static void test_walk(void) {
         CHECK(r[12].what == VKA_R_SUPPORT, "support");
         CHECK(pool, "a pool record marks the draw as using set 1");
     }
+    {   // Sampler ID 0 in a handle that is not empty: pool slot 0, NVN's reserved sampler (VKA_SAMP_ZERO); an empty handle stays unbound (upstream nxnative 8e06d235)
+        static vka_bstate z; memset(&z, 0, sizeof z);
+        z.ubo[1][0] = (vka_range){0x10000, 256}; z.tex[1][3] = 8; z.samp_base = 200;
+        uint32_t zh = 5; memcpy(g_mem + 0x30, &zh, 4);   // a handle in uniform slot 0 at byte 0x30 with texture 5 and no sampler bits
+        dmsh_vk_bind zb[] = {
+            {.kind = DMSH_VK_KIND_TEX, .desc = 1, .binding = 258, .count = 1, .reg = 3, .skind = DMSH_VK_KIND_SAMP_TEX, .sreg = 3, .dim = 1},
+            {.kind = DMSH_VK_KIND_TEX, .desc = 1, .binding = 259, .count = 1, .reg = 4, .skind = DMSH_VK_KIND_SAMP_TEX, .sreg = 4, .dim = 1},
+            {.kind = DMSH_VK_KIND_TEX_UBO, .desc = 1, .binding = 260, .count = 1, .reg = 0, .off = 0x30, .skind = DMSH_VK_KIND_SAMP_UBO, .sreg = 0, .soff = 0x30, .dim = 1},
+            {.kind = DMSH_VK_KIND_SAMP_ID, .desc = 0, .binding = 261, .count = 1, .reg = 0, .dim = 1},
+        };
+        dmsh_vk_entry ze = {.stage = DMSH_VK_STAGE_FS, .bind_count = sizeof zb / sizeof *zb};
+        vka_res zr[8]; char zwhy[200] = "";
+        int zn = vka_walk(&z, 1, &ze, zb, 0, 64, rd, NULL, zr, 8, NULL, zwhy, sizeof zwhy);
+        CHECK(zn == 4, "reserved sampler walk: %d results (%s)", zn, zwhy);
+        if (zn == 4) {
+            CHECK(zr[0].what == VKA_R_TEX && zr[0].tid == 8 && zr[0].sid == VKA_SAMP_ZERO, "texture 8 with sampler ID 0 takes the reserved sampler: %d/%d", zr[0].tid, zr[0].sid);
+            CHECK(zr[1].what == VKA_R_NULL, "an empty combined handle stays unbound");
+            CHECK(zr[2].what == VKA_R_TEX && zr[2].tid == 5 && zr[2].sid == VKA_SAMP_ZERO, "a uniform handle with sampler ID 0 takes the reserved sampler, not the pool base: %d/%d", zr[2].tid, zr[2].sid);
+            CHECK(zr[3].what == VKA_R_TEX && zr[3].sid == VKA_SAMP_ZERO, "a shader's constant sampler ID 0 is the reserved sampler: %d", zr[3].sid);
+        }
+    }
     // A storage buffer off the device's alignment is refused (SHADERS.md open problem 2)
     dmsh_vk_bind un = {.kind = DMSH_VK_KIND_SBUF, .desc = 7, .binding = 256, .count = 1, .reg = 4};
     dmsh_vk_entry e1 = {.stage = DMSH_VK_STAGE_FS, .bind_count = 1};

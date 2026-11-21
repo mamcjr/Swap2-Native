@@ -754,4 +754,22 @@ int vka_prog_shaders(const prog_t *p, vka_progsh *out) {
     vka_prog_put(p->serial, out);
     return 1;
 }
+unsigned vka_prog_stage_mask(const prog_t *p) {
+    if (!p || !p->nstage) return 0;
+    static struct { uint64_t serial; unsigned mask; } memo[256];   // (a program's serial is new at each SetShaders: hle_nvn.c)
+    unsigned h = (unsigned)(p->serial ^ p->serial >> 8) & 255u;
+    if (p->serial && memo[h].serial == p->serial) return memo[h].mask;
+    pthread_mutex_lock(&g_mu); int ok = lib_load(); pthread_mutex_unlock(&g_mu);
+    if (!ok) return VKA_ST_UNKNOWN;
+    unsigned m = 0;
+    for (unsigned i = 0; i < p->nstage && i < 6; i++) {
+        uint8_t md[8];
+        if (!prog_key(p, i, md)) { m |= VKA_ST_UNKNOWN; continue; }
+        const dmsh_vk_entry *en = vka_shlib_find(&g_lib, vka_shlib_key(md));
+        int st = en ? vka_nvn_stage(en->stage) : -1;
+        m |= st >= 0 ? 1u << st : VKA_ST_UNKNOWN;
+    }
+    if (p->serial) { memo[h].serial = p->serial; memo[h].mask = m; }
+    return m;
+}
 #endif

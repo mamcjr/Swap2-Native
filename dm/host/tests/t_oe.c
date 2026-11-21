@@ -165,5 +165,7 @@ int main(void) {
         CHECK(p > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0, "DM_GRAPHICS_SCALE=2: scale 2 / parameters 30 in both modes");
         g_opmode = 1;
     }
+    reset(); h_oe_EnableCrashReport(); h_oe_DisableCrashReport();
+    CHECK(empty() && h_oe_GetFocus() == 1, "crash-report service switches require no SDK proxy or notifications");
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

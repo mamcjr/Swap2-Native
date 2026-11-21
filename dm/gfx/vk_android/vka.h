@@ -370,6 +370,10 @@ int vka_tex_id_int_class(int id, uint8_t *spv_fmt);   // texture ID id's integer
 VkSampler vka_samp_id_rec(int id, int iv);
 VkSampler vka_samp_id(int id, int iv);              // sampler ID id; VK_NULL_HANDLE = not registered. iv: its twin for an integer view (nearest, INT border; vka_tex.c sampler_of)
 VkSampler vka_samp_default(void);                   // the sampler an unbound sampler slot reads with (nearest, clamp to edge)
+// The sampler at slot 0 of every sampler pool: NVN's driver writes it when the pool is initialized (linear min / mag, no mipmaps, clamp to edge: Mario vs. Donkey Kong's SDK 15.3.0
+// SamplerPoolInitialize, Metroid Dread's 11.4.3, DK Bananza's NVN2 20.5.19; upstream nxnative 8e06d235). Sampler ID 0 in a handle that is not empty selects it; an empty handle
+// stays unbound (vka_samp_default). Its sampler ID in a vka_res is VKA_SAMP_ZERO (vka_bind.h), which vka_samp_id takes
+void vka_samp_pool_seed(int base);                  // a sampler pool at this base is bound: its slot 0 (sampler ID base, for shaders that index the pool) gets that sampler unless the game registered one
 
 // ---------- Shaders (vka_shader.c) ----------
 // The game's Vulkan shader library, <pack>/shaders/v-<DMSH_VK_CHAIN>/dmsh_vk.lib (DM_VK_SHLIB overrides the path), loaded at the first program the replay resolves.
@@ -399,6 +403,8 @@ typedef struct vka_shader {
 typedef struct { vka_shader *sh[VKA_NSTAGE]; unsigned bad; } vka_progsh;   // by NVN stage; bad: stages whose shader is refused (bit = NVN stage) or VKA_BAD_MISSING (their draws are skipped)
 #define VKA_BAD_MISSING (1u << VKA_NSTAGE)   // vka_progsh.bad: a stage's shader is not in the library (its NVN stage unknown)
 int vka_prog_shaders(const prog_t *p, vka_progsh *out);      // 1 = resolved (stages the program lacks are NULL); 0 = no library or no program
+#define VKA_ST_UNKNOWN (1u << VKA_NSTAGE)   // vka_prog_stage_mask: a stage whose shader is not in the library (or no library)
+unsigned vka_prog_stage_mask(const prog_t *p);   // the NVN stages a program's shaders take (bit = NVN stage, 6 / 7 task / mesh), from the library's index without making modules
 void vka_prog_put(uint64_t serial, const vka_progsh *ps);   // a program made by the host itself (the selftest), by serial
 vka_shader *vka_shader_make(const vka_shlib *L, uint64_t key);
 const char *vka_shader_lib_path(void);   // the library file loaded ("" before or without one): this version's, or an older one of the same ABI

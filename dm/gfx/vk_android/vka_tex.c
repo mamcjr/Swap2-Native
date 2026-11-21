@@ -1891,6 +1891,9 @@ void mtl_tex_cpu_written(const tex_t *t) {
 // One update-after-bind set: binding 0 the texture pool (sampled images, up to 2^20), 1 the sampler pool (up to 4096), 2 images (storage). A registration writes its slot at the next
 // submission. Nothing draws yet, so no command buffer holds the set while it is written
 static samp_par *g_sreg; static int g_nsreg;
+// NVN's reserved sampler of pool slot 0 (vka.h VKA_SAMP_ZERO): linear min / mag, no mipmaps, clamp to edge on all axes, LOD 0..15
+static const samp_par g_samp_zero = {.minf = NVN_MIN_FILTER_LINEAR, .magf = NVN_MAG_FILTER_LINEAR, .ws = NVN_WRAP_MODE_CLAMP_TO_EDGE, .wt = NVN_WRAP_MODE_CLAMP_TO_EDGE,
+                                     .wr = NVN_WRAP_MODE_CLAMP_TO_EDGE, .lod_max = 15.0f};
 static int *g_sdirty; static int g_nsd, g_sdcap;
 static uint8_t *g_sdflag;
 static VkDescriptorSetLayout g_dsl; static VkDescriptorPool g_dpool; static VkDescriptorSet g_set;
@@ -2146,6 +2149,16 @@ void mtl_reg_samp(int id, const samp_par *p) {
     if (!g_sver) g_sver = calloc(4096 * 4, sizeof *g_sver);
     if (g_sver) atomic_fetch_add_explicit(&g_sver[id], 1, memory_order_release);
     pthread_mutex_unlock(&g_tmu);
+}
+void vka_samp_pool_seed(int base) {
+    static uint8_t seeded[4096 * 4];
+    if (base < 0 || base >= 4096 * 4 || seeded[base]) return;
+    seeded[base] = 1;
+    static const samp_par none;
+    pthread_mutex_lock(&g_tmu);
+    int taken = base < g_nsreg && memcmp(&g_sreg[base], &none, sizeof none);
+    pthread_mutex_unlock(&g_tmu);
+    if (!taken) mtl_reg_samp(base, &g_samp_zero);   // (a registration of the game's own at that ID replaces it, as on the GPU)
 }
 void mtl_set_tex_pool_n(int n) { (void)n; }
 
@@ -2649,7 +2662,8 @@ vka_img *vka_tex_id_acquire(int id, VkImageView v, int *own_view) {
 }
 void vka_samp_id_desc(int id, char *b, size_t n) {
     pthread_mutex_lock(&g_tmu);
-    if (id <= 0 || id >= g_nsreg) snprintf(b, n, "sampler ID %d not registered", id);
+    if (id == VKA_SAMP_ZERO) snprintf(b, n, "pool slot 0, NVN's reserved sampler (linear, no mipmaps, clamp to edge)");
+    else if (id <= 0 || id >= g_nsreg) snprintf(b, n, "sampler ID %d not registered", id);
     else { samp_par p = g_sreg[id]; snprintf(b, n, "sampler ID %d: filter %d/%d wrap %d/%d/%d compare mode %d func %d reduction %d lod %g..%g bias %g", id, p.minf, p.magf, p.ws, p.wt, p.wr,
                                              p.cmp_mode, p.cmp_func, p.reduction, p.lod_min, p.lod_max, p.lod_bias); }
     pthread_mutex_unlock(&g_tmu);
@@ -2676,6 +2690,7 @@ int vka_tex_id_pending(int id) {
 VkSampler vka_samp_id(int id, int iv) {
     pthread_mutex_lock(&g_tmu);
     VkSampler s = VK_NULL_HANDLE; iv = iv != 0;
+    if (id == VKA_SAMP_ZERO) { static VkSampler z[2]; if (!(s = z[iv])) s = z[iv] = sampler_of(&g_samp_zero, iv); pthread_mutex_unlock(&g_tmu); return s; }
     if (id > 0 && id < g_nsreg) {
         if (id >= g_nsres) { int n = g_nsreg; g_sres = realloc(g_sres, (size_t)n * sizeof *g_sres); memset(g_sres + g_nsres, 0, (size_t)(n - g_nsres) * sizeof *g_sres); g_nsres = n; }
         if (!(s = g_sres[id][iv])) s = g_sres[id][iv] = sampler_of(&g_sreg[id], iv);

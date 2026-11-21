@@ -553,7 +553,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, checked: v131072 main: 2818201e at +0x6e6cc4, the stub words and the liveness of s0/x16/x17 after the site, by disassembly: frame ratio from the host frame step. The game's own frame ratio, base / the fps its controller picked
 - **`build` → `engine`**, rendering, blocked: the layout is not yet checked on this build (DM_VK_NDSR_CAM_LOG on a phone); one gsys game read so far, judgement: Ocarina of Time's scene context block layout (the camera's rows) for the temporal path in agl's NDSR slot (vka_ndsr.c, DM_VK_NDSR=gsr2, DM_VK_NDSR_CAM_LOG). Gsys's scene context block: if Donkey Kong Bananza and Mario Kart World lay it out the same, the block could be found by its size and its vertex shaders' reads instead of a build ID
 
-- **v131072 `main`** `e0f3ccfa…` ([patches.py:41](../../dm/games/0400486024DEC000/patches.py#L41))
+- **1.1.1 `main`** `e0f3ccfa…` ([patches.py:41](../../dm/games/0400486024DEC000/patches.py#L41))
   - frame step `+0x6e6cc4`: frame step: the frame ratio is the host's vsyncs times the base rate / 60 (state page target fps; 0 = the game's own fps)
   - host [vka_ndsr.c:159](../../dm/gfx/vk_android/vka_ndsr.c#L159): scene camera block layout for the temporal NDSR path
 

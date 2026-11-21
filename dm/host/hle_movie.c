@@ -191,7 +191,12 @@ static void md_defer_body(void *arg) {
         if (k >= 0) {
             mdec_t *d = g_dfq[k].d; int e = g_dfq[k].ev;
             memmove(g_dfq + k, g_dfq + k + 1, (size_t)(--g_ndfq - k) * sizeof *g_dfq);
-            if (d->started) md_event(d, e);   // not after Stop: the game takes its events apart right after Stop (a Stop within 2 ms of a Flush let the deferred signal hit events being torn down)
+            // Not after Stop: the game takes its events apart right after Stop (a Stop within 2 ms of a Flush let the deferred signal hit events being torn down). An output
+            // event only while outputs are queued: an acquisition can re-arm it (h_movie_AcqOut) after Flush emptied the queue. Stop takes these locks in the same order
+            dm_host_mutex_lock(&d->mu);
+            int ready = d->started && (e != 1 || d->noutq);
+            pthread_mutex_unlock(&d->mu);
+            if (ready) md_event(d, e);
             continue;
         }
         if (!next) pthread_cond_wait(&g_dfcv, &g_dfmu);
@@ -666,6 +671,7 @@ HLE_FORCE("_ZN5movie7Decoder5ResetEv", "movie decoder reset", int, h_movie_Reset
 HLE_FORCE("_ZN5movie7Decoder5FlushEv", "movie decoder flush: all inputs and outputs returned", int, h_movie_Flush, void **self) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
     MD_TRACE(d, 5, "Flush"); md_defer_drop(d); md_reset(d, 0);
+    if (!MD_AUDIO(d)) { dm_host_lock(&g_dfmu); pthread_mutex_unlock(&g_dfmu); }   // a deferred output signal taken before the drop may still be running: wait it out (it signals holding g_dfmu), new ones stay queued (upstream nxnative d1d126e3)
     // A seek: start the overlap afresh. The decoder is closed and the next packet opens it again from the headers (md_vorbis_open). stb_vorbis_flush_pushdata is not used: it puts the decoder into its page search mode,
     // and the packets md_vorbis hands it after that (one whole page per call) never gave a sample again (Smash: the opening movie lost its sound for good after the first Flush; t_movie_vpx)
     if (d->vb) { dm_host_lock(&d->dmu); stb_vorbis_close(d->vb); d->vb = NULL; pthread_mutex_unlock(&d->dmu); }
@@ -744,7 +750,13 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
         *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; d->out[s].cli = 1; r = 0;
     }
     pthread_mutex_unlock(&d->mu);
-    if (!r && !MD_AUDIO(d)) atomic_store_explicit(&g_movie_pic_ns, now_ns(), memory_order_relaxed);
+    if (!r && !MD_AUDIO(d)) {
+        atomic_store_explicit(&g_movie_pic_ns, now_ns(), memory_order_relaxed);
+        // Signals of an auto-cleared event coalesce: md_pump's drain can queue several outputs before the client wakes, and a client that takes one output per event
+        // (Super Mario Sunshine's Hagi, upstream nxnative 34fa4691: a freeze at a movie, music going on) waits for good once no decode is left to signal. Re-arm it
+        // while outputs are left, from the deferred thread (after mu: Stop takes the deferred queue's lock before mu)
+        if (*left) md_defer_at(d, 1, now_ns());
+    }
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
     return r;
 }

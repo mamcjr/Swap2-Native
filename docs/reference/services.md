@@ -739,6 +739,13 @@ Most service calls can be found before they crash, before the first boot or the 
   - The adjustable user clock (`time::AdjustableUserSystemClock::GetCurrentTime`, which the game's days follow) reads the time service's shared memory in the SDK (`MonotonicSystemClock::GetCurrentTime`, `sdk+0x4421cc`), which the host never maps, so it is the host's clock, as the user clock; `time::GetStandardSteadyClockCurrentTimePoint`, the free-function form of the steady clock ([Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) SDK 20.5.4, found in `main`'s imports before the first boot).
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md).
 
+### A game restart or a phone sleep reports a user clock change
+
+- **Symptom:** after a normal game restart, or (Android) after the phone slept, a game that watches the user clock context can take it as the clock being set: upstream saw Pokemon Brilliant Diamond record a new time penalty and skip daily or weekly events. The log line `time: host clock moved … new user clock context` without a clock set by hand.
+- **Cause:** the first user clock context in each process subtracted the whole-second steady time from the whole-second wall time, so it depended on the sampling phase and could differ by one second from one run to the next. The refresh compared the wall time with the guest ticks, which stop while a game is paused. And on Android the steady clock was `CLOCK_MONOTONIC`, which stops while the phone sleeps (Horizon's steady clock counts on), so a sleep moved the wall clock against it.
+- **Fix:** the wall time is read between two steady reads, the pair is subtracted at nanosecond precision and the offset rounded to whole seconds; the snapshot takes its user time and steady time point from the same pair; the refresh compares the offset with the steady clock, still past one whole second (`hle_time.c`, upstream nxnative 75863bdd). The steady clock is `CLOCK_BOOTTIME` where the platform has it (Linux, Android), which counts sleep as Apple's `CLOCK_MONOTONIC` does.
+- **Found on:** upstream nxnative (Pokemon Brilliant Diamond 1.3.0 on macOS); the sleep case is this fork's reading of Linux's clocks, not yet seen on a game.
+
 ### Hooks whose return type did not match the SDK
 
 - **Symptom:** a call the host answers reads as failed when it succeeded, or reads leftover register bits. Super Smash Bros. Ultimate refills the Spirit Board at every visit, since the elapsed time between two snapshots never reads as known.
@@ -790,6 +797,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** a library's `free` rejects a pointer (`CentralHeap::Free` → `NotNMallocPtrError`).
 - **Cause:** the game's `main` defines its own `operator new` / `delete` (Unity's memory manager) and `sdk` has a copy forwarding to `malloc` / `free`.
 - **Fix:** symbols are resolved globally in load order (the first module's definition wins, also for a module's references to its own exports); only local / non-default-visibility symbols bind to the module itself (`loader.c`). The loader logs how many references bind to an earlier module.
+
+### Module initializers run dependencies first
+
+- **Symptom:** a crash during `main`'s static initializers, before `nnMain`: a null-vptr read inside the sdk module's `std::ostream::write`, called from a game log helper that `std::cout.write`s its first line.
+- **Cause:** `run_module_inits` called each module's DT_INIT in forward order of the load list (main, subsdk0, sdk). The list puts dependents first and dependencies last: `main`'s initializers already write to `std::cout`, which the sdk module's DT_INIT (libc++'s `ios_base::Init`) constructs.
+- **Fix:** the DT_INITs run in reverse load order (`loader.c`), so a module's dependencies initialize before it; the timing is unchanged (after `nninitStartup` and `_init_libc2`, before `nnMain`).
+- **Found on:** upstream nxnative (acd6bd02, Little Busters! Converted Edition, SDK 8.3.2); no game of this fork showed it.
 
 ### Undefined weak imports bind to 0
 

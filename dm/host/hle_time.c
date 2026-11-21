@@ -7,6 +7,14 @@
 
 typedef struct { int16_t year; int8_t month, day, hour, minute, second; int8_t pad; } CalendarTime;
 typedef struct { uint32_t wday, yday; char tzname[8]; uint32_t dst; int32_t offset; } CalendarAdditionalInfo;
+static const int64_t ns_per_second = 1000000000;
+// The steady clock. Horizon's counts on through sleep; Linux's CLOCK_MONOTONIC stops while an Android phone sleeps and CLOCK_BOOTTIME does not, so on
+// Android a sleep would move the wall clock against the steady one and read as the user clock being set (a new context below). Apple's CLOCK_MONOTONIC counts sleep
+#ifdef CLOCK_BOOTTIME
+#define STEADY_CLOCK CLOCK_BOOTTIME
+#else
+#define STEADY_CLOCK CLOCK_MONOTONIC
+#endif
 
 // DM_FIXED_TIME=seconds (for deterministic comparison): the user clock always returns this value (and main.c pins the host time zone to UTC)
 static int64_t fixed_time(void) {
@@ -18,9 +26,9 @@ static int64_t fixed_time(void) {
 HLE_FORCE("_ZN2nn4time10InitializeEv", "connect to the time service; clocks come from the host system time instead", Result, h_time_Initialize, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn4time13IsInitializedEv", "the time service is taken over, always initialized", int, h_time_IsInitialized, void) { return 1; }
 // Steady clock (seconds since boot + a clock source ID, a 16-byte UUID): the host's monotonic seconds with a fixed source ID. GetSpanBetween runs as is in sdk: it subtracts only when the source IDs match
+static void write_steady_point(uint8_t *out, int64_t seconds) { memcpy(out, &seconds, 8); memcpy(out + 8, "dmhost-steady-01", 16); }
 HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock → host monotonic clock (seconds), fixed source ID", Result, h_time_SteadyNow, uint8_t *out) {
-    int64_t s = (int64_t)(plat_clock_ns(CLOCK_MONOTONIC) / 1000000000ull);
-    memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
+    write_steady_point(out, (int64_t)(plat_clock_ns(STEADY_CLOCK) / ns_per_second)); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "user clock → host time()", Result, h_time_GetCurrentTime, int64_t *out) {
@@ -44,26 +52,39 @@ HLE_FORCE("_ZN2nn4time43GetAdjustableUserSystemClockCurrentTimespecEP8timespec",
 // shared memory, which the host never maps. Unbound, the call fails and std::chrono::steady_clock::now() throws std::system_error: Well Dweller reached that at its first frame timer read (sdk+0x5f2e58
 // → std::terminate). The host's monotonic clock is the steady clock here, so clock_gettime and the steadiness agree
 static int h_time_mono_timespec(int64_t *ts) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); ts[0] = t.tv_sec; ts[1] = t.tv_nsec; return 0;
+    struct timespec t; clock_gettime(STEADY_CLOCK, &t); ts[0] = t.tv_sec; ts[1] = t.tv_nsec; return 0;
 }
 HLE_FORCE("_ZN2nn4time37GetStandardSteadyClockCurrentTimespecEP8timespec", "C library monotonic clock from the steady clock → host monotonic time", int, h_time_MonoTimespec, int64_t *ts) { return h_time_mono_timespec(ts); }
 // User clock context (0x20 bytes: s64 offset + the steady time point it was made at; user time = offset + a steady time point of the same source ID, the snapshot below fills its +0x00 the same way).
 // The SDK reads it from the time service's shared memory, which the host never opens: it returns 0x74 and writes nothing. Unity's DateTime.UtcNow (Engage main+0x4ad40c; Ace Attorney Investigations
 // 1&2 per PR #14) then never starts its clock and reads 0001-01-01. Unity takes its time from GetCurrentTime plus system ticks and only compares the context to notice the clock being set, so like a
-// Switch's it stays the same until the host clock moves against the guest ticks by more than a second (clock set by hand, a sleep mach_absolute_time did not count); with DM_FIXED_TIME it is made once
+// Switch's it stays the same until the host clock moves against the steady clock by more than a second (clock set by hand); with DM_FIXED_TIME it is made once.
+// The offset is wall minus steady time taken as a pair (the wall read bracketed by two steady reads) and subtracted before rounding to whole seconds: rounding each
+// first made it depend on the phase of the first read in each process, so a game restart could read as a clock change (upstream nxnative 75863bdd, a renewed time
+// penalty in Pokemon Brilliant Diamond). It is compared with the steady clock, not the guest ticks, which stop while the game is paused
+typedef struct { int64_t wall_ns, steady_ns; } TimeSample;
+static TimeSample sample_clocks(void) {
+    int64_t before = (int64_t)plat_clock_ns(STEADY_CLOCK), wall = (int64_t)plat_clock_ns(CLOCK_REALTIME), after = (int64_t)plat_clock_ns(STEADY_CLOCK);
+    return (TimeSample){wall, before + (after - before) / 2};
+}
+static TimeSample read_clock_context(uint8_t *out, int64_t fixed) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint8_t ctx[0x20]; static int64_t anchor_offset; static int made;
+    pthread_mutex_lock(&mu);
+    TimeSample sample = sample_clocks();
+    int64_t delta_ns = sample.wall_ns - sample.steady_ns, steady = sample.steady_ns / ns_per_second;
+    int64_t off = fixed >= 0 ? fixed - steady : (delta_ns + (delta_ns >= 0 ? ns_per_second / 2 : -ns_per_second / 2)) / ns_per_second;
+    if (!made || (fixed < 0 && llabs(off - anchor_offset) > 1)) {
+        if (made) LOG("time: host clock moved %+lld s against the steady clock, new user clock context", (long long)(off - anchor_offset));
+        memcpy(ctx, &off, 8); write_steady_point(ctx + 8, steady);
+        anchor_offset = off; made = 1;
+    }
+    memcpy(out, ctx, sizeof ctx);
+    pthread_mutex_unlock(&mu);
+    return sample;
+}
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE", "user clock context from the time service; the host's user clock over its steady clock, renewed when the host clock is set",
           Result, h_time_GetContext, uint8_t *out) {
-    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint8_t ctx[0x20]; static int64_t drift; static int made;
-    uint8_t tp[0x18]; int64_t now; h_time_SteadyNow(tp); h_time_GetCurrentTime(&now);
-    int64_t d = now - (int64_t)(guest_ns() / 1000000000ull);
-    pthread_mutex_lock(&mu);
-    if (!made || (fixed_time() < 0 && llabs(d - drift) > 1)) {
-        int64_t off = now - *(const int64_t *)tp; memcpy(ctx, &off, 8); memcpy(ctx + 8, tp, 0x18);
-        if (made) LOG("time: host clock moved %+lld s against the guest ticks, new user clock context", (long long)(d - drift));
-        drift = d; made = 1;
-    }
-    memcpy(out, ctx, 0x20);
-    pthread_mutex_unlock(&mu);
+    read_clock_context(out, fixed_time());
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "user clock → host time()", int64_t, h_time_now, void) {
@@ -92,12 +113,12 @@ HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "ne
 // Offline, the network fields stay 0, so CalculateSpanBetween (below) uses the steady time points (same source ID)
 HLE_FORCE("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", "snapshot from the time service; the host fills it on the spot (offline: network clock 0)", Result, h_time_Snapshot, uint8_t *s) {
     memset(s, 0, 0xd0);
-    uint8_t tp[0x18]; h_time_SteadyNow(tp);
-    int64_t now; h_time_GetCurrentTime(&now);
-    h_time_GetContext(s);   // +0x00: the user clock context, the same in every snapshot until the host clock is set (worked out per snapshot it moved by a second at random, a "clock change" to the user difference below)
+    int64_t fixed = fixed_time();
+    TimeSample sample = read_clock_context(s, fixed);   // +0x00: the user clock context, the same in every snapshot until the host clock is set (worked out per snapshot it moved by a second at random, a "clock change" to the user difference below)
+    int64_t now = fixed >= 0 ? fixed : sample.wall_ns / ns_per_second;   // the user time and the steady point from the same clock pair as the context
     memcpy(s + 0x40, &now, 8);
     h_time_ToCalendarTime((CalendarTime *)(s + 0x50), (CalendarAdditionalInfo *)(s + 0x60), &now);
-    memcpy(s + 0x90, tp, 0x18);
+    write_steady_point(s + 0x90, sample.steady_ns / ns_per_second);
     tzset(); strlcpy((char *)s + 0xa8, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
     s[0xcd] = 1;   // The SDK passes type 1 for standard snapshots, 2 for adjustable snapshots; 0 is uninitialized.
     return RES_OK;

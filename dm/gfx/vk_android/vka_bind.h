@@ -48,6 +48,7 @@ typedef struct {
     int32_t tid, sid;
     uint64_t addr, size;
 } vka_res;
+#define VKA_SAMP_ZERO (-1)   // vka_res.sid of NVN's reserved sampler at pool slot 0 (vka.h vka_samp_id), told apart from 0, no sampler
 
 // Reads guest memory for handles kept in uniform buffers (TEX_UBO, SAMP_UBO, SBUF_UBO): 1 = read, 0 = not readable (the value reads as 0)
 typedef int (*vka_read_fn)(void *ctx, uint64_t addr, void *out, size_t n);

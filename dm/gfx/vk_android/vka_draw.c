@@ -51,10 +51,15 @@ int nvn_dpool_base(const void *pool, int tex);   // hle_nvn.c: where a descripto
 int vka_state_op(vka_dstate *d, uint32_t op, const void *a) {
     if (!d->inited) vka_dstate_reset(d);
     switch (op) {
-    case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: { int tex = op == OP_SET_TEX_POOL, b = nvn_dpool_base(((const p_set_pool *)a)->pool, tex); if (tex) d->b.tex_base = b; else d->b.samp_base = b; break; }
-    case OP_BIND_PROGRAM: { const p_bind_program *b = a;
-        if (b->stages & 0x20) d->cprog = b->prog;
-        for (int st = 0; st < VKA_NSTAGE; st++) if (st != 5 && (b->stages >> st & 1)) d->bst[st] = b->prog;   // NVN binds per stage (nvn_mtl.m bind_stages); 6 / 7: NVN2's task and mesh
+    case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: { int tex = op == OP_SET_TEX_POOL, b = nvn_dpool_base(((const p_set_pool *)a)->pool, tex); if (tex) d->b.tex_base = b; else { d->b.samp_base = b; vka_samp_pool_seed(b); } break; }
+    case OP_BIND_PROGRAM: { const p_bind_program *b = a; int stages = b->stages;
+        if (stages & 0x20) d->cprog = b->prog;
+        // A graphics program with no vertex (or task / mesh) shader bound with the vertex bit leaves the vertex stage as it was, as the GPU does: a game that makes one program
+        // per shader binds each with all graphics bits (BindProgram(vs, 0x1f), then BindProgram(ps, 0x1f); upstream nxnative e59c910a, Little Busters! Converted Edition,
+        // black without it). Fragment, geometry and tessellation still unbind when absent (vertex-only programs bound with 0x1f after VS + FS), a mesh program still takes the
+        // vertex slot, and a null, compute-only or partly unknown program binds as before
+        if (b->prog && (stages & 1)) { unsigned m = vka_prog_stage_mask(b->prog); if ((m & 0x1e) && !(m & (1u | 1u << 6 | 1u << 7 | VKA_ST_UNKNOWN))) stages &= ~1; }
+        for (int st = 0; st < VKA_NSTAGE; st++) if (st != 5 && (stages >> st & 1)) d->bst[st] = b->prog;   // NVN binds per stage (nvn_mtl.m bind_stages); 6 / 7: NVN2's task and mesh
         break; }
     case OP_BIND_STATE: {
         const p_bind_state *b = a; blend_st bs;

@@ -14,7 +14,7 @@ typedef struct aa_out *au_t; typedef int32_t au_status_t;   // an AAudio stream 
 #include <stdatomic.h>
 #include <unistd.h>
 
-enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
+enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000, STAGED_FRAMES = RATE / 100 };
 enum { BK_NONE, BK_AU, BK_NULL };   // what is consuming an output's queue right now (aout.backend)
 
 typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // The first 24 bytes written into the guest AudioOutBuffer
@@ -25,11 +25,15 @@ typedef struct {
     pthread_mutex_t m;
     void *event;                       // Guest SystemEvent: signaled whenever a buffer is released
     int ch;
+    int allow_early_release;           // a guest AudioOut (not an OutputStream or the host's renderer output): its buffer can go back as soon as its PCM is copied (pull_pcm)
     _Atomic int state;
     _Atomic uint32_t vol;              // SetAudioOutVolume gain as float bits (1.0 at open), applied to the samples as they are pulled
     gbuf *q[QMAX]; _Atomic uint32_t q_head, q_tail;       // Pending: written by the game side, read by the output side
+    _Atomic uint32_t q_played;         // playback head: trails q_head by one while a released block's tail is staged
     gbuf *rel[RELMAX]; _Atomic uint32_t rel_head, rel_tail; // Released: written by the output side, read by the game side
     uint64_t pos;                      // Bytes already played of the current block
+    uint8_t staged[STAGED_FRAMES * sizeof(int16_t) * 8];   // up to 10 ms of PCM (eight channels at most) of a block already given back; owned by the active consumer, like pos
+    size_t staged_pos, staged_size;
     au_t au;
     int backend;                       // BK_*: the running consumer. Start, Stop and the background suspend change it only under g_aos_lock and act on it rather than re-deriving it from state and g_suspended
     pthread_t null_th; _Atomic int null_run;
@@ -92,10 +96,18 @@ static void *event_notify(void *p) {
 }
 
 // Take n bytes from the pending queue and hand them to the output side; once a whole block has played, move it to released and notify the ordinary thread.
-static void pull(aout *a, uint8_t *dst, uint64_t n) {
+// stage_tail: a large device request that ends inside a block copies that block's tail (at most 10 ms) and gives the block back at once, so its producer has until the next
+// callback to refill it even when it keeps only two blocks queued (upstream nxnative 2e86b714: crackle over Bluetooth, whose callbacks are large). The tail plays first next time
+static void pull_pcm(aout *a, uint8_t *dst, uint64_t n, int stage_tail) {
     int released = 0;
     int16_t *s16 = (int16_t *)dst; uint64_t ns = n / 2;
     uint32_t qh = atomic_load_explicit(&a->q_head, memory_order_relaxed);
+    if (a->staged_pos < a->staged_size && atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED) {
+        size_t ready = a->staged_size - a->staged_pos, used = n < ready ? (size_t)n : ready;
+        memcpy(dst, a->staged + a->staged_pos, used);
+        a->staged_pos += used; dst += used; n -= used;
+        if (a->staged_pos == a->staged_size) atomic_store_explicit(&a->q_played, qh, memory_order_release);
+    }
     while (n) {
         uint32_t qt = atomic_load_explicit(&a->q_tail, memory_order_acquire);
         if (qh == qt || atomic_load_explicit(&a->state, memory_order_acquire) != STATE_STARTED) {
@@ -105,14 +117,20 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
         uint64_t k = b->size - a->pos; if (k > n) k = n;
         memcpy(dst, (uint8_t *)b->ptr + a->pos, k);
         dst += k; n -= k; a->pos += k;
+        uint64_t tail = b->size - a->pos;
+        if (!n && stage_tail && tail && tail <= sizeof a->staged && tail <= STAGED_FRAMES * sizeof(int16_t) * (unsigned)a->ch) {
+            memcpy(a->staged, (uint8_t *)b->ptr + a->pos, (size_t)tail);
+            a->staged_pos = 0; a->staged_size = (size_t)tail; a->pos = b->size;
+        }
         if (a->pos >= b->size) {
             uint32_t rw = atomic_load_explicit(&a->rel_tail, memory_order_relaxed);
             uint32_t rr = atomic_load_explicit(&a->rel_head, memory_order_acquire);
             if (rw - rr == RELMAX) die("AudioOut released queue overflow");
             a->rel[rw & (RELMAX - 1)] = b;
-            atomic_store_explicit(&a->rel_tail, rw + 1, memory_order_release);
             qh++;
             atomic_store_explicit(&a->q_head, qh, memory_order_release);
+            if (a->staged_pos == a->staged_size) atomic_store_explicit(&a->q_played, qh, memory_order_release);
+            atomic_store_explicit(&a->rel_tail, rw + 1, memory_order_release);
             a->pos = 0; released = 1;
         }
     }
@@ -126,19 +144,23 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
         if (a->rel_sem) plat_sem_signal(a->rel_sem);
     }
 }
+static void pull(aout *a, uint8_t *dst, uint64_t n) { pull_pcm(a, dst, n, 0); }
+// Blocks appended and not played to the end: a block whose tail is staged still counts until the tail has played
+static unsigned queued_pcm_blocks(aout *a) { return atomic_load_explicit(&a->q_tail, memory_order_acquire) - atomic_load_explicit(&a->q_played, memory_order_acquire); }
 
 // A six-channel output (front-left front-right center LFE back-left back-right) goes to the device as stereo, downmixed here with the audio renderer's default Q15 coefficients (hle_audren.c):
 // Core Audio's own 6 → 2 mapping keeps only the front pair, so voices on the center (Luigi's Mansion 3) and the back channels were silent. The queue still takes all six guest channels,
 // in blocks through a stack buffer (no allocation in the real-time callback)
 static int device_channels(const aout *a) { return a->ch == 6 ? 2 : a->ch; }
 static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
-    if (a->ch != 6) { pull(a, dst, bytes); return; }
+    if (a->ch != 6) { pull_pcm(a, dst, bytes, a->allow_early_release && bytes > (RATE / 200) * sizeof(int16_t) * (unsigned)a->ch); return; }   // (a request past 5 ms)
     enum { BLOCK = 128, CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
     int16_t scratch[BLOCK * 6], *out = (int16_t *)dst;
     uint64_t frames = bytes / (2 * sizeof *out);
+    int stage_tail = a->allow_early_release && frames > RATE / 200;
     while (frames) {
         uint64_t n = frames < BLOCK ? frames : BLOCK;
-        pull(a, (uint8_t *)scratch, n * 6 * sizeof *scratch);
+        pull_pcm(a, (uint8_t *)scratch, n * 6 * sizeof *scratch, stage_tail && n == frames);
         for (uint64_t i = 0; i < n; i++) {
             const int16_t *p = scratch + 6 * i;
             int64_t c = (int64_t)p[2] * CC + (int64_t)p[3] * CL;
@@ -161,7 +183,7 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
     {
         // At each 2000-callback checkpoint publish a snapshot for the watchdog: LOG takes a stdio lock and must never run here or in the release-event notifier.
         // A busy logger leaves its mailbox full; keep accumulating then, rather than waiting, overwriting its snapshot or losing counts.
-        uint32_t qd = atomic_load(&a->q_tail) - atomic_load(&a->q_head);
+        uint32_t qd = queued_pcm_blocks(a);
         if (!a->st_calls || frames < a->st_fmin) a->st_fmin = frames; if (frames > a->st_fmax) a->st_fmax = frames; a->st_qsum += qd;
         a->st_count++;
         if (++a->st_calls % 2000 == 0 && !atomic_load_explicit(&a->st_pending, memory_order_acquire)) {
@@ -257,7 +279,7 @@ static aaudio_data_callback_result_t aa_render(AAudioStream *s, void *ctx, void 
     (void)s; struct aa_out *o = ctx; aout *a = o->a;
     atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed); atomic_fetch_add_explicit(&a->cb_n, 1, memory_order_relaxed);
     {   // the watchdog's snapshot, as au_render keeps it
-        uint32_t qd = atomic_load(&a->q_tail) - atomic_load(&a->q_head), fr = (uint32_t)frames;
+        uint32_t qd = queued_pcm_blocks(a), fr = (uint32_t)frames;
         if (!a->st_calls || fr < a->st_fmin) a->st_fmin = fr; if (fr > a->st_fmax) a->st_fmax = fr; a->st_qsum += qd;
         a->st_count++;
         if (++a->st_calls % 2000 == 0 && !atomic_load_explicit(&a->st_pending, memory_order_acquire)) {
@@ -465,15 +487,16 @@ HLE_FORCE("_ZN2nn5audio13ListAudioOutsEPNS0_12AudioOutInfoEi", "audio output dev
 // its GetAudioOutSampleRate / ChannelCount / SampleFormat are single loads from there); CloseAudioOut sets the state to stopped and leaves the rest. Code outside the SDK reads these fields too:
 // middleware that checks the first word before it stops and closes its output skipped the close while the host left it zero, freed the PCM buffers and the host's consumer read freed memory (Luigi's Mansion 3, PR #109)
 static void au_info(void *g, int ch, int state) { uint32_t *f = g; f[0] = RATE; f[1] = (uint32_t)ch; f[2] = FMT_PCM16; f[3] = (uint32_t)state; }
-static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *param, void *lr) {
+enum { AU_GUEST_AUDIO_OUT, AU_OUTPUT_STREAM, AU_PCM_OUT };   // who opens an output (au_open_at): only a guest AudioOut lends its buffers per block (allow_early_release)
+static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *param, void *lr, int source) {
     static _Atomic int nopen;
     int ch = *(const uint16_t *)(param + 4); int rate = *(const int32_t *)param;
     if (!ch) ch = 2;
     if (rate && rate != RATE) die("AudioOut sample rate %d not supported (48 kHz only)", rate);
     aout *a = calloc(1, sizeof *a);
-    pthread_mutex_init(&a->m, NULL); a->event = ev; a->ch = ch;
+    pthread_mutex_init(&a->m, NULL); a->event = ev; a->ch = ch; a->allow_early_release = source == AU_GUEST_AUDIO_OUT;
     atomic_init(&a->state, STATE_STOPPED); atomic_init(&a->vol, 0x3f800000u);
-    atomic_init(&a->q_head, 0); atomic_init(&a->q_tail, 0);
+    atomic_init(&a->q_head, 0); atomic_init(&a->q_tail, 0); atomic_init(&a->q_played, 0);
     atomic_init(&a->rel_head, 0); atomic_init(&a->rel_tail, 0);
     atomic_init(&a->null_run, 0); atomic_init(&a->notify_run, 1);
     atomic_init(&a->notify_pending, 0); atomic_init(&a->notify_armed, 0);
@@ -497,15 +520,15 @@ static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *par
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKNS0_17AudioOutParameterE", "connect to the audout service; host AudioUnit / silent sink",
-          Result, h_au_Open, void *g, void *ev, const char *name, const uint8_t *param) { return au_open_at(g, ev, name, param, __builtin_return_address(0)); }
+          Result, h_au_Open, void *g, void *ev, const char *name, const uint8_t *param) { return au_open_at(g, ev, name, param, __builtin_return_address(0), AU_GUEST_AUDIO_OUT); }
 // The two default-device overloads (Engage, SDK 12): as OpenAudioOut with the default device name; the overload without an event binds no release event (the game polls GetReleasedAudioOutBuffer)
 // SDK 22 dropped the release event from the parameter-carrying overload (Well Dweller calls this one; unbound it reached the SDK's audout session, which fails with 0xe15 and the game aborts)
 HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPKcRKNS0_17AudioOutParameterE", "connect to the audout service, no release event (SDK 22 overload)",
-          Result, h_au_Open4, void *g, const char *name, const uint8_t *param) { return au_open_at(g, NULL, name, param, __builtin_return_address(0)); }
+          Result, h_au_Open4, void *g, const char *name, const uint8_t *param) { return au_open_at(g, NULL, name, param, __builtin_return_address(0), AU_GUEST_AUDIO_OUT); }
 HLE_FORCE("_ZN2nn5audio19OpenDefaultAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventERKNS0_17AudioOutParameterE", "connect to the audout service (default device); same as OpenAudioOut",
-          Result, h_au_OpenDef, void *g, void *ev, const uint8_t *param) { return au_open_at(g, ev, NULL, param, __builtin_return_address(0)); }
+          Result, h_au_OpenDef, void *g, void *ev, const uint8_t *param) { return au_open_at(g, ev, NULL, param, __builtin_return_address(0), AU_GUEST_AUDIO_OUT); }
 HLE_FORCE("_ZN2nn5audio19OpenDefaultAudioOutEPNS0_8AudioOutERKNS0_17AudioOutParameterE", "connect to the audout service (default device, no event); same as OpenAudioOut",
-          Result, h_au_OpenDef0, void *g, const uint8_t *param) { return au_open_at(g, NULL, NULL, param, __builtin_return_address(0)); }
+          Result, h_au_OpenDef0, void *g, const uint8_t *param) { return au_open_at(g, NULL, NULL, param, __builtin_return_address(0), AU_GUEST_AUDIO_OUT); }
 static Result au_start_at(void *g, void *lr) {
     aout *a = ao(g);
     pthread_mutex_lock(&g_aos_lock);
@@ -535,8 +558,10 @@ static void au_release_pending(aout *a) {
         if (rw - rr >= RELMAX) die("AudioOut released queue overflow while stopping");
         a->rel[rw++ & (RELMAX - 1)] = a->q[qh++ & (QMAX - 1)];
     }
-    atomic_store_explicit(&a->rel_tail, rw, memory_order_release);
     atomic_store_explicit(&a->q_head, qh, memory_order_release); a->pos = 0;
+    a->staged_pos = a->staged_size = 0;
+    atomic_store_explicit(&a->q_played, qh, memory_order_release);
+    atomic_store_explicit(&a->rel_tail, rw, memory_order_release);
     pthread_mutex_unlock(&a->m);
     if (released) { if (a->event) notify_release(a); if (a->rel_sem) plat_sem_signal(a->rel_sem); }
 }
@@ -573,8 +598,7 @@ HLE_FORCE_BIG("_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE", "close the audio ou
 HLE_FORCE("_ZN2nn5audio16GetAudioOutStateEPKNS0_8AudioOutE", "playback state", int, h_au_State, const void *g) { return atomic_load_explicit(&ao(g)->state, memory_order_acquire); }
 // Pokémon Legends: Z-A (SDK 19): Wwise's sink wakeup thread (main+0x30faae8) asks after every release event and marks the sink starved at 0; the SDK's own version read the audout session the host never made
 HLE_FORCE("_ZN2nn5audio22GetAudioOutBufferCountEPKNS0_8AudioOutE", "buffers appended and not yet played to the end (the one playing included)", unsigned, h_au_BufCount, const void *g) {
-    aout *a = ao(g);
-    return atomic_load_explicit(&a->q_tail, memory_order_acquire) - atomic_load_explicit(&a->q_head, memory_order_acquire);
+    return queued_pcm_blocks(ao(g));
 }
 HLE_FORCE("_ZN2nn5audio21GetAudioOutSampleRateEPKNS0_8AudioOutE", "sample rate", int, h_au_Rate, const void *g) { (void)ao(g); return RATE; }
 HLE_FORCE("_ZN2nn5audio23GetAudioOutChannelCountEPKNS0_8AudioOutE", "channel count", int, h_au_Ch, const void *g) { return ao(g)->ch; }
@@ -671,7 +695,7 @@ static Result os_open(void *g, void *ev, const int32_t *fmt, int frames, void *l
     ostream *o = calloc(1, sizeof *o); if (!o) die("OutputStream calloc");
     pthread_mutex_init(&o->m, NULL); o->ch = ch; o->fmt = f; o->cap = frames; o->state = OS_STOPPED;
     uint8_t param[8] = {0}; *(int32_t *)param = RATE; *(uint16_t *)(param + 4) = (uint16_t)ch;
-    Result r = au_open_at(o->key, ev, "OutputStream", param, lr);
+    Result r = au_open_at(o->key, ev, "OutputStream", param, lr, AU_OUTPUT_STREAM);
     if (r) { free(o); return r; }
     objmap_put(g, o);
     return RES_OK;
@@ -896,7 +920,7 @@ HLE_FORCE("_ZN2nn5audio41IsVirtualInputDeviceStreamFormatSupportedERKNS0_15Audio
 // Host-internal PCM output (used by the in-process audio renderer, see hle_audren.c): the same AudioOut machinery (real output / silent sink / background take-over), keyed by a host-allocated dummy object
 void *dm_pcmout_open(int ch) {
     void *key = calloc(1, 64); uint8_t param[8] = {0}; *(uint16_t *)(param + 4) = (uint16_t)ch;
-    if (au_open_at(key, NULL, "AudioRenderer", param, NULL)) die("host PCM output cannot be opened");
+    if (au_open_at(key, NULL, "AudioRenderer", param, NULL, AU_PCM_OUT)) die("host PCM output cannot be opened");
     ao(key)->rel_sem = plat_sem_create(0);
     return key;
 }

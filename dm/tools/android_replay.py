@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The phone's frame replay loop (android/TESTING.md "Frame capture and replay"): build the replayer, push it, run it on a capture, pull its pictures.
 
-  android_replay.py build                      # cmake --build of libnxhost.so + nxreplay (NDK, the GAME profile) into --build
-  android_replay.py push                       # both to /data/local/tmp/nxreplay on the phone (no APK install)
+  android_replay.py build                      # cmake --build of libnxhost.so + nxreplay and the driver loader (NDK, the GAME profile) into --build
+  android_replay.py push                       # all of them to /data/local/tmp/nxreplay on the phone (no APK install)
   android_replay.py run <capture> [args...]    # adb shell: nxreplay <capture> args (a capture name alone is looked up in the phone's captures folder)
   android_replay.py pull <dir>                 # the PNGs the replays wrote beside the captures, into dir
   android_replay.py all <capture> [args...]    # build, push, run
@@ -17,6 +17,9 @@ NDK = os.path.join(SDK, 'ndk', '28.2.13676358')
 CMAKE = os.path.join(SDK, 'cmake', '3.31.5', 'bin')
 PHONE_DIR = '/data/local/tmp/nxreplay'
 CAPTURES = '/sdcard/Switch2/Work/{game}/captures'   # the game's work folder (android/README.md "The Switch2 folder")
+# What DM_VK_DRIVER=<driver folder> loads a custom driver with (vka_driver.c dlopens libnxadreno.so, adrenotools loads its hooks beside it). Without them beside nxreplay
+# the replay says "[RED] vk: DM_VK_DRIVER: libnxadreno.so not loaded" and runs on the system driver: a driver A/B that compares the system driver with itself
+DRIVER_TARGETS = ('nxadreno', 'hook_impl', 'main_hook', 'file_redirect_hook', 'binder_compat_hook')
 
 
 def sh(cmd, **kw):
@@ -29,7 +32,7 @@ def build(a):
         sh([os.path.join(CMAKE, 'cmake'), '-S', os.path.join(ROOT, 'android', 'host'), '-B', a.build, '-G', 'Ninja', '-DCMAKE_MAKE_PROGRAM=' + os.path.join(CMAKE, 'ninja'),
             '-DCMAKE_TOOLCHAIN_FILE=' + os.path.join(NDK, 'build', 'cmake', 'android.toolchain.cmake'), '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=33',
             '-DGAME=' + a.game, '-DCMAKE_BUILD_TYPE=Release', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'], check=True)
-    sh(['nice', os.path.join(CMAKE, 'cmake'), '--build', a.build, '--target', 'nxreplay', '-j6'], check=True)
+    sh(['nice', os.path.join(CMAKE, 'cmake'), '--build', a.build, '--target', 'nxreplay', *DRIVER_TARGETS, '-j6'], check=True)
 
 
 def adb(a, *args, **kw):
@@ -38,7 +41,7 @@ def adb(a, *args, **kw):
 
 def push(a):
     adb(a, 'shell', 'mkdir -p ' + PHONE_DIR, check=True)
-    for f in ('libnxhost.so', 'nxreplay'):
+    for f in ('libnxhost.so', 'nxreplay') + tuple('lib%s.so' % t for t in DRIVER_TARGETS):
         adb(a, 'push', os.path.join(a.build, f), PHONE_DIR + '/' + f, check=True, stdout=subprocess.DEVNULL)
     adb(a, 'shell', 'chmod 755 %s/nxreplay' % PHONE_DIR, check=True)
 
