@@ -21,6 +21,7 @@ class BinderCompatWiring(unittest.TestCase):
         m = re.search(r'if \(\(hook_params->featureFlags & ADRENOTOOLS_DRIVER_CUSTOM\) && android_get_device_api_level\(\) < 36\) \{\s*'
                       r'if \(linkernsbypass_namespace_dlopen\("libbinder_compat_hook\.so", RTLD_GLOBAL, driverNs\)\)', src)
         self.assertIsNotNone(m)
+        assert m is not None   # (for the type checker)
         # before the driver (and anything else) is loaded into the namespace
         self.assertLess(m.start(), src.index('auto newExtinfo{*extinfo};'))
 

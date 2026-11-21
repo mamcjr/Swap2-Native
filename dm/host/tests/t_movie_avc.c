@@ -15,6 +15,15 @@ static OSStatus synthetic_decode(VTDecompressionSessionRef, CMSampleBufferRef, V
 uint64_t now_ns(void) { return 1; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
 void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
+// (hle_guestthread.c: the movie's deferred-event thread is a guest thread; here a detached host thread runs its body, the guest calls it makes being this test's stubs)
+struct gts_arg { void (*fn)(void *); void *arg; };
+static void *gts_main(void *p) { struct gts_arg g = *(struct gts_arg *)p; free(p); g.fn(g.arg); return NULL; }
+void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size) {
+    (void)prio; (void)stack_size; static int handle;
+    struct gts_arg *g = malloc(sizeof *g); assert(g); g->fn = fn; g->arg = arg;
+    pthread_t t; assert(!pthread_create(&t, NULL, gts_main, g)); pthread_detach(t);
+    return &handle;
+}
 void dm_host_helper_qos(qos_class_t q) { (void)q; }
 
 typedef struct { uint8_t p[512]; unsigned bit; } writer;

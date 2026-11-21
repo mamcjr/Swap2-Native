@@ -97,9 +97,10 @@ static void reprojection(void) {
             vka_m4 v0, v1; look(x, y, z, yaw, pitch, &v0);
             look(x + (rnd() - 0.5) * 40, y + (rnd() - 0.5) * 10, z + (rnd() - 0.5) * 40, yaw + (rnd() - 0.5) * 0.4, pitch + (rnd() - 0.5) * 0.2, &v1);
             int n = 0; double e = move_err(&v0, &v1, &p, zo, yup, W, H, &n);
-            // (a standard depth's far field: its depth near 1 cancels in the float sums of the pass, up to 0.2 texels at 20000 units of a 30000 far plane, by compiler;
-            // reversed depth, as NVN games store it, stays under 0.05)
-            double tol = rev ? 0.05 : 0.25;
+            // (a standard depth's far field: its depth near 1 cancels in the float sums of the pass, up to 0.2 texels at 20000 units of a 30000 far plane without fused
+            // multiply-adds and 0.37 with them: clang fuses a * b + c by default on arm64 (-ffp-contract=on; the Mac CI's runner), as a GPU's compiler does with the pass;
+            // reversed depth, as NVN games store it, stays under 0.05 either way)
+            double tol = rev ? 0.05 : 0.4;
             CHECK(n > 0 && e < tol, "zero_one %d reversed %d yup %d move %d: %d points, worst error %.4f texels", zo, rev, yup, t, n, e);
         }
         // a still camera: no motion anywhere

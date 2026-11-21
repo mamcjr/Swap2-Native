@@ -200,7 +200,8 @@ static double run(double fps, int frames, int *lo, int *hi) {   // frames at a s
 }
 static void sead_rate_check(void) {
     int lo, hi;
-    for (double fps = 10; fps <= 60; fps += 0.7) {   // 10 to 60 at awkward rates: the game's time follows real time within one frame's step
+    for (int k = 0; k <= 71; k++) {   // 10 to 59.7 at awkward rates (steps of 0.7): the game's time follows real time within one frame's step
+        double fps = 10 + 0.7 * k;
         double game = run(fps, 600, &lo, &hi), wall = 600 / fps;
         assert(fabs(game - wall) < 1.0 / 60 + 1e-9 && lo >= 10 && hi <= 60 && hi - lo <= 1);
     }

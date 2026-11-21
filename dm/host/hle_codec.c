@@ -215,7 +215,7 @@ HLE_FORCE("_ZN2nn5codec29InitializeHardwareOpusDecoderEPNS0_23HardwareOpusDecode
     if (r) { free(d->work); free(d->soft); free(d); return r; }
     d->m = m; d->ch = ch; d->gd = gd;
     pthread_mutex_lock(&m->lock);
-    if (m->ndec == m->cap) { m->cap *= 2; if (!(m->dec = realloc(m->dec, (size_t)m->cap * sizeof *m->dec))) die("Opus manager realloc"); }
+    if (m->ndec == m->cap) { void *nd = realloc(m->dec, (size_t)m->cap * 2 * sizeof *m->dec); if (!nd) die("Opus manager realloc"); m->dec = nd; m->cap *= 2; }
     m->dec[m->ndec++] = d;
     pthread_mutex_unlock(&m->lock);
     if (opus_mdec_find(gd, 0)) die("Opus decoder %p initialized twice without Finalize", gd);

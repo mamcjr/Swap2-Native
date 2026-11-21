@@ -15,13 +15,13 @@
 enum { INFO = 387 };
 static int g_val = -1;   // spirv-val on the PATH
 static int validate(const uint32_t *w, size_t n, const char *name) {
-    if (g_val < 0) g_val = system("spirv-val --version >/dev/null 2>&1") == 0;
+    if (g_val < 0) g_val = system("spirv-val --version >/dev/null 2>&1") == 0;   // NOLINT(bugprone-command-processor): the test runs spirv-val from the PATH when there is one, a fixed command
     if (!g_val) return 1;
     char p[256]; snprintf(p, sizeof p, "%s/meshpack_%d.spv", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
     FILE *f = fopen(p, "wb"); assert(f); fwrite(w, 4, n, f); fclose(f);
     char cmd[512]; snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.3 %s >/dev/null 2>&1", p);
-    int ok = system(cmd) == 0;
-    if (!ok) { snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.3 %s 2>&1 | head -5", p); fprintf(stderr, "spirv-val refused %s:\n", name); if (system(cmd)) {} }
+    int ok = system(cmd) == 0;   // NOLINT(bugprone-command-processor): spirv-val on the test's own temporary file
+    if (!ok) { snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.3 %s 2>&1 | head -5", p); fprintf(stderr, "spirv-val refused %s:\n", name); if (system(cmd)) {} }   // NOLINT(bugprone-command-processor): the same check again, its first lines shown
     remove(p);
     return ok;
 }

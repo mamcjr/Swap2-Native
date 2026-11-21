@@ -225,7 +225,8 @@ if NAME == 'main':
     for o, oid in own:
         regs, why = sead_check(bytes(IMG), TEXT_END, o)
         assert sead_on, f'{NAME} {BUILD_ID}: an OBS row for sead\'s frame-rate controller at {o:#x}, but the profile has no fps_decouple sead'
-        assert regs and sead_param(regs) == oid >> 8, f'{NAME} {BUILD_ID}: the OBS row for sead\'s frame-rate controller at {o:#x}: {why or "its registers are not the site\'s"}'
+        why = why or "its registers are not the site's"   # (outside the f-string: Python 3.10 takes no backslash or reused quote inside its braces)
+        assert regs and sead_param(regs) == oid >> 8, f'{NAME} {BUILD_ID}: the OBS row for sead\'s frame-rate controller at {o:#x}: {why}'
         print(f'{NAME}: sead\'s frame-rate controller: 60 / interval at {o:#x} (the build\'s OBS row)')
     if not own:
         off, regs, sead_why = sead_find(bytes(IMG), TEXT_END)
@@ -897,7 +898,7 @@ def copied_base(insl, k, rb):
         if not any(canon.get(p.reg_name(x), p.reg_name(x)).replace('w', 'x', 1) == r for x in w): continue
         ops = [canon.get(o, o) for o in p.op_str.split(', ')]
         if lo is None and p.mnemonic == 'mov' and len(ops) == 2 and ops[0] == r and re.fullmatch(r'x\d+', ops[1]): r = ops[1]; continue
-        if lo is None and p.mnemonic == 'add' and len(ops) == 3 and ops[:2] == [r, r] and re.fullmatch(r'#(0x[0-9a-f]+|\d+)', ops[2]): lo = int(ops[2][1:], 0); continue
+        if lo is None and p.mnemonic == 'add' and len(ops) == 3 and ops[:2] == [r, r] and (imm := re.fullmatch(r'#(0x[0-9a-f]+|\d+)', ops[2])): lo = int(imm.group(1), 0); continue
         if lo is not None and p.mnemonic == 'adrp' and ops[0] == r: return p.operands[1].imm + lo
         return None
     return None
@@ -1381,10 +1382,12 @@ if UE_REGION is not None:
         assert UE_REGION_X1 not in kinds and not any(lo <= UE_REGION_X1 < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'engine region size conflicts with a rewrite site {UE_REGION_X1:#x}'
         struct.pack_into('<I', IMG, UE_REGION_X1, 0xAA0003E1 | UE_REGION_REG << 16)
 if SEAD_RATE is not None:
+    assert SEAD_REGS is not None   # (found with SEAD_RATE)
     assert SEAD_RATE not in kinds and not any(lo <= SEAD_RATE < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'frame-rate controller gate conflicts with a rewrite site {SEAD_RATE:#x}'
     region_obs.append((SEAD_RATE, OBS_SEAD_RATE | sead_param(SEAD_REGS) << 8, f'{struct.unpack_from("<I", IMG, SEAD_RATE)[0]:08x}',
                        f'sead\'s frame-rate controller: 60 / interval (w{SEAD_REGS[0]} / w{SEAD_REGS[1]}, the controller in x{SEAD_REGS[2]}); the host makes it the measured rate (hle_fpslock.c sead_rate)'))
 if SEAD_LOCKED is not None:
+    assert SEAD_REGS is not None   # (the locked path is looked for only once SEAD_RATE and its registers are found)
     assert SEAD_LOCKED not in kinds and not any(lo <= SEAD_LOCKED < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'frame-rate controller locked gate conflicts with a rewrite site {SEAD_LOCKED:#x}'
     region_obs.append((SEAD_LOCKED, OBS_SEAD_LOCKED | sead_locked_param(SEAD_REGS[2], SEAD_LOCKED_OFF) << 8, f'{struct.unpack_from("<I", IMG, SEAD_LOCKED)[0]:08x}',
                        f'sead\'s frame-rate controller, locked: the stored rate [x{SEAD_REGS[2]}, #{SEAD_LOCKED_OFF:#x}]; the host writes the measured rate there (hle_fpslock.c sead_locked)'))
@@ -1611,8 +1614,8 @@ def spin_region1(T, bes, ban, stores):
             n = {'kind': 'rmw', 'base': rmw[0], 'k': rmw[1], 'ins': rmw[3], 'uses': {rmw[0]}, 'defs': rmw[2], 'succ': [a + 16]}
         elif lk:
             n = {'kind': lk[0], 'base': lk[1], 'k': {'acq': 1, 'rel': -1, 'tst': 0}[lk[0]], 'ins': lk[2], 'pre': lk[3], 'uses': lk[5], 'defs': lk[6], 'succ': [a + 4 * lk[4]]}
-        elif stores and spin_store(spin_ins(a)):
-            x = spin_ins(a); st = spin_store(x); n = {'kind': 'stc', 'st': st, 'ins': [x], 'uses': {st[1]} | ({st[0]} - {None}), 'defs': set(), 'succ': [a + 4]}
+        elif stores and (st := spin_store(spin_ins(a))):
+            x = spin_ins(a); n = {'kind': 'stc', 'st': st, 'ins': [x], 'uses': {st[1]} | ({st[0]} - {None}), 'defs': set(), 'succ': [a + 4]}
         else:
             x = spin_ins(a); k = spin_kind(x)
             if k is None: bad.add(a); continue

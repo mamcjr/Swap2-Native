@@ -62,7 +62,7 @@ class Collect(unittest.TestCase):
             return real(src, dst, *a, **kw)
         with mock.patch.object(pack_android.os, 'replace', replace), mock.patch.object(pack_android.os, 'rename', replace), \
              mock.patch.object(pack_android.shutil, 'move', side_effect=AssertionError('folder moved')), \
-             mock.patch.object(Path, 'rename', lambda self, t: replace(self, t)), mock.patch.object(Path, 'replace', lambda self, t: replace(self, t)):
+             mock.patch.object(Path, 'rename', replace), mock.patch.object(Path, 'replace', replace):   # (as methods: replace(self, target))
             got = self.collect()
         self.assertEqual(list(got), ['nro0']); self.assertEqual(got['nro0'].read_bytes(), self.body)
         self.assertEqual(pack_android.collected_nros(self.work), self.work / 'android-nro')

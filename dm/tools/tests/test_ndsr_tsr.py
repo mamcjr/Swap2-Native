@@ -39,6 +39,7 @@ class Headers(unittest.TestCase):
             for h in heads:
                 m = re.search(r'const\s+uint32_t\s+(\w+)\s*\[\]\s*=\s*\{([^}]*)\}', h.read_text(encoding='utf-8'))
                 self.assertIsNotNone(m, h.name)
+                assert m is not None   # (for the type checker)
                 w = [int(x, 0) for x in re.findall(r'0x[0-9a-fA-F]+|\d+', m.group(2))]
                 spv = os.path.join(d, h.stem + '.spv')
                 Path(spv).write_bytes(b''.join(x.to_bytes(4, 'little') for x in w))

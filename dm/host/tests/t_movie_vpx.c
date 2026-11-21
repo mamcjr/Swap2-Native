@@ -37,6 +37,15 @@ static uint64_t test_now = 1000000000ull;
 uint64_t now_ns(void) { return test_now; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
 void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
+// (hle_guestthread.c: the movie's deferred-event thread is a guest thread; here a detached host thread runs its body, the guest calls it makes being this test's stubs)
+struct gts_arg { void (*fn)(void *); void *arg; };
+static void *gts_main(void *p) { struct gts_arg g = *(struct gts_arg *)p; free(p); g.fn(g.arg); return NULL; }
+void *dm_guest_thread_spawn(void (*fn)(void *), void *arg, int prio, size_t stack_size) {
+    (void)prio; (void)stack_size; static int handle;
+    struct gts_arg *g = malloc(sizeof *g); assert(g); g->fn = fn; g->arg = arg;
+    pthread_t t; assert(!pthread_create(&t, NULL, gts_main, g)); pthread_detach(t);
+    return &handle;
+}
 void mavc_drop(mavc *a) { (void)a; }   // hle_movie_avc.c: no H.264 here
 static void playing(void) {
     static mdec_t video = { .type = MD_TYPE_VP9, .nout = MD_NOUT_VIDEO, .started = 1 }, audio = { .type = MD_TYPE_VORBIS, .nout = MD_NOUT, .started = 1 };

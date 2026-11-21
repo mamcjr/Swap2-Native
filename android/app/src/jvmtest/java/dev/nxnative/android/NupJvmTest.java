@@ -367,9 +367,11 @@ public final class NupJvmTest {
         check(p.romfsPath(other).equals(other.getAbsolutePath() + ":update/458752/romfs"), tag + "renamed: " + p.romfsPath(other));
         check(other.getAbsolutePath().equals(p.aocLinks(other).get("1.nup")), tag + "renamed aoc link");
         other.delete();
-        // pack.tsv's base selector
+        // pack.tsv's base selector, with no aoc row: the add-on the .nup holds is linked all the same (Pack.addedAfter: a DLC merged into the .nup after Prepare)
         p = Pack.read(packDir(t, "pack-base", nup.getName() + ":base/romfs", null));
-        check(p.romfsPath(nup).equals(abs + ":base/romfs") && p.aocLinks(nup).isEmpty(), tag + "base selector");
+        l = p.aocLinks(nup);
+        check(p.romfsPath(nup).equals(abs + ":base/romfs"), tag + "base selector: " + p.romfsPath(nup));
+        check(l.size() == 1 && abs.equals(l.get("1.nup")), tag + "base selector, no aoc row: the .nup's add-on linked: " + l);
         // a pack made from a folder, used with the .nup: the pack's version's package
         p = Pack.read(packDir(t, "pack-folder", "updates/458752/romfs", "1\tdlc/" + AOC + "/0/romfs"));
         check(p.romfsPath(nup).equals(abs + ":update/458752/romfs"), tag + "folder pack's version: " + p.romfsPath(nup));
