@@ -1062,11 +1062,21 @@ static int stage_writes(const vka_dstate *d, int st, const vka_shader *sh, const
             if (r[i].desc != VK_DESCRIPTOR_TYPE_SAMPLER) texstat_note(sh, st, &r[i], v);
             w->pImageInfo = ii; if (g_prof) { g_ps[4] += cntvct() - ti_; g_ps[5]++; }
             break; }
-        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-            if (r[i].what != VKA_R_NULL) VRED_ONCE("texel buffers are not on Vulkan yet (shader %016llx binding %u): bound as null", (unsigned long long)sh->key, r[i].binding);
-            if (!V.null_desc) { VRED_ONCE("a texel buffer binding and no null descriptors: the draw is skipped"); return 0; }
-            g_w.bv[k] = VK_NULL_HANDLE; w->pTexelBufferView = &g_w.bv[k];
-            break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: {
+            // A buffer texture (a TBUF slot, or an image whose handle names one: IMG / IMG_UBO): a view of its storage in place (vka_buf_view), so stores and atomics land
+            // in the pool's bytes. Unreal Engine 5's work-queue counters on the Switch 2 are such atomics (Yoshi and the Mysterious Book): bound as null, they read 0 and
+            // its compute passes looped until the GPU hung
+            int storage = r[i].desc == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, tid = r[i].what == VKA_R_TBUF || r[i].what == VKA_R_IMG ? r[i].tid : 0;
+            VkBufferView bv = VK_NULL_HANDLE; char why[256] = "";
+            if (tid) {
+                uint64_t a, n, rg = 0; VkFormat tf; uint32_t tx;
+                if (!vka_tex_id_buffer(tid, &a, &n, &tf, &tx)) { char d_[320]; vka_tex_id_desc(tid, d_, sizeof d_); snprintf(why, sizeof why, "texture ID %d is not a buffer texture with a texel format (%s)", tid, d_); }
+                else if ((bv = vka_buf_view(a, n, tf, tx, storage, (r[i].flags & DMSH_VK_BF_ATOMIC) != 0, &rg, why, sizeof why)) && storage && (r[i].flags & DMSH_VK_BF_RW)) vka_tex_gw_opaque(a, rg);   // the shader may store into it
+            }
+            if (!bv && tid) { static _Atomic int nb; if (atomic_fetch_add(&nb, 1) < 8) VRED("shader %016llx binding %u: %s texel buffer bound as null: %s", (unsigned long long)sh->key, r[i].binding, storage ? "storage" : "uniform", why); }
+            if (!bv && !V.null_desc) { VRED_ONCE("a texel buffer binding without a view and no null descriptors: the draw is skipped"); return 0; }
+            g_w.bv[k] = bv; w->pTexelBufferView = &g_w.bv[k];
+            break; }
         default: VRED_ONCE("descriptor type %u in a binding record", r[i].desc); return 0;
         }
         g_w.n++;

@@ -388,9 +388,10 @@ for _p in [p for p in MESH_PRIM if VS_OF.get(p)]:
 KIND = {abi.KIND_CBUF: 'CBUF', abi.KIND_C1: 'C1', abi.KIND_DRVCB: 'DRVCB', abi.KIND_SUPPORT: 'SUPPORT', abi.KIND_SBUF: 'SBUF', abi.KIND_SBUF_UBO: 'SBUF_UBO', abi.KIND_UBO_PTR: 'UBO_PTR',
         abi.KIND_TEX: 'TEX', abi.KIND_TBUF: 'TBUF', abi.KIND_IMG: 'IMG', abi.KIND_SAMP: 'SAMP', abi.KIND_SAMP_TEX: 'SAMP_TEX', abi.KIND_SAMP_ID: 'SAMP_ID', abi.KIND_TEX_UBO: 'TEX_UBO',
         abi.KIND_SAMP_UBO: 'SAMP_UBO', abi.KIND_TEX_C2A: 'TEX_C2A', abi.KIND_SAMP_C2A: 'SAMP_C2A', abi.KIND_TEX_POOL: 'TEX_POOL', abi.KIND_SAMP_POOL: 'SAMP_POOL',
-        abi.KIND_GMEM_MAP: 'GMEM_MAP', abi.KIND_GMEM_LOG: 'GMEM_LOG', abi.KIND_SHARED_SPILL: 'SHARED_SPILL', abi.KIND_UNKNOWN: 'UNKNOWN'}
+        abi.KIND_GMEM_MAP: 'GMEM_MAP', abi.KIND_GMEM_LOG: 'GMEM_LOG', abi.KIND_SHARED_SPILL: 'SHARED_SPILL', abi.KIND_IMG_UBO: 'IMG_UBO', abi.KIND_UNKNOWN: 'UNKNOWN'}
 KIND_NUM = {k: VK['KIND_' + v] for k, v in KIND.items()}
-SLOT_KINDS = {abi.KIND_CBUF, abi.KIND_SAMP, abi.KIND_SAMP_TEX, abi.KIND_TEX, abi.KIND_IMG, abi.KIND_TBUF, abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_TEX_UBO, abi.KIND_SAMP_UBO, abi.KIND_SAMP_ID}
+SLOT_KINDS = {abi.KIND_CBUF, abi.KIND_SAMP, abi.KIND_SAMP_TEX, abi.KIND_TEX, abi.KIND_IMG, abi.KIND_TBUF, abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_TEX_UBO, abi.KIND_SAMP_UBO, abi.KIND_SAMP_ID,
+              abi.KIND_IMG_UBO}
 POOL_SUFFIX = '_cb0_40000000'   # a handle traced to no slot indexes the pools by its IDs (Program.cs QueryTextureArrayLengthFromPool; dmsh_build.py pool_arrays)
 
 
@@ -403,6 +404,16 @@ def sampler_half(name):
     t, s, ty = d
     if ty == 3: return abi.KIND_SAMP_ID, NS['const_sampler'](name), 0
     return (abi.KIND_SAMP, s, 0) if ty else (abi.KIND_SAMP_TEX, t, 0)
+
+
+def ubo_img(nm):
+    """An image whose handle the game keeps in its own uniform buffer: <stage>_i<type>_cb<bank>_<handle> with bank 3..16 (c[3 + slot]), handle type 0 (one word,
+    the low 20 bits the texture ID). Unreal Engine 5 on the Switch 2 keeps the images of its compute shaders there (Yoshi and the Mysterious Book's exposure and post
+    passes; Banana Native ebb5dd96, MIT). → (uniform slot, byte offset), or None (dmsh_build.decode_tex reads bank 2's image slots)"""
+    mm = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', nm)
+    if not mm: return None
+    bank, h = int(mm.group(1)), int(mm.group(2), 16)
+    return (bank - 3, (h & 0x3fff) * 4) if 3 <= bank <= 16 and h >> 28 == 0 else None
 
 
 def classify(stage, r, res, m):
@@ -425,6 +436,8 @@ def classify(stage, r, res, m):
         if desc == spv.VK_SAMPLER: e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1])
         elif desc == spv.VK_UNIFORM_TEXEL: e['kind'] = abi.KIND_UNKNOWN   # a bindless buffer texture: not implemented in the replay (as on Metal)
         else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1])
+    elif desc in (spv.VK_STORAGE_IMAGE, spv.VK_STORAGE_TEXEL) and (iu := ubo_img(nm)):
+        e.update(kind=abi.KIND_IMG_UBO, reg=iu[0], off=iu[1])
     elif texlike and r['count'] > 1 and NS['c2_array'](nm, 'array<'):
         off, soff = NS['c2_array'](nm, 'array<')
         e.update(kind=abi.KIND_SAMP_C2A if desc == spv.VK_SAMPLER else abi.KIND_TEX_C2A, off=off)
@@ -490,8 +503,8 @@ def place(stage, binds, m):
             e['set'], e['binding'] = VK['SET_DRAW'], base + n; n += 1
         m.set_binding(e['id'], e['set'], e['binding'])
         if e['kind'] in SLOT_KINDS and e.get('reg') is None: e['flags'] |= VK['BF_NOSLOT']
-        if e['kind'] == abi.KIND_IMG and m_atomic(m, e['id']): e['flags'] |= VK['BF_ATOMIC']
-        if e['kind'] == abi.KIND_IMG and m_writes(m, e['id']): e['flags'] |= VK['BF_RW']
+        if e['kind'] in (abi.KIND_IMG, abi.KIND_IMG_UBO) and m_atomic(m, e['id']): e['flags'] |= VK['BF_ATOMIC']
+        if e['kind'] in (abi.KIND_IMG, abi.KIND_IMG_UBO) and m_writes(m, e['id']): e['flags'] |= VK['BF_RW']
 
 
 def m_atomic(m, vid):   # an image texel pointer on this image: its atomics

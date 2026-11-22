@@ -51,3 +51,8 @@ uint32_t *vka_spv_array_len(const uint32_t *w, size_t nw, uint32_t set, uint32_t
 // compilers crash on the shuffle). A malloc'd copy (*out_nw words, *sites shuffles rewritten); NULL with err empty when the module has no shuffle, NULL with the reason in err
 // when it cannot be rewritten (no SubgroupLocalInvocationId input or 32-bit unsigned type)
 uint32_t *vka_spv_shuffle_xor(const uint32_t *w, size_t nw, size_t *out_nw, int *sites, char *err, size_t errn);
+
+// Each subgroup shuffle of lane (SubgroupLocalInvocationId & -32) | k (k a constant) as two broadcasts from the constant lanes k and 32 + k, chosen by bit 32 of the lane
+// (vka_spvpatch.c): the same value on a 64-lane subgroup without ir3's loop of rotates. A malloc'd copy (*out_nw words, *sites shuffles rewritten); NULL with err empty when
+// no shuffle has that form, NULL with the reason in err when the module cannot be rewritten
+uint32_t *vka_spv_shuffle_halves(const uint32_t *w, size_t nw, size_t *out_nw, int *sites, char *err, size_t errn);

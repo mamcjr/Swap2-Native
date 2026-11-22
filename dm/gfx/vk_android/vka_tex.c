@@ -2668,6 +2668,20 @@ void vka_samp_id_desc(int id, char *b, size_t n) {
                                              p.cmp_mode, p.cmp_func, p.reduction, p.lod_min, p.lod_max, p.lod_bias); }
     pthread_mutex_unlock(&g_tmu);
 }
+// Texture ID id as a buffer texture (NVN_TEXTURE_TARGET_BUFFER, which has no image: vka_buf_view binds its storage in place): its guest address, its bytes (elements times
+// the texel) and the format a texel buffer view of it takes (its view's format when the registration names one; an 8-bit sRGB format as its UNORM twin, the raw bytes).
+// 0: not a registered buffer texture, its pool finalized since, or a format with no texel of whole bytes (depth, block-compressed)
+int vka_tex_id_buffer(int id, uint64_t *addr, uint64_t *bytes, VkFormat *fmt, uint32_t *texel) {
+    pthread_mutex_lock(&g_tmu);
+    if (id <= 0 || id >= g_ntreg || !g_treg[id].t.serial) { pthread_mutex_unlock(&g_tmu); return 0; }
+    treg_ent e = g_treg[id];
+    pthread_mutex_unlock(&g_tmu);
+    if (e.t.d.target != NVN_TEXTURE_TARGET_BUFFER || !e.t.mem || treg_dead(id, &e)) return 0;
+    vka_fmt f;
+    if (!vka_fmt_of(e.has_v && e.v.set_format ? e.v.format : e.t.d.format, &f) || f.kind >= 3 || f.dec || f.bw > 1 || f.bh > 1 || !f.bpb) return 0;
+    *addr = (uint64_t)(uintptr_t)e.t.mem; *bytes = (uint64_t)(e.t.d.width ? e.t.d.width : 1) * f.bpb; *fmt = f.vk; *texel = f.bpb;
+    return 1;
+}
 int vka_tex_id_target(int id) {
     pthread_mutex_lock(&g_tmu);
     int t = id > 0 && id < g_ntreg && g_treg[id].t.serial ? (g_treg[id].has_v && g_treg[id].v.set_target ? g_treg[id].v.target : g_treg[id].t.d.target) : -1;

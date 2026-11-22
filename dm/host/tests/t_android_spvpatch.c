@@ -11,6 +11,7 @@
 #include "t_android_spvpatch_pfb.h"
 #include "t_android_spvpatch_gs.h"
 #include "t_android_spvpatch_shx.h"
+#include "t_android_spvpatch_shh.h"
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -368,6 +369,27 @@ int main(void) {
         for (size_t i = 5; i < sn; i += t[i] >> 16) if ((t[i] & 0xffff) == 71 && t[i + 2] == 11 && t[i + 3] == 41) t[i + 3] = 40;   // the lane built-in renamed away
         CHECK(!vka_spv_shuffle_xor(t, sn, &on, &ns, e, sizeof e) && e[0], "no lane built-in: refused with a reason");
         free(t);
+    }
+    {   // vka_spv_shuffle_halves: the shuffles of lane (lane & -32) | k as two broadcasts and a select; the shuffle of a computed lane is left alone
+        size_t sn = sizeof SPV_SHH_COMP / 4, on = 0; int ns = 0; char e[256];
+        uint32_t *x = vka_spv_shuffle_halves(SPV_SHH_COMP, sn, &on, &ns, e, sizeof e);
+        CHECK(x, "the shuffles are not rewritten: %s", e);
+        if (x) {
+            CHECK(ns == 2 && count_op(x, on, 345) == 1 && count_op(x, on, 337) == 4 && count_op(x, on, 169) == count_op(SPV_SHH_COMP, sn, 169) + 2,
+                  "two shuffles made two broadcasts and a select each, the third left (%d sites)", ns);
+            int ballot = 0, lanes = 0;
+            for (size_t i = 5; i < on; i += x[i] >> 16) {
+                if ((x[i] & 0xffff) == 17 && x[i + 1] == 64) ballot = 1;
+                if ((x[i] & 0xffff) == 43 && (x[i + 3] == 5 || x[i + 3] == 37 || x[i + 3] == 32)) lanes++;
+            }
+            CHECK(ballot && lanes >= 3, "the GroupNonUniformBallot capability added (%d), the lanes 5, 37 and 32 as constants (%d)", ballot, lanes);
+            if (val) CHECK(validate(x, on, "shuffle halves"), "valid SPIR-V");
+            size_t on2 = 0; int ns2 = 0; e[0] = 1;
+            CHECK(!vka_spv_shuffle_halves(x, on, &on2, &ns2, e, sizeof e) && !e[0], "the rewritten module: nothing more to do");
+            free(x);
+        }
+        size_t on3 = 0; int ns3 = 0; e[0] = 1;
+        CHECK(!vka_spv_shuffle_halves(SPV_SHX_COMP, sizeof SPV_SHX_COMP / 4, &on3, &ns3, e, sizeof e) && !e[0], "shuffles of other lanes: nothing to do");
     }
     printf("t_android_spvpatch: %s%s\n", g_fail ? "FAILED" : "ok", val ? "" : " (no spirv-val: structure only)");
     return g_fail != 0;

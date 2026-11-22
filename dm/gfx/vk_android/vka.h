@@ -100,6 +100,8 @@ typedef struct {
     // feature queries, never on the driver's name; each such default keeps its DM_VK_* switch (android/README.md "Custom GPU drivers")
     int driver_id;
     VkDeviceSize ub_align, sb_align, ub_range, sb_range;
+    VkDeviceSize tb_align[2]; uint8_t tb_single[2]; uint32_t tb_max;   // texel buffer views, [0] uniform, [1] storage: the offset alignment (Vulkan 1.3's *TexelBufferOffsetAlignmentBytes),
+                                                    // whether one texel's size suffices (*SingleTexelAlignment), and maxTexelBufferElements
     VkDeviceSize placed_align, max_alloc;
     uint32_t guest_type, local_type, upload_type;   // guest RAM (DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT|HOST_CACHED, or the nearest), images, upload arenas
     VkSemaphore tl;                                 // the timeline: value n = submission n has completed
@@ -207,6 +209,9 @@ uint64_t vks_bytes_nolock(void);
 int vka_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off, VkDeviceAddress *bda);   // 1 = [addr, addr + len) lies in one placed segment
 int vka_mem_release(uintptr_t lo, uintptr_t hi);    // the host gives [lo, hi) back: segments there are given back first; 0 = the host releases the range itself
 uint64_t vka_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // bytes from addr (at most len) in the segment that holds addr, 0 = none
+// A texel buffer view of the placed guest bytes at addr (at most bytes, whole texels of texel bytes) in format f, storage or uniform: kept per segment buffer, offset,
+// range and format, destroyed with the segment's buffer; *range the bytes it covers. NULL with why (a sentence) when it cannot be made
+VkBufferView vka_buf_view(uint64_t addr, uint64_t bytes, VkFormat f, uint32_t texel, int storage, int atomic, uint64_t *range, char *why, size_t nwhy);
 int vka_pool_bda(uint64_t addr, VkDeviceAddress *bda);   // the device address of a pool byte (the table the binding side reads)
 void *vka_mem_mapped(size_t n);   // no placed maps: a mapped allocation as a segment where the driver maps it (the selftest on an emulator)
 int vka_mem_chunks(uint64_t *lo, uint64_t *hi, uint64_t *bda, int max);   // the placed segments by address (guest range and device address); the count
@@ -361,6 +366,7 @@ VkImageView vka_tex_id_view(int id, VkCommandBuffer cb, uint8_t dim, int storage
 void vka_tex_id_desc(int id, char *b, size_t n);   // texture ID id described for a [RED] line
 void vka_tex_feedback(vka_img *const *ims, const uint32_t *levels, int n);   // the open pass's attachments and their levels (n 0: none; ims NULL: no pass open), for vka_tex_id_view
 int vka_tex_id_in_pass(int id);   // texture ID id's image is an attachment of the open pass (vka_tex_feedback's set), may share memory with one, or is not known
+int vka_tex_id_buffer(int id, uint64_t *addr, uint64_t *bytes, VkFormat *fmt, uint32_t *texel);   // a buffer texture's storage, bytes and texel buffer format; 0 = not a buffer texture (or no format)
 int vka_tex_id_target(int id);                      // the NVN target texture ID id stands for (its view's), -1 = not registered
 int vka_tex_id_pending(int id);                     // texture ID id is registered and its image is not made yet (its first use records commands)
 VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout);   // the same on the recording thread, through a memo (DM_VK_TEX_MEMO)

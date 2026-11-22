@@ -443,7 +443,7 @@ $(B)/t_android_tsr_cam: t_android_tsr_cam.c $(VKA)/vka_tsr_cam.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_tsr_cam.c -lm
 # The replay's SPIR-V rewrites (vka_spvpatch.c): integer-fed vertex inputs (the selftest's vertex shader), storage and sampled images bound to integer textures (t_android_spvpatch_img.h),
 # validated by spirv-val when it is on the PATH; DM_VK_SPV_DIR=<.spv folder> adds those modules
-$(B)/t_android_spvpatch: t_android_spvpatch.c t_android_spvpatch_img.h t_android_spvpatch_gs.h t_android_spvpatch_shx.h $(VKA)/vka_spvpatch.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
+$(B)/t_android_spvpatch: t_android_spvpatch.c t_android_spvpatch_img.h t_android_spvpatch_gs.h t_android_spvpatch_shx.h t_android_spvpatch_shh.h $(VKA)/vka_spvpatch.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_spvpatch.c $(VKA)/vka_spvpatch.c
 # A texture copy's path: copy, blit, or a drawn depth copy where the driver cannot blit (vka_t2tpath.h, Banana Native a4a64a03); the timestamp tick measured against the
 # host clock (vka_tstick.h, Banana Native 5e4212d1; vka_exec.c tick_sample)

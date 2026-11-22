@@ -45,6 +45,9 @@ static void sg_plan(unsigned sg) {
     // stage runs one-lane subgroups, 1 = as the device reports; default 0 on VK_DRIVER_ID_MESA_TURNIP, 1 on other drivers
     uint32_t stages = V.subgroup_stages;
     if (!VKA_ENV("DM_VK_SUBGROUP_GS", V.driver_id != VK_DRIVER_ID_MESA_TURNIP)) stages &= ~(uint32_t)VK_SHADER_STAGE_GEOMETRY_BIT;
+    // DM_VK_SUBGROUP_STAGES=<VkShaderStageFlags> (restart, diagnostic): only these stages keep the device's subgroups, the others run one-lane subgroups (0x30: fragment and
+    // compute only, as Qualcomm's driver on the Adreno 830; 0x10: fragment only). Tells whether a driver computes a stage's subgroup operations differently
+    { char sv[32]; if (vka_env_str("DM_VK_SUBGROUP_STAGES", sv, sizeof sv) && *sv) stages &= (uint32_t)strtoul(sv, NULL, 0); }
     char q[256]; size_t qn = 0; q[0] = 0; int one_new = 0;
     for (int i = 0; i < 8; i++) {
         if (i >= DMSH_VK_STAGE_TS && !V.mesh) continue;
@@ -365,6 +368,22 @@ static void single_lane(uint64_t key, int stage, uint32_t **w, size_t *nb) {
                                                             stage == DMSH_VK_STAGE_GS && V.driver_id == VK_DRIVER_ID_MESA_TURNIP ? "Turnip's geometry stage (DM_VK_SUBGROUP_GS)" : V.subgroup_stages & g_stage_bit[stage] ? "the device's subgroup size in this stage is not the library's and cannot be pinned" : "the device has none in this stage");
     free(*w); *w = o; *nb = on * 4;
 }
+// Shuffles of lane (lane & -32) | k as two constant-lane broadcasts (vka_spv_shuffle_halves): Turnip has no arbitrary-index shuffle and ir3 makes each such shuffle a loop of
+// up to 32 rotates, the translator's form of Maxwell's SHFL.IDX of lane k on the library's 64-lane subgroups (Ocarina of Time's foliage mesh programs, 32 in a row each:
+// their compute fallback 51.8 → 20.0 ms of a Kokiri frame on the Adreno 830). Only in a stage whose subgroups are 64 lanes (fixed, or pinned by sg_plan) and that keeps them
+// (not one-lane, single_lane). DM_VK_SHUFFLE_HALVES (restart): default 1 on VK_DRIVER_ID_MESA_TURNIP, 0 on other drivers (Qualcomm's shuffles natively); 0 / 1 to choose
+static void shuffle_halves(uint64_t key, int stage, uint32_t **w, size_t *nb) {
+    if (stage < 0 || stage > 7 || g_sg_one[stage]) return;
+    static int on = -1; if (on < 0) on = VKA_ENV("DM_VK_SHUFFLE_HALVES", V.driver_id == VK_DRIVER_ID_MESA_TURNIP) != 0;
+    uint32_t sg = g_sg_pin[stage] ? g_sg_pin[stage] : V.subgroup_min == V.subgroup_max ? V.subgroup_size : 0;
+    if (!on || sg != 64) return;
+    size_t on_w = 0; int ns = 0; char e[256] = ""; uint32_t *o = vka_spv_shuffle_halves(*w, *nb / 4, &on_w, &ns, e, sizeof e);
+    if (!o) { if (e[0]) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("shader %016llx: lane-of-half shuffles not rewritten: %s", (unsigned long long)key, e); } return; }
+    static _Atomic int nm, nsites; int m = atomic_fetch_add(&nm, 1) + 1, t = atomic_fetch_add(&nsites, ns) + ns;
+    if (m <= 4 || !(m & (m - 1))) VLOG("shader %016llx: %d shuffles of a lane of the invocation's 32-lane half rewritten as broadcasts (DM_VK_SHUFFLE_HALVES; %d modules, %d shuffles so far)",
+                                       (unsigned long long)key, ns, m, t);
+    free(*w); *w = o; *nb = on_w * 4;
+}
 // A geometry shader that may emit nothing for a primitive emits a degenerate one instead (vka_spv_gs_fill: Qualcomm's driver stops the GPU when the binning and rendering
 // passes of Adreno's tiled rendering disagree on what such a shader emitted; Banana Native 0749171c, Donkey Kong Bananza's terrain). DM_VK_GS_FILL (restart): default 1
 // on Adreno drivers (Qualcomm's, Turnip), 0 elsewhere; 0 / 1 to choose. Applied after the one-lane subgroup rewrite, before the memory write claim. Logged for the first few
@@ -430,7 +449,7 @@ static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, con
     if (!w) { *why = err; return VK_NULL_HANDLE; }
     mesh_fragment(e, w, &nb);
     int stage = m->variant == DMSH_VK_MOD_MESH_COMPUTE ? DMSH_VK_STAGE_CS : m->variant == DMSH_VK_MOD_MESH_VERTEX ? DMSH_VK_STAGE_VS : e->stage;
-    if (e->flags & DMSH_VK_F_SUBGROUP) single_lane(key, stage, &w, &nb);
+    if (e->flags & DMSH_VK_F_SUBGROUP) { single_lane(key, stage, &w, &nb); shuffle_halves(key, stage, &w, &nb); }
     gs_fill(key, stage, &w, &nb);
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = w};
     VkShaderModule mod = VK_NULL_HANDLE; VkResult r = lib_csm(&ci, &mod);

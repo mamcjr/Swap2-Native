@@ -157,6 +157,18 @@ static void test_walk(void) {
         CHECK(r[12].what == VKA_R_SUPPORT, "support");
         CHECK(pool, "a pool record marks the draw as using set 1");
     }
+    // An image whose handle the game keeps in its uniform buffer (DMSH_VK_KIND_IMG_UBO; Unreal Engine 5 on the Switch 2, Yoshi's compute shaders: c[3]): a storage image of
+    // the handle's texture ID with the pool base, as tex_ubo's; a zero handle binds nothing (Banana Native ebb5dd96)
+    {
+        uint32_t ih = 17 | 4u << 20; memcpy(g_mem + 0x88, &ih, 4);
+        static vka_bstate cs; memcpy(&cs, &s, sizeof cs); cs.ubo[5][0] = (vka_range){0x10000, 256};
+        dmsh_vk_bind ib[] = {{.kind = DMSH_VK_KIND_IMG_UBO, .desc = 3, .binding = 8, .count = 1, .reg = 0, .off = 0x88, .flags = DMSH_VK_BF_RW | DMSH_VK_BF_ATOMIC, .dim = 2},
+                             {.kind = DMSH_VK_KIND_IMG_UBO, .desc = 3, .binding = 9, .count = 1, .reg = 0, .off = 0x8c, .flags = DMSH_VK_BF_RW, .dim = 2}};
+        dmsh_vk_entry ei = {.stage = DMSH_VK_STAGE_CS, .bind_count = 2};
+        int ni = vka_walk(&cs, 5, &ei, ib, 0, 64, rd, NULL, r, 32, NULL, why, sizeof why);
+        CHECK(ni == 2 && r[0].what == VKA_R_IMG && r[0].tid == 117 && (r[0].flags & DMSH_VK_BF_ATOMIC) && r[1].what == VKA_R_NULL,
+              "image handle in a uniform buffer: %d, what %d tid %d, then %d (%s)", ni, ni > 0 ? r[0].what : -1, ni > 0 ? r[0].tid : -1, ni > 1 ? r[1].what : -1, why);
+    }
     {   // Sampler ID 0 in a handle that is not empty: pool slot 0, NVN's reserved sampler (VKA_SAMP_ZERO); an empty handle stays unbound (upstream nxnative 8e06d235)
         static vka_bstate z; memset(&z, 0, sizeof z);
         z.ubo[1][0] = (vka_range){0x10000, 256}; z.tex[1][3] = 8; z.samp_base = 200;

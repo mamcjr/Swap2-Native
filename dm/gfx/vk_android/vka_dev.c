@@ -392,6 +392,11 @@ static int init_once(void) {
     const VkPhysicalDeviceLimits *lim = &V.props.limits;
     V.ub_align = lim->minUniformBufferOffsetAlignment ? lim->minUniformBufferOffsetAlignment : 256; V.sb_align = lim->minStorageBufferOffsetAlignment ? lim->minStorageBufferOffsetAlignment : 256;
     V.ub_range = lim->maxUniformBufferRange; V.sb_range = lim->maxStorageBufferRange; V.max_vin_bindings = lim->maxVertexInputBindings;
+    V.tb_align[0] = p13.uniformTexelBufferOffsetAlignmentBytes ? p13.uniformTexelBufferOffsetAlignmentBytes : lim->minTexelBufferOffsetAlignment; V.tb_single[0] = p13.uniformTexelBufferOffsetSingleTexelAlignment;
+    V.tb_align[1] = p13.storageTexelBufferOffsetAlignmentBytes ? p13.storageTexelBufferOffsetAlignmentBytes : lim->minTexelBufferOffsetAlignment; V.tb_single[1] = p13.storageTexelBufferOffsetSingleTexelAlignment;
+    V.tb_max = lim->maxTexelBufferElements;
+    VLOG("texel buffers: offsets aligned to %llu bytes uniform%s, %llu storage%s; at most %u elements", (unsigned long long)V.tb_align[0], V.tb_single[0] ? " (or one texel)" : "",
+         (unsigned long long)V.tb_align[1], V.tb_single[1] ? " (or one texel)" : "", V.tb_max);
     vka_tex_pfb_flags();   // texture pool reads decided (and their buffers made) here, before any module is made, so no module's hook makes them under a caller's lock
 
     VkMemoryPropertyFlags HV = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;

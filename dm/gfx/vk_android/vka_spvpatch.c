@@ -1272,3 +1272,121 @@ uint32_t *vka_spv_shuffle_xor(const uint32_t *w, size_t nw, size_t *out_nw, int 
 oom:
     free(o.w); snprintf(err, errn, "out of memory"); return NULL;
 }
+
+// vka_spv_shuffle_halves: each OpGroupNonUniformShuffle whose lane is (SubgroupLocalInvocationId & -32) | k, k a constant from 0 to 31 (or without the | k), as two
+// OpGroupNonUniformBroadcast from the constant lanes k and 32 + k, the second taken where bit 32 of the shuffle's lane is set: the value of lane k of the invocation's own
+// 32-lane half, as before, on a subgroup of 32 or 64 lanes. The translator writes Maxwell's SHFL.IDX of lane k (a warp of 32) this way on the library's 64-lane subgroups;
+// Turnip has no arbitrary-index shuffle instruction and ir3 makes each such shuffle a loop of rotates, one pass per distinct (lane - index): up to 32 for this pattern.
+// Ocarina of Time's foliage mesh programs read all 32 lanes of their half in a row (32 such shuffles each, 36 of its 520 task and mesh programs): their compute fallback
+// went from 51.8 to 20.0 ms of a Kokiri frame on the Adreno 830 with Swap2-Turnip, the picture on 891.14 unchanged (the module's meaning is kept). Only for a subgroup of
+// 64 lanes (lane 32 + k must exist where it is read). A broadcast's lane is a constant (OpConstant), as SPIR-V before 1.5 asks; a vector result needs SPIR-V 1.4's OpSelect
+// with a scalar condition, so before 1.4 only scalar results are rewritten. Adds the GroupNonUniformBallot capability a broadcast needs when the module lacks it.
+// A malloc'd copy (*out_nw words, *sites shuffles rewritten); NULL with err empty when no shuffle has the pattern, NULL with the reason in err when it cannot be rewritten
+enum { SH_OpCapability = 17, SH_OpBitwiseOr = 197, SH_OpBitwiseAnd = 199, SH_OpINotEqual = 171, SH_CapGroupNonUniformBallot = 64 };
+typedef struct { const uint32_t *w; uint32_t bound, lane; const uint32_t *def, *kof; const uint8_t *isconst; } sh_ctx;
+static uint32_t sh_strip(const sh_ctx *c, uint32_t id) {   // through OpBitcast
+    for (int n = 0; n < 16 && id < c->bound && c->def[id] && (c->w[c->def[id]] & 0xffff) == OpBitcast; n++) id = c->w[c->def[id] + 3];
+    return id;
+}
+static int sh_is_lane(const sh_ctx *c, uint32_t id) {   // a load of the SubgroupLocalInvocationId input
+    id = sh_strip(c, id);
+    return id < c->bound && c->def[id] && (c->w[c->def[id]] & 0xffff) == OpLoad && c->w[c->def[id] + 3] == c->lane;
+}
+static int sh_const(const sh_ctx *c, uint32_t id, uint32_t *v) {
+    id = sh_strip(c, id);
+    if (id >= c->bound || !c->isconst[id]) return 0;
+    *v = c->kof[id]; return 1;
+}
+static int sh_half(const sh_ctx *c, uint32_t id) {   // lane & -32, either operand order
+    id = sh_strip(c, id); uint32_t v = 0;
+    if (id >= c->bound || !c->def[id] || (c->w[c->def[id]] & 0xffff) != SH_OpBitwiseAnd) return 0;
+    const uint32_t *x = c->w + c->def[id];
+    return (sh_is_lane(c, x[3]) && sh_const(c, x[4], &v) && v == 0xffffffe0u) || (sh_is_lane(c, x[4]) && sh_const(c, x[3], &v) && v == 0xffffffe0u);
+}
+static int sh_lane_k(const sh_ctx *c, uint32_t idx) {   // k when idx is (lane & -32) | k, else -1
+    uint32_t id = sh_strip(c, idx), k = 0;
+    if (sh_half(c, id)) return 0;
+    if (id >= c->bound || !c->def[id] || (c->w[c->def[id]] & 0xffff) != SH_OpBitwiseOr) return -1;
+    const uint32_t *x = c->w + c->def[id];
+    if (sh_half(c, x[3]) && sh_const(c, x[4], &k) && k < 32) return (int)k;
+    if (sh_half(c, x[4]) && sh_const(c, x[3], &k) && k < 32) return (int)k;
+    return -1;
+}
+uint32_t *vka_spv_shuffle_halves(const uint32_t *w, size_t nw, size_t *out_nw, int *sites, char *err, size_t errn) {
+#define FAIL(...) do { snprintf(err, errn, __VA_ARGS__); goto fail; } while (0)
+    *sites = 0; err[0] = 0;
+    if (nw < 5 || w[0] != 0x07230203) { snprintf(err, errn, "not SPIR-V"); return NULL; }
+    uint32_t bound = w[3], nb = bound;
+    uint32_t *def = NULL, *kof = NULL; uint8_t *isconst = NULL, *tyk = NULL; vec_t o = {0};
+    def = calloc(bound, 4); kof = calloc(bound, 4); isconst = calloc(bound, 1); tyk = calloc(bound, 1);   // tyk: 1 a 32-bit scalar type, 2 a vector type, 3 another integer
+    if (!def || !kof || !isconst || !tyk) FAIL("out of memory");
+    uint32_t lane_dec = 0, lane = 0, t_u32 = 0, t_bool = 0; size_t first_fn = nw, last_cap = 0; int has_ballot = 0, nsh = 0;
+    for (int pass = 0; pass < 2; pass++)
+        for (size_t i = 5; i < nw;) {
+            uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *x = w + i;
+            if (!len || i + len > nw) FAIL("bad instruction at word %zu", i);
+            if (pass == 0) {
+                if (op == SH_OpCapability && len >= 2) { last_cap = i + len; if (x[1] == SH_CapGroupNonUniformBallot) has_ballot = 1; }
+                else if (op == OpDecorate && len >= 4 && x[2] == DecBuiltIn && x[3] == BISubgroupLocalInvocationId) lane_dec = x[1];
+                else if (op == OpTypeInt && len >= 4 && x[1] < bound) { tyk[x[1]] = x[2] == 32 ? 1 : 3; if (x[2] == 32 && !x[3] && !t_u32) t_u32 = x[1]; }
+                else if (op == OpTypeFloat && len >= 3 && x[1] < bound) tyk[x[1]] = x[2] == 32 ? 1 : 3;
+                else if (op == OpTypeVector && len >= 4 && x[1] < bound) tyk[x[1]] = 2;
+                else if (op == OpTypeBool && len >= 2) t_bool = x[1];
+                else if (op == OpFunction && first_fn == nw) first_fn = i;
+                else if (op == OpGNUShuffle) nsh++;
+            } else {
+                if (op == OpVariable && len >= 4 && lane_dec && x[2] == lane_dec && x[3] == SCInput) lane = x[2];
+                else if (op == OpConstant && len == 4 && x[2] < bound && x[1] < bound && tyk[x[1]] == 1) { isconst[x[2]] = 1; kof[x[2]] = x[3]; }   // a 32-bit scalar
+                if ((op == OpLoad || op == OpBitcast || op == SH_OpBitwiseAnd || op == SH_OpBitwiseOr) && len >= 4 && x[2] < bound) def[x[2]] = (uint32_t)i;
+            }
+            i += len;
+        }
+    if (!nsh || !lane || !t_u32 || !last_cap) goto none;   // nothing of this shape
+    sh_ctx c = {w, bound, lane, def, kof, isconst};
+    int want[32] = {0};
+    for (size_t i = first_fn; i < nw; i += w[i] >> 16) {
+        if ((w[i] & 0xffff) != OpGNUShuffle || (w[i] >> 16) != 6 || w[i + 1] >= bound) continue;
+        int k = sh_lane_k(&c, w[i + 5]);
+        if (k < 0 || !(tyk[w[i + 1]] == 1 || (tyk[w[i + 1]] == 2 && w[1] >= 0x10400))) continue;
+        want[k] = 1; (*sites)++;
+    }
+    if (!*sites) goto none;
+    uint32_t mk_bool = t_bool ? 0 : nb++; if (!t_bool) t_bool = mk_bool;
+    uint32_t c0 = nb++, c32 = nb++, ck[64] = {0};
+    for (int k = 0; k < 32; k++) if (want[k]) { ck[k] = nb++; ck[k + 32] = nb++; }
+    if (!put_n(&o, w, 5)) FAIL("out of memory");
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *x = w + i;
+        if (i == last_cap && !has_ballot) { uint32_t y[2] = {2u << 16 | SH_OpCapability, SH_CapGroupNonUniformBallot}; if (!put_n(&o, y, 2)) FAIL("out of memory"); }
+        if (i == first_fn) {
+            if (mk_bool) { uint32_t y[2] = {2u << 16 | OpTypeBool, mk_bool}; if (!put_n(&o, y, 2)) FAIL("out of memory"); }
+            uint32_t y[8] = {4u << 16 | OpConstant, t_u32, c0, 0, 4u << 16 | OpConstant, t_u32, c32, 32}; if (!put_n(&o, y, 8)) FAIL("out of memory");
+            for (uint32_t k = 0; k < 64; k++) if (ck[k]) { uint32_t z[4] = {4u << 16 | OpConstant, t_u32, ck[k], k}; if (!put_n(&o, z, 4)) FAIL("out of memory"); }
+        }
+        if (i >= first_fn && op == OpGNUShuffle && len == 6 && x[1] < bound) {
+            int k = sh_lane_k(&c, x[5]);
+            if (k >= 0 && (tyk[x[1]] == 1 || (tyk[x[1]] == 2 && w[1] >= 0x10400))) {
+                uint32_t lo = nb++, hi = nb++, bit = nb++, cond = nb++;
+                uint32_t y[] = {6u << 16 | OpGNUBroadcast, x[1], lo, x[3], x[4], ck[k],          // OpGroupNonUniformBroadcast %type %lo %scope %value %k
+                                6u << 16 | OpGNUBroadcast, x[1], hi, x[3], x[4], ck[k + 32],     // ... from lane 32 + k
+                                5u << 16 | SH_OpBitwiseAnd, t_u32, bit, x[5], c32,               // the shuffle's lane & 32
+                                5u << 16 | SH_OpINotEqual, t_bool, cond, bit, c0,
+                                6u << 16 | OpSelect, x[1], x[2], cond, hi, lo};                   // under the shuffle's own result id
+                if (!put_n(&o, y, sizeof y / 4)) FAIL("out of memory");
+                i += len; continue;
+            }
+        }
+        if (!put_n(&o, x, len)) FAIL("out of memory");
+        i += len;
+    }
+    o.w[3] = nb;
+    free(def); free(kof); free(isconst); free(tyk);
+    *out_nw = o.n; return o.w;
+none:
+    free(def); free(kof); free(isconst); free(tyk); *sites = 0;
+    return NULL;
+fail:
+    free(def); free(kof); free(isconst); free(tyk); free(o.w); *sites = 0;
+    return NULL;
+#undef FAIL
+}

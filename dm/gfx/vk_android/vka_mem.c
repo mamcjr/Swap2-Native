@@ -553,9 +553,10 @@ static void detach(int i, segvec *v) {   // caller holds g_pl, and g_rw for writ
 // read-only: the completion thread writes events and counter reports into pools, and one that faults on this range would wait for the swap while the swap waits for it.
 // Memory the GPU is not known to be done with (the wait ran into the hang time, or a GPU hang was declared) is never freed: it stays allocated (leaked) behind the anonymous pages,
 // since a free under work the GPU still runs faults the GPU (freed anyway after 2 s before, on the way to a system restart on the phone)
+static void bv_drop(VkBuffer b);
 static void seg_free(const seg_t *s, int waited, uint64_t fence) {
     if (waited) { if (s->fd_alias == 1) vk.vkUnmapMemory(V.dev, s->mem);   // (2, a hardware buffer: never mapped through Vulkan)
-        vk.vkDestroyBuffer(V.dev, s->buf, NULL); vk.vkFreeMemory(V.dev, s->mem, NULL); return; }
+        bv_drop(s->buf); vk.vkDestroyBuffer(V.dev, s->buf, NULL); vk.vkFreeMemory(V.dev, s->mem, NULL); return; }
     static _Atomic int nk; if (atomic_fetch_add(&nk, 1) < 8) VRED("giving back pool memory %#lx+%#zx: the GPU is not known to be done with it (fence %llu%s): its Vulkan memory is kept, not freed",
                                                                (unsigned long)s->lo, (size_t)(s->hi - s->lo), (unsigned long long)fence, vka_hung() ? ", GPU hang" : " not reached in the hang time");
 }
@@ -768,6 +769,56 @@ uint64_t vka_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *
     seg_t tmp; const seg_t *g = lookup((uintptr_t)addr, &tmp); uint64_t n = 0;
     if (g) { n = g->hi - addr; if (n > len) n = len; *buf = g->buf; *off = addr - g->lo; }
     return n;
+}
+
+// ---------- Texel buffer views ----------
+// A buffer texture (NVN_TEXTURE_TARGET_BUFFER) bound to a uniform or storage texel buffer binding (vka_draw.c stage_writes) is a VkBufferView over the placed segment that
+// holds its storage: the shader reads, writes and runs atomics on the pool's bytes in place, as on NVN (and as nvn_mtl.m's texture buffers on the pool's MTLBuffer). Views
+// are kept per (segment buffer, offset, range, format, use) and destroyed with that buffer (seg_free, once the GPU is done with it; a segment kept for a GPU that is not known
+// to be done keeps its views too)
+typedef struct bv_ent { struct bv_ent *next; VkBuffer b; VkDeviceSize off, range; VkFormat f; int storage; VkBufferView v; } bv_ent;
+static bv_ent *g_bv[1024]; static int g_nbv; static pthread_mutex_t g_bvmu = PTHREAD_MUTEX_INITIALIZER;
+static unsigned bv_hash(VkBuffer b, VkDeviceSize off) { uint64_t h = (uint64_t)(uintptr_t)b * 0x9E3779B97F4A7C15ull ^ off * 0xC2B2AE3D27D4EB4Full; return (unsigned)(h >> 54); }
+static void bv_drop(VkBuffer b) {
+    pthread_mutex_lock(&g_bvmu);
+    for (int i = 0; g_nbv && i < 1024; i++) for (bv_ent **pp = &g_bv[i]; *pp;) {
+        bv_ent *e = *pp; if (e->b != b) { pp = &e->next; continue; }
+        *pp = e->next; vk.vkDestroyBufferView(V.dev, e->v, NULL); free(e); g_nbv--;
+    }
+    pthread_mutex_unlock(&g_bvmu);
+}
+VkBufferView vka_buf_view(uint64_t addr, uint64_t bytes, VkFormat f, uint32_t texel, int storage, int atomic, uint64_t *range, char *why, size_t nwhy) {
+    VkBuffer b; VkDeviceSize off; storage = !!storage;
+    if (!texel || !bytes) { snprintf(why, nwhy, "no elements"); return VK_NULL_HANDLE; }
+    uint64_t run = vka_addr_run(addr, bytes, &b, &off);
+    if (!run) { snprintf(why, nwhy, "its storage at %#llx is not in placed guest memory", (unsigned long long)addr); return VK_NULL_HANDLE; }
+    // The offset rule of Vulkan 1.3 (texel buffer alignment): a multiple of the alignment in bytes, or of one texel when the device takes single-texel alignment
+    VkDeviceSize al = V.tb_align[storage] ? V.tb_align[storage] : 256; if (V.tb_single[storage] && texel < al && !(texel & (texel - 1))) al = texel;
+    if (off % al) { snprintf(why, nwhy, "its storage at %#llx lies at offset %#llx of its segment, not a multiple of the device's %llu-byte %s texel buffer alignment", (unsigned long long)addr,
+                             (unsigned long long)off, (unsigned long long)al, storage ? "storage" : "uniform"); return VK_NULL_HANDLE; }
+    uint64_t n = run / texel; if (V.tb_max && n > V.tb_max) n = V.tb_max;
+    if (!n) { snprintf(why, nwhy, "less than one texel of it is placed"); return VK_NULL_HANDLE; }
+    VkDeviceSize rg = n * texel; if (range) *range = rg;
+    unsigned h = bv_hash(b, off);
+    pthread_mutex_lock(&g_bvmu);
+    for (bv_ent *e = g_bv[h]; e; e = e->next) if (e->b == b && e->off == off && e->range == rg && e->f == f && e->storage == storage) { VkBufferView v = e->v; pthread_mutex_unlock(&g_bvmu); return v; }
+    pthread_mutex_unlock(&g_bvmu);
+    VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, f, &fp);
+    VkFormatFeatureFlags need = storage ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT | (atomic ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_ATOMIC_BIT : 0) : VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
+    if ((fp.bufferFeatures & need) != need) { snprintf(why, nwhy, "VkFormat %d has no %s texel buffer support on this device (buffer features %#x)", f, storage ? atomic ? "atomic storage" : "storage" : "uniform", fp.bufferFeatures); return VK_NULL_HANDLE; }
+    VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = b, .format = f, .offset = off, .range = rg};
+    VkBufferView v = VK_NULL_HANDLE; VkResult r = vk.vkCreateBufferView(V.dev, &ci, NULL, &v);
+    if (r != VK_SUCCESS) { snprintf(why, nwhy, "vkCreateBufferView: %d", r); return VK_NULL_HANDLE; }
+    bv_ent *e = calloc(1, sizeof *e);
+    if (!e) { vk.vkDestroyBufferView(V.dev, v, NULL); snprintf(why, nwhy, "out of memory"); return VK_NULL_HANDLE; }
+    *e = (bv_ent){NULL, b, off, rg, f, storage, v};
+    pthread_mutex_lock(&g_bvmu);
+    for (bv_ent *o = g_bv[h]; o; o = o->next) if (o->b == b && o->off == off && o->range == rg && o->f == f && o->storage == storage) {   // made meanwhile by another thread: that one
+        VkBufferView ov = o->v; pthread_mutex_unlock(&g_bvmu); vk.vkDestroyBufferView(V.dev, v, NULL); free(e); return ov; }
+    e->next = g_bv[h]; g_bv[h] = e; int nb = ++g_nbv;
+    pthread_mutex_unlock(&g_bvmu);
+    if (nb == 1) VLOG("texel buffers: first view (%s, VkFormat %d, %llu bytes at segment offset %#llx)", storage ? "storage" : "uniform", f, (unsigned long long)rg, (unsigned long long)off);
+    return v;
 }
 
 // The placed segments in address order (raw global memory's table, vka_draw.c gmem_map): at most max, the count returned

@@ -81,6 +81,7 @@
 #define DMSH_VK_KIND_GMEM_LOG 21         // gmem_log: the write log of those stores, STORAGE_BUFFER, cleared per draw or dispatch
 #define DMSH_VK_KIND_SHARED_SPILL 22     // shared_spill: a compute program's shared memory past DMSH_VK_SHARED_MAX, STORAGE_BUFFER, the record's bytes per workgroup slice. Workgroup w
                                          // (linear index (z * groups y + y) * groups x + x) uses slice w mod (the bound range / bytes); slices not cleared (shared memory starts undefined)
+#define DMSH_VK_KIND_IMG_UBO 23          // img_ubo: image handle in uniform slot reg at byte off (low 20 bits the texture ID, as tex_ubo's), STORAGE_IMAGE or STORAGE_TEXEL_BUFFER; flag ATOMIC
 #define DMSH_VK_KIND_UNKNOWN 255         // ?: not placed; the replay refuses the shader
 
 // Binding record flags
