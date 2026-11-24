@@ -519,6 +519,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             Lsfg.env(this, env);   // frame generation: the user's Lossless.dll and the settings
             Fsr.env(this, env);   // FSR 1 upscaling (the in-game panel)
             GameGraphics.env(this, id, env);   // per-title choices, before the player's environment overrides
+            GameGraphics.foliageEnv(this, id, prof, env);   // Foliage (Advanced graphics): the profile's grass and plant programs and the chosen level (nothing without them)
+            GameGraphics.effectsEnv(this, id, prof, env);   // the effects turned off in Advanced graphics (Fog): their programs left out (nothing without graphics_off rows)
             String lang = Prefs.gameLangCode(Prefs.gameLang(this, id));   // Game language (Game settings): the system language the host gives the game, else its default (US English)
             if (lang != null) env.add("DM_LANG=" + lang);
             // the shared-font stand-in (dm/third_party/fonts, GameFonts): without a standard font the host has none on a phone (hle_sdk16.c looks for macOS's), and a game that
@@ -873,7 +875,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             }
         } catch (IOException ignored) { /* next time */ }
         curtain.tick();
-        if (done || curtain.shownMs() > CURTAIN_MAX_MS) {
+        // the host's boot hold (DM_VK_PREPARE): the count and a tap to skip, while it shows (it answers only after its first second)
+        boolean holding = curtain.compiling(Native.prepareStatus(), () -> { Native.note("compiling shaders: skipped by the player"); Native.prepareSkip(); });
+        if (done || (curtain.shownMs() > CURTAIN_MAX_MS && !holding)) {   // (the hold ends by itself: the host's DM_VK_PREPARE_MAX_S)
             boolean bad = failed || curtain.failed();
             if (bad) failed = true;   // the log block shows (tail)
             curtainEnd(bad);

@@ -56,6 +56,8 @@
     <string name="s2_play_prewarm_n">Preriscaldamento di %1$d pipeline…</string>
     <string name="s2_play_scene">Caricamento delle texture e della prima scena…</string>
     <string name="s2_play_ready">Pronto</string>
+    <string name="s2_play_compiling">Compilazione shader: %1$d di %2$d, circa %3$d s rimanenti · Tocca per saltare</string>
+    <string name="s2_play_compiling_n">Compilazione shader: %1$d di %2$d · Tocca per saltare</string>
     <string name="s2_game_settings">Impostazioni del gioco</string>
     <string name="s2_this_game">SOLO QUESTO GIOCO</string>
     <string name="s2_game_settings_intro">Le modifiche si applicano al prossimo avvio. Predefinito segue le impostazioni generali.</string>
@@ -311,7 +313,7 @@
     <string name="s2_resolution_note">La dimensione a cui il gioco esegue il rendering.</string>
     <string name="s2_frame_cap_note">Il massimo di frame al secondo che questo gioco disegna.</string>
     <string name="s2_frame_cap_own">Questo gioco sceglie il proprio frame rate</string>
-    <string name="s2_game_graphics_hint">L\'upscaling FSR e la generazione di frame sono impostazioni generali (Impostazioni › Prestazioni) e del pannello di gioco.</string>
+    <string name="s2_game_graphics_hint">La generazione di frame è un\'impostazione generale (Impostazioni › Prestazioni) e del pannello di gioco.</string>
     <string name="s2_upscaler">Upscaler</string>
     <string name="s2_upscaler_net">La rete neurale del gioco (NDSR)</string>
     <string name="s2_upscaler_fsr">FSR 1 (più veloce)</string>
@@ -731,8 +733,8 @@
     <string name="s2_gfx_on">Attivato</string>
     <string name="s2_gfx_inherit">Segui le impostazioni globali / il profilo del gioco</string>
     <string name="s2_gfx_scaling_note">Adatta l\'immagine allo schermo e sostituisce gli upscaler neurali supportati. Nativo mantiene la rete del gioco.</string>
-    <string name="s2_gfx_sharp">Nitidezza dell\'output FSR</string>
-    <string name="s2_gfx_sharp_note">Aumento della nitidezza quando l\'immagine finale viene ingrandita allo schermo.</string>
+    <string name="s2_gfx_sharp">Nitidezza</string>
+    <string name="s2_gfx_sharp_note">Quanto l\'upscaler rende nitida l\'immagine ingrandita.</string>
     <string name="s2_gfx_async">Pipeline in background</string>
     <string name="s2_gfx_async_note">Si applica al prossimo avvio. Compila in background e attende quando serve per preservare gli effetti.</string>
     <string name="s2_gfx_timing">Temporizzazione GPU</string>
@@ -810,4 +812,22 @@
     <string name="s2_warm_play_now">Gioca ora</string>
     <string name="s2_warm_stop">Interrompi</string>
     <string name="s2_warm_close">Chiudi</string>
+    <string name="s2_sec_image">Immagine</string>
+    <string name="s2_sec_frames">Frame</string>
+    <string name="s2_sec_scene">Scena</string>
+    <string name="s2_up_original">Originale (quella del gioco)</string>
+    <string name="s2_up_note">FSR 1 è il più leggero. SGSR 2 e FSR 3.1 ricostruiscono i dettagli dai frame precedenti nei giochi con DLSS (SGSR 2 anche in Ocarina of Time); altrove funzionano come FSR 1. Si applica subito.</string>
+    <string name="s2_up_level">Livello dell\'upscaler</string>
+    <string name="s2_up_quality">Qualità (1080p)</string>
+    <string name="s2_up_balanced">Bilanciato (720p)</string>
+    <string name="s2_up_performance">Prestazioni (540p)</string>
+    <string name="s2_up_level_note">La risoluzione a cui il gioco esegue il rendering prima dell\'upscaler: più bassa è più veloce. Dal prossimo avvio.</string>
+    <string name="s2_gfx_foliage">Erba e piante</string>
+    <string name="s2_gfx_foliage_high">Alta (come le disegna il gioco)</string>
+    <string name="s2_gfx_foliage_medium">Media (metà dell\'erba)</string>
+    <string name="s2_gfx_foliage_low">Bassa (niente erba, metà delle piante)</string>
+    <string name="s2_gfx_foliage_none">Nessuna</string>
+    <string name="s2_gfx_foliage_note">Meno erba e vegetazione per più frame al secondo in campi e foreste. Si applica subito.</string>
+    <string name="s2_gfx_effect_volume_fog">Nebbia</string>
+    <string name="s2_gfx_effect_note">Disattivato: l\'effetto non viene disegnato, per più frame al secondo. Si applica subito.</string>
 </resources>

@@ -64,13 +64,13 @@ static void differential(const nvn_texdesc *d, unsigned level, unsigned layer) {
     uint32_t lb = nvn_tex_level_gobs(d, level) * 64;
     if (lb < rb) lb = rb;
     for (uint32_t z = 0; z < slices; z++) for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++)
-        linear[((size_t)z * rows + y) * pitch + x] = storage[base + nvn_bl_offset(x, y, z, lb, rows, th, td)];
+        linear[((size_t)z * rows + y) * pitch + x] = storage[base + nvn_bl_offset_o(x, y, z, lb, rows, th, td, nvn_gob_order(d))];
     CHECK(!nvn_deswizzle(d, level, layer, storage, out, pitch) && !memcmp(linear, out, nlin + 32),
           "D read differs target %d format %#x flags %#x mip %u layer %u", d->target, d->format, d->flags, level, layer);
     for (size_t i = 0; i < nlin; i++) linear[i] = rnd();
     memcpy(expected, storage, nst);
     for (uint32_t z = 0; z < slices; z++) for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++)
-        expected[base + nvn_bl_offset(x, y, z, lb, rows, th, td)] = linear[((size_t)z * rows + y) * pitch + x];
+        expected[base + nvn_bl_offset_o(x, y, z, lb, rows, th, td, nvn_gob_order(d))] = linear[((size_t)z * rows + y) * pitch + x];
     CHECK(!nvn_swizzle(d, level, layer, linear, pitch, storage) && !memcmp(storage, expected, nst),
           "D write differs target %d format %#x flags %#x mip %u layer %u", d->target, d->format, d->flags, level, layer);
     CHECK(nvn_swizzle(d, level, layer, linear, rb - 1, storage) == -1 && !memcmp(storage, expected, nst),
@@ -152,10 +152,24 @@ static void differential_shapes(void) {
         if (d.target == 9) d.depth = 12;
         if ((i / 8) & 1) d.pkg_block_h = 1 + (rnd() % 4) + (d.target == 2 ? (rnd() % 3) * 16 : 0);
         if ((i / 16) & 1) d.flags = 0x20;
+        d.gob_order = (uint16_t)(i / 32 % 3);   // the texture's own order (0: the process default), against the default set the other way below
+        nvn_gob_switch2 = (int)(i / 96 % 2);
         nvn_texlayout L; nvn_tex_layout(&d, &L);
         for (unsigned l = 0; l < d.levels; l++) {
             differential(&d, l, L.layers - 1); cases++;
         }
+    }
+    nvn_gob_switch2 = 0;
+    {   // a texture's own order wins over the process default (nvn_texdesc.gob_order, Banana Native #553): the same bytes decode alike either way round
+        nvn_texdesc a = {.target = 1, .format = 0x25, .width = 64, .height = 32, .depth = 1, .levels = 1, .gob_order = 2}, b = a; b.gob_order = 0;
+        nvn_texlayout L; nvn_tex_layout(&a, &L);
+        uint8_t *st = malloc(L.size), *la = malloc(256 * 32), *lb2 = malloc(256 * 32);
+        for (uint64_t i = 0; i < L.size; i++) st[i] = rnd();
+        nvn_deswizzle(&a, 0, 0, st, la, 256); nvn_gob_switch2 = 1; nvn_deswizzle(&b, 0, 0, st, lb2, 256);
+        CHECK(!memcmp(la, lb2, 256 * 32), "G gob_order 2 under the X1 default differs from the Switch 2 default");
+        a.gob_order = 1; b.gob_order = 0; nvn_deswizzle(&a, 0, 0, st, la, 256); nvn_gob_switch2 = 0; nvn_deswizzle(&b, 0, 0, st, lb2, 256);
+        CHECK(!memcmp(la, lb2, 256 * 32), "G gob_order 1 under the Switch 2 default differs from the X1 default");
+        free(st); free(la); free(lb2);
     }
     // Sparse levels wide enough for padded GOB columns, followed by their mip tails.
     nvn_texdesc sparse = {1, 0x7D, 0x20, 0, 1024, 1024, 1, 5, 0, 0};

@@ -54,6 +54,8 @@
     <string name="s2_play_prewarm_n">%1$d 個のパイプラインを事前準備中…</string>
     <string name="s2_play_scene">テクスチャーと最初のシーンを読み込み中…</string>
     <string name="s2_play_ready">準備完了</string>
+    <string name="s2_play_compiling">シェーダーをコンパイル中：%1$d / %2$d、残り約 %3$d 秒 · タップでスキップ</string>
+    <string name="s2_play_compiling_n">シェーダーをコンパイル中：%1$d / %2$d · タップでスキップ</string>
     <string name="s2_game_settings">ゲーム設定</string>
     <string name="s2_this_game">このゲームのみ</string>
     <string name="s2_game_settings_intro">変更は次回の起動から反映されます。「デフォルト」は全般の設定に従います。</string>
@@ -303,7 +305,7 @@
     <string name="s2_resolution_note">ゲームが描画するサイズです。</string>
     <string name="s2_frame_cap_note">このゲームが1秒間に描画する最大フレーム数です。</string>
     <string name="s2_frame_cap_own">このゲームはフレームレートを自分で決めます</string>
-    <string name="s2_game_graphics_hint">FSR アップスケーリングとフレーム生成は、全般の設定(設定 › パフォーマンス)とゲーム内パネルで変更します。</string>
+    <string name="s2_game_graphics_hint">フレーム生成は、全般の設定(設定 › パフォーマンス)とゲーム内パネルで変更します。</string>
     <string name="s2_upscaler">アップスケーラー</string>
     <string name="s2_upscaler_net">ゲーム内蔵のニューラルネットワーク(NDSR)</string>
     <string name="s2_upscaler_fsr">FSR 1(高速)</string>
@@ -721,8 +723,8 @@
     <string name="s2_gfx_on">オン</string>
     <string name="s2_gfx_inherit">全体の設定 / ゲームプロファイルに従う</string>
     <string name="s2_gfx_scaling_note">映像を画面に合わせて拡大し、対応するニューラルアップスケーラーを置き換えます。「ネイティブ」ではゲームのネットワークを使います。</string>
-    <string name="s2_gfx_sharp">FSR 出力のシャープネス</string>
-    <string name="s2_gfx_sharp_note">最終的な映像を画面に合わせて拡大するときのシャープ化です。</string>
+    <string name="s2_gfx_sharp">シャープネス</string>
+    <string name="s2_gfx_sharp_note">アップスケーラーが拡大した画像をどれだけ鮮明にするかです。</string>
     <string name="s2_gfx_async">バックグラウンドパイプライン</string>
     <string name="s2_gfx_async_note">次回の起動から反映されます。バックグラウンドでコンパイルし、エフェクトを保つために必要なときは待ちます。</string>
     <string name="s2_gfx_timing">GPU タイミング</string>
@@ -800,4 +802,22 @@
     <string name="s2_warm_play_now">今すぐプレイ</string>
     <string name="s2_warm_stop">停止</string>
     <string name="s2_warm_close">閉じる</string>
+    <string name="s2_sec_image">画像</string>
+    <string name="s2_sec_frames">フレーム</string>
+    <string name="s2_sec_scene">シーン</string>
+    <string name="s2_up_original">オリジナル(ゲーム本来)</string>
+    <string name="s2_up_note">FSR 1 が最も軽量です。SGSR 2 と FSR 3.1 は DLSS を使うゲームで前のフレームから細部を再構築します(SGSR 2 は Ocarina of Time でも)。それ以外では FSR 1 として動作します。すぐに反映されます。</string>
+    <string name="s2_up_level">アップスケーラーのレベル</string>
+    <string name="s2_up_quality">画質優先(1080p)</string>
+    <string name="s2_up_balanced">バランス(720p)</string>
+    <string name="s2_up_performance">パフォーマンス(540p)</string>
+    <string name="s2_up_level_note">アップスケーラーの前にゲームが描画する解像度です。低いほど高速です。次回の起動から反映されます。</string>
+    <string name="s2_gfx_foliage">草と植物</string>
+    <string name="s2_gfx_foliage_high">高(ゲーム本来の描画)</string>
+    <string name="s2_gfx_foliage_medium">中(草を半分に)</string>
+    <string name="s2_gfx_foliage_low">低(草なし、植物を半分に)</string>
+    <string name="s2_gfx_foliage_none">なし</string>
+    <string name="s2_gfx_foliage_note">草木を減らして、草原や森でのフレームレートを上げます。すぐに反映されます。</string>
+    <string name="s2_gfx_effect_volume_fog">霧</string>
+    <string name="s2_gfx_effect_note">オフ:このエフェクトを描画せず、フレームレートを上げます。すぐに反映されます。</string>
 </resources>

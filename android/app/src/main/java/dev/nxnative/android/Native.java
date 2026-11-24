@@ -127,4 +127,11 @@ final class Native {
 
     /** Ends the warm early (Play now): the compiles under way finish, what was made is saved, and Native.warm returns */
     static native void warmStop();
+
+    /** The host's boot hold (vka_pso.c nxhost_pso_prepare_status, DM_VK_PREPARE): "&lt;taken&gt; &lt;total&gt; &lt;seconds left or -1&gt;" while it holds the game for its
+     *  pipelines and has done so for a second, "" otherwise or from a host without it; the loading curtain shows it (PlayCurtain.compiling) */
+    static native String prepareStatus();
+
+    /** Ends the boot hold: the game goes on and the rest of the pipelines are made beside it (nothing from a host without it) */
+    static native void prepareSkip();
 }

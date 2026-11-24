@@ -331,7 +331,7 @@ int main(void) {
     CHECK(write_save("save:/a", "ok2") == RES_OK && h_fs_Commit("save") == RES_OK, "the next transaction commits as usual");
     // 6c Cloning the work directory at mount fails: do not exit; mount the committed directory read-only instead. Reads work, writes fail, commits are no-ops, the committed version is unchanged, and the front end is notified once; the next normal mount works as before
     setenv("DM_TEST_FS_FAILAT", "mountclone:1", 1); g_nmnt = 0; nf0 = g_nfail;
-    snprintf(p, sizeof p, "rm -rf '%s'", work); system(p);
+    snprintf(p, sizeof p, "rm -rf '%s'", work); system(p);   // NOLINT(bugprone-command-processor): a fixed rm of the test's own work folder, no outside input
     CHECK(h_fs_MountSave("save", NULL) == RES_OK && g_nfail == nf0 + 1, "mount returns success, front end notified once (actually %d times)", g_nfail - nf0);
     CHECK(read_fs("save:/a", got, sizeof got) && !strcmp(got, "ok2"), "the read-only mount reads the committed a=ok2 (read %s)", got);
     CHECK(write_save("save:/a", "zzz") != RES_OK, "writes fail");
@@ -368,7 +368,59 @@ int main(void) {
         CHECK(rm_tree(lnk) == -1 && errno == ENOTDIR && same(vf, "keep"), "rm_tree of a symlink to a directory refuses it (ENOTDIR) and leaves the target alone");
     }
 
-    char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
+    printf("⑨ repeated save commit failures are deduplicated per path with a count\n");
+    {   char neu[1100], neuc[1200], out[1100];
+        snprintf(neu, sizeof neu, "%s.new", save);
+        snprintf(neuc, sizeof neuc, "%s/stuck", neu);
+        snprintf(out, sizeof out, "%s/commit_dedup.txt", root);
+        mkdir(neu, 0755); put(neuc, "x"); chmod(neu, 0555);
+        fflush(NULL); pid_t pid = fork();
+        if (!pid) {
+            freopen(out, "w", stderr);
+            for (int k = 0; k < 25; k++) {
+                if (h_fs_Commit("save") != RES_FAIL) _exit(2);
+            }
+            chmod(neu, 0755);
+            if (h_fs_Commit("save") != RES_OK) _exit(3);
+            if (h_fs_Commit("save") != RES_OK) _exit(4);
+            fflush(stderr);
+            _exit(0);
+        }
+        int st = 0; waitpid(pid, &st, 0);
+        chmod(neu, 0755); rm_tree(neu);
+        char buf[8192] = {0}; FILE *f = fopen(out, "r");
+        if (f) { fread(buf, 1, sizeof buf - 1, f); fclose(f); }
+        int n_cannot = 0, n_still = 0, n_cleared = 0;
+        for (const char *q = buf; (q = strstr(q, "cannot clear the")); q++) n_cannot++;
+        for (const char *q = buf; (q = strstr(q, "still failing")); q++) n_still++;
+        for (const char *q = buf; (q = strstr(q, "cleared after 25 failed attempts")); q++) n_cleared++;
+        CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "25 failed commits then recovery after chmod");
+        CHECK(n_cannot == 1 && n_still == 1 && n_cleared == 1,
+              "deduped log: cannot_clear=%d still_failing=%d cleared=%d (expected 1, 1, 1)", n_cannot, n_still, n_cleared);
+    }
+
+    printf("⑩ commit durability, and a save swap journal left part way\n");
+    {   char neu[1200], m1[1200], nf[1300], cmd2[1300]; g_nmnt = 0;
+        snprintf(neu, sizeof neu, "%s.new", save); snprintf(m1, sizeof m1, "%s.pend1", save); snprintf(nf, sizeof nf, "%s/a", neu); snprintf(p, sizeof p, "%s/a", save);
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && !g_mnt[0].ro, "mount the save");
+        setenv("DM_TEST_FS_FAILAT", "commitsync:1", 1);
+        CHECK(write_save("save:/a", "synced") == RES_OK && h_fs_Commit("save") == RES_FAIL, "a commit whose new version cannot be synced to the storage is refused");
+        CHECK(same(p, "ok3") && access(neu, F_OK) != 0, "the committed a is unchanged and the unsynced .new is gone");
+        unsetenv("DM_TEST_FS_FAILAT");
+        CHECK(h_fs_Commit("save") == RES_OK && same(p, "synced"), "the next commit (the work directory still holds a=synced) goes through");
+        // a journal (the Android fallback swap's marker) beside the save that recovery could not finish: its .new is the only whole copy of the new version
+        mkdir(neu, 0755); put(nf, "journal"); put(m1, neu);
+        CHECK(write_save("save:/a", "blocked") == RES_OK && h_fs_Commit("save") == RES_FAIL, "a commit with a journal left beside the save is refused");
+        CHECK(same(nf, "journal") && !access(m1, F_OK) && same(p, "synced"), "the journal's .new, its marker and the save are kept as they are");
+        g_nmnt = 0;
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && g_mnt[0].ro, "a mount with the journal left mounts the save read-only");
+        CHECK(same(nf, "journal") && !access(m1, F_OK), "and keeps the .new and the marker (they were cleared before)");
+        CHECK(read_fs("save:/a", got, sizeof got) && !strcmp(got, "synced"), "the save still reads (a = %s)", got);
+        unlink(m1); snprintf(cmd2, sizeof cmd2, "rm -rf '%s'", neu); system(cmd2); g_nmnt = 0;   // NOLINT(bugprone-command-processor): a fixed rm of the test's own .new folder, no outside input
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && !g_mnt[0].ro && write_save("save:/a", "after") == RES_OK && h_fs_Commit("save") == RES_OK && same(p, "after"), "with the journal gone the save is writable and commits again");
+    }
+
+    char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);   // NOLINT(bugprone-command-processor): a fixed rm of the folder the test made, no outside input
     printf("== %d checks, %d failed ==\n", checks, fails);
     return fails != 0;
 }

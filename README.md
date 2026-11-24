@@ -82,7 +82,8 @@ A pack can also be made on a computer with `scripts/pack_android.py` and copied 
 ## Features
 
 - Game settings per game: resolution (phone 1080p, 720p or the game's own), frame rate cap, GPU driver, extra environment lines.
-- **Upscaling:** AMD FidelityFX FSR 1 for the final picture, and for agl's games (Zelda, Mario Kart World, Donkey Kong Bananza) FSR 1 in place of the game's upscaler network, which is faster on Adreno. Zelda can also draw its 3D scene at 720p.
+- **Upscaling:** one Upscaler choice for every game: Original (the game's own), AMD FidelityFX FSR 1, Snapdragon GSR 2 (SGSR 2) or AMD FidelityFX FSR 3.1, in place of the games' DLSS and of agl's upscaler network (Zelda, Mario Kart World, Donkey Kong Bananza), with an Upscaler level (Quality 1080p, Balanced 720p, Performance 540p) and a sharpness. Zelda can also draw its 3D scene at 720p to 360p.
+- **Scene options:** Grass and plants (high to none) and Fog on or off in Zelda: Ocarina of Time, both changed while playing.
 - **Frame generation (LSFG):** Lossless Scaling's frame generation, with your own `Lossless.dll` (not included).
 - On-screen controls with a layout editor, gamepads, exefs mods, save backups, pause on return, and a performance overlay.
 

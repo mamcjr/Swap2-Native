@@ -13,11 +13,12 @@
 
 // ---------- The DLL (lsfg_dll.c) ----------
 enum { LSFG_OK, LSFG_NOT_INSTALLED, LSFG_UNREADABLE, LSFG_NOT_PE, LSFG_MISSING_SHADERS, LSFG_TRANSLATION_FAILED };
-enum { LSFG_SH_MIPMAPS = 255, LSFG_SH_GENERATE = 256, LSFG_NATIVE_FP16_OFFSET = 49, LSFG_NMODULES = 25 };
-// The performance shader set (the only one Eden uses): alpha 290..293, beta 298..302, gamma 280, 282..285, delta 280, 286..289, 281, 294..297
+enum { LSFG_SH_MIPMAPS = 255, LSFG_SH_GENERATE = 256, LSFG_NATIVE_FP16_OFFSET = 49, LSFG_NMODULES = 25, LSFG_QUALITY_DELTA = 23, LSFG_NMODULES_ALL = 48 };
+// The performance shader set (the only one Eden uses): alpha 290..293, beta 298..302, gamma 280, 282..285, delta 280, 286..289, 281, 294..297. The quality set (lsfg-vk's
+// v3.1): the same passes at the performance IDs - LSFG_QUALITY_DELTA (257..279); mipmaps and generate are shared
 typedef struct { uint32_t id, nwords; uint32_t *words; } lsfg_module;
-typedef struct { int n; lsfg_module m[LSFG_NMODULES]; } lsfg_modules;
-int lsfg_dll_load(const char *path, lsfg_modules *out);   // LSFG_OK: out holds the 25 modules, bindings renumbered (lsfg_modules_free)
+typedef struct { int n, quality; lsfg_module m[LSFG_NMODULES_ALL]; } lsfg_modules;   // quality: the quality set's 23 modules are there too
+int lsfg_dll_load(const char *path, lsfg_modules *out);   // LSFG_OK: out holds the performance set's 25 modules (and the quality set's where the DLL has it), bindings renumbered (lsfg_modules_free)
 int lsfg_dll_validate(const char *path);
 void lsfg_modules_free(lsfg_modules *m);
 const lsfg_module *lsfg_module_get(const lsfg_modules *m, uint32_t id);
@@ -28,20 +29,32 @@ typedef struct {
     double last_frame, stable_until, probe_until, next_probe, deficit_since;   // seconds (CLOCK_MONOTONIC); 0 = unset
     float smoothed_interval, output_credit, probe_base_rate, unloaded_base_rate;
     size_t issued, probe_previous_limit, limit; uint32_t probe_failures;
+    double below_since;   // decoupled: since when the base has been under min_base while generating (0 = not)
+    float min_base;   // set by the caller with decoupled: the floor (DM_LSFG_MIN_FPS, default 30; 0 = none)
+    int decoupled;   // set by the caller: the game's speed follows its measured rate (the host's frame limiter), so a slower base does not slow the game down
 } lsfg_pacer;
 typedef struct { size_t generations; int warm; } lsfg_plan;
 // multiplier 2..4 (images per game frame with target_rate 0), target_rate 0 or the output rate to hold (the multiplier then follows it)
 lsfg_plan lsfg_pacer_plan(lsfg_pacer *p, size_t capacity, int multiplier, int target_rate, double now);
 void lsfg_pacer_reset(lsfg_pacer *p);
+float lsfg_pacer_floor(const lsfg_pacer *p);   // decoupled: the base rate generation must not push the game under (min_base, or 3/4 of the game's own rate when lower)
 
 // ---------- The chain (lsfg_chain.c), Vulkan; needs the replay's device (vka.h) ----------
 #ifdef VK_VERSION_1_0
 enum { LSFG_MAX_GENERATIONS = 3, LSFG_GENERATION_SLOTS = LSFG_MAX_GENERATIONS * (LSFG_MAX_GENERATIONS + 1) / 2 };
 typedef struct lsfg_chain lsfg_chain;
-// The chain for frames of extent ext (RGBA8 UNORM inputs); flow_scale 0.25..1 is the optical flow's resolution. outs[g] are the images generation g writes (storage, RGBA8)
-lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_scale, VkImage outs[LSFG_MAX_GENERATIONS], VkImageView out_views[LSFG_MAX_GENERATIONS]);
+// The chain for frames of extent ext (RGBA8 UNORM inputs); flow_scale 0.25..1 is the optical flow's resolution; gens (1..LSFG_MAX_GENERATIONS) the most generated frames
+// a game frame can have (each has its own working images); quality: the quality shader set (mods->quality), else performance. outs[g] are the images generation g writes
+// (storage, RGBA8)
+lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_scale, size_t gens, int quality, VkImage outs[LSFG_MAX_GENERATIONS], VkImageView out_views[LSFG_MAX_GENERATIONS]);
 void lsfg_chain_free(lsfg_chain *c);   // the GPU must be done with it
 VkImage lsfg_chain_input(lsfg_chain *c, uint64_t count);   // the image game frame count is copied into (GENERAL layout)
+VkImage lsfg_chain_probe(lsfg_chain *c, VkExtent2D *ext);   // a small R8 image of the flow input lsfg_chain_shared writes (GENERAL layout): the still-picture check (vka_framegen.c)
 void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count);                            // after the copy: mipmaps, alpha, beta of frame count
-void lsfg_chain_generate(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, size_t gen);  // generation gen of ngen between frames count - 1 and count, into outs[gen]
+// After lsfg_chain_shared: generations 0..ngen-1 (ngen up to the chain's gens) between frames count - 1 and count, into outs[0..ngen-1]; serial: Eden's order (one
+// generation after another, a barrier before each pass) instead of the wavefront (DM_LSFG_SCHED, vka_framegen.c)
+void lsfg_chain_generate(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, int serial);
+// Diagnostics (DM_LSFG_DUMP, vka_framegen.c): the chain's images worth looking at, in GENERAL layout: the inputs, the flow input, the motion fields (generation 0's). The count returned
+typedef struct { VkImage img; VkExtent2D ext; VkFormat fmt; const char *name; } lsfg_dbg_img;
+int lsfg_chain_debug_images(lsfg_chain *c, lsfg_dbg_img *out, int max);
 #endif

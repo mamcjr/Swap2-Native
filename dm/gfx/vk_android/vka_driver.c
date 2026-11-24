@@ -24,6 +24,12 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#if __has_include("game_profile.h")
+#include "game_profile.h"
+#endif
+#ifndef DM_GAME_TURNIP_ENV
+#define DM_GAME_TURNIP_ENV ""
+#endif
 
 #define ADRENOTOOLS_DRIVER_CUSTOM 1   // dm/third_party/libadrenotools/include/adrenotools/priv.h
 #define ADRENOTOOLS_DRIVER_FILE_REDIRECT 2
@@ -124,6 +130,18 @@ static int qgl_prepare(char *out, size_t cap) {
     DLOG("Qualcomm driver settings (DM_QGL): %sin %s/data/{vendor,misc}/gpu/qgl_config.txt, given to the driver through adrenotools' file redirect", body, out);
     return 1;
 }
+// The game profile's turnip_env (dm/games/README.md; Banana Native v0.3.52 #607): Mesa's own variables for this game, NAME=value words set before the driver reads them at
+// its first device; a name the environment sets (env.txt, the game's lines) keeps the environment's value. Set for any custom driver, since only Mesa reads them and a
+// Turnip build's library can have any name (upstream's check for "vulkan.ad0" missed PurpleVK's vulkan.purple.so); the system driver is Qualcomm's, which reads none
+static void turnip_env(void) {
+    char w[256], note[300]; snprintf(w, sizeof w, "%s", DM_GAME_TURNIP_ENV); size_t o = 0;
+    for (char *sv, *t = strtok_r(w, " ", &sv); t; t = strtok_r(NULL, " ", &sv)) {
+        char *eq = strchr(t, '='); if (!eq) continue; *eq = 0;
+        int kept = getenv(t) != NULL; if (!kept) setenv(t, eq + 1, 0);
+        if (o < sizeof note) o += (size_t)snprintf(note + o, sizeof note - o, "%s%s=%s%s", o ? ", " : "custom driver, the game profile's turnip_env: ", t, getenv(t), kept ? " (the environment's, kept)" : "");
+    }
+    if (o) DLOG("%s", note);
+}
 static void *driver_open(void) {
     const char *drv = getenv("DM_VK_DRIVER");
     int custom = drv && *drv && strcmp(drv, "system");
@@ -152,6 +170,7 @@ static void *driver_open(void) {
         if (!dladdr((void *)vka_driver_open, &di) || !di.dli_fname || !(sl = strrchr(di.dli_fname, '/'))) { DRED("DM_VK_DRIVER: cannot tell where libnxhost.so is: the system driver is used"); return NULL; }
         snprintf(hook, sizeof hook, "%.*s/", (int)(sl - di.dli_fname), di.dli_fname);
     }
+    if (custom) turnip_env();   // (before the driver reads them at its first device)
     void *at = dlopen("libnxadreno.so", RTLD_NOW | RTLD_LOCAL);
     open_libvulkan_fn open_vk = at ? (open_libvulkan_fn)dlsym(at, "adrenotools_open_libvulkan") : NULL;
     if (!open_vk) { DRED("DM_VK_DRIVER: libnxadreno.so not loaded (%s): the system driver is used", dlerror()); return NULL; }

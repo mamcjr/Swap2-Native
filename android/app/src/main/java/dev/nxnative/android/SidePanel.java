@@ -32,7 +32,7 @@ import java.util.function.IntFunction;
 
 /**
  * The in-game panel: slides in from the right over the running game, which goes on behind it (docs/SWAP2-NATIVE-SIDE-PANEL-v1.md). It holds the frame rate cap
- * (Native.fpsCapSet), frame generation (Native.frameGenSet through Lsfg.push), the live graphics rows (GameGraphics.rows), the overlay's switches and sliders, the
+ * (Native.fpsCapSet), frame generation (Native.frameGenSet through Lsfg.push), the live graphics rows (GameGraphics.imageRows, sceneRows), the overlay's switches and sliders, the
  * on-screen controls' rows (TouchControls.controlRows), Pause and Stop. Every change applies at once, without going back to the launcher, and is kept for the next
  * start. Opened by Back (the phone's button or its edge swipe), a long press on the on-screen controls' show / hide button, the handle at the right edge (hidden
  * while a gamepad is connected), or on a gamepad its Home / guide button (KEYCODE_BUTTON_MODE) or Minus and Plus held together for a second (for a pad whose Home
@@ -364,10 +364,17 @@ final class SidePanel extends FrameLayout {
 
         section(ui, box, ui.getString(R.string.s2g_panel_sec_image));
         LinearLayout image = card(ui);
-        Runnable[] redraw = new Runnable[1];   // a choice redraws the rows (the sharpness row shows only with FSR); only the options the renderer applies live
-        redraw[0] = () -> { image.removeAllViews(); GameGraphics.rows(ui, game(), image, redraw[0], true); unclip(image); };
+        Runnable[] redraw = new Runnable[1];   // a choice redraws the rows (the sharpness row shows only with an upscaler); only the options the renderer applies live
+        redraw[0] = () -> { image.removeAllViews(); GameGraphics.imageRows(ui, game(), image, null, redraw[0], true); unclip(image); };
         redraw[0].run();
         add(box, image);
+
+        section(ui, box, ui.getString(R.string.s2_sec_scene));   // Mesh geometry, Grass and plants, the effects that can be turned off: all live
+        LinearLayout scene = card(ui);
+        Runnable[] redrawScene = new Runnable[1];
+        redrawScene[0] = () -> { scene.removeAllViews(); GameGraphics.sceneRows(ui, game(), scene, redrawScene[0], true); unclip(scene); };
+        redrawScene[0].run();
+        add(box, scene);
 
         LinearLayout session = card(ui);
         session.addView(toggleRow(ui, R.drawable.s2_ic_pause, ui.getString(R.string.s2g_panel_pause_return), null, Prefs.pauseOnReturn(act, game()),

@@ -39,7 +39,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `game` → `host` | MapPhysicalMemory limited to the application pool | memory | gap | judgement | 1 | `mem_map_limit`: [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) | Horizon's limit; off by default because Ace Attorney Investigations Collection maps a little more than its profile's 1 GB pool, which is the thing to fix |
 | `game` → `host` | Metal encoding on its own thread on the Mac | frame rate | gap | judgement | 1 | `enc_thread`: [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | what iOS does for every game: a default for every game after `regress.py check` on the games |
 | `game` → `host` | MTL4Compiler pipelines on iOS | rendering | gap | judgement | 1 | `pso_mtl4`: [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | a setting the game was tested with on an iPhone: a default for every game after `regress.py check` on the games |
-| `game` → `host` | one vertex shader's visibility counter (VertexCounterLowering) | shaders | gap | judgement | — | [Program.cs:308](../../dm/gfx/tools/dmsh_xlate/Program.cs#L308) | a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way |
+| `game` → `host` | one vertex shader's visibility counter (VertexCounterLowering) | shaders | gap | judgement | — | [Program.cs:311](../../dm/gfx/tools/dmsh_xlate/Program.cs#L311) | a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way |
 | `game` → `host` | present snapshots | rendering | gap | judgement | 1 | `present_snap`: [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | a setting the game was tested with: a default for every game after `regress.py check` on the games |
 | `build` → `engine` | the dynamic resolution's level lists, lowered at load to fit DM_WINDOW_SIZE (the Android launcher's Game resolution) | rendering | gap | judgement | 1 | `res_levels`: [Pokemon Pokopia](../../dm/games/0400A3A01EE4C000/README.md) | KTGL's size table and level lists, at fixed offsets per main build; a fingerprint of the controller that picks the list (oe::GetOperationMode, oe::GetCurrentGraphicsScale, the 34-level table) could find them in other KTGL games |
 | `build` → `engine` | Unity QualitySettings.vSyncCount held at 1 | frame rate | gap | judgement | 1 | [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md) | an IL2CPP player registers the setter by its icall name, so the place can be found in any Unity game; holding it at 1 stays this profile's choice (its logic steps by the count) |
@@ -553,7 +553,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `game`**, frame rate, blocked: frame-step stubs have no function-matched form yet, checked: v131072 main: 2818201e at +0x6e6cc4, the stub words and the liveness of s0/x16/x17 after the site, by disassembly: frame ratio from the host frame step. The game's own frame ratio, base / the fps its controller picked
 - **`build` → `engine`**, rendering, blocked: the layout is not yet checked on this build (DM_VK_NDSR_CAM_LOG on a phone); one gsys game read so far, judgement: Ocarina of Time's scene context block layout (the camera's rows) for the temporal path in agl's NDSR slot (vka_ndsr.c, DM_VK_NDSR=gsr2, DM_VK_NDSR_CAM_LOG). Gsys's scene context block: if Donkey Kong Bananza and Mario Kart World lay it out the same, the block could be found by its size and its vertex shaders' reads instead of a build ID
 
-- **1.1.1 `main`** `e0f3ccfa…` ([patches.py:41](../../dm/games/0400486024DEC000/patches.py#L41))
+- **1.1.1 `main`** `e0f3ccfa…` ([patches.py:320](../../dm/games/0400486024DEC000/patches.py#L320))
   - frame step `+0x6e6cc4`: frame step: the frame ratio is the host's vsyncs times the base rate / 60 (state page target fps; 0 = the game's own fps)
   - host [vka_ndsr.c:159](../../dm/gfx/vk_android/vka_ndsr.c#L159): scene camera block layout for the temporal NDSR path
 
@@ -644,7 +644,7 @@ Applied to the `sdk` of any build without CUTS, found by function fingerprint ([
 
 ## Translator rules keyed by a shader's code
 
-- [Program.cs:308](../../dm/gfx/tools/dmsh_xlate/Program.cs#L308): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below) (**`game` → `host`**, gap: a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way)
+- [Program.cs:311](../../dm/gfx/tools/dmsh_xlate/Program.cs#L311): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below) (**`game` → `host`**, gap: a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way)
 
 ## Profile switches
 
@@ -665,6 +665,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `shader_key_skip 0x770+0x78` | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | `game`, at goal | the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key |
 | `shader_key_skip 0x7d0+0x18` | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | `game`, at goal | the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key |
 | `stdalloc_cap 0xa0000000` | [Absolum](../../dm/games/0100A83022A22000/README.md) | `game`, at goal | what the regions after it need, measured by the NSP script's region check; the host's cap is the default |
+| `tex_copy_staging 93a79c77da81f7f15db021c5c7431eb4:0x32bd78` | [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) | `game`, at goal | it names one call site of the game's own loader (build ID and return address): NVN also has buffer-to-texture copies whose source the GPU writes, so the host cannot keep every source |
 | `ue_fps_cvar Project.FrameRateLimit` | [SHIN MEGAMI TENSEI V: Vengeance](../../dm/games/010069C01AB82000/README.md) | `game`, at goal | the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py) |
 | `ue_texture_pool 1000` | [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) | `game`, at goal | the game's own budget, raised to its Windows value |
 | `vconv_range on` | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | `game` → `host`, gap | the same vertices as the whole range, for less work; DM_NVN_VCONV_CHECK checks it: a default for every game after `regress.py check` on the games |

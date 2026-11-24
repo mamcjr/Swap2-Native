@@ -4,15 +4,17 @@
 // into the replay's RGBA16F work image, sRGB-encoded with pc.enc. It takes the place of a blit where the input and the output texture differ in sRGB (a blit converts by the
 // images' formats, and the replay stores sRGB textures as their UNORM twin), and writes FSR 3.1's linear result to an sRGB output (vka_fsr3.c)
 layout(local_size_x = 8, local_size_y = 8) in;
+// alpha_src (binding 1, linear sampler) carries the input colour's alpha when the RGB comes from FSR 3.1 (vka_dlss_scale_alpha): NVN2 DLSS preserves the colour's alpha
 layout(set = 0, binding = 0) uniform sampler2D tex;   // a linear sampler
+layout(set = 0, binding = 1) uniform sampler2D alpha_src;
 layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D dst;
-layout(push_constant) uniform P { vec2 base, scale, rcp; ivec2 size; int enc; } pc;   // input rectangle origin and input texels per output texel; 1 / the input image's size
+layout(push_constant) uniform P { vec2 base, scale, rcp; ivec2 size; int enc; vec2 abase, ascale, arcp; } pc;
 #include "dlss_srgb.h"
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(p, pc.size))) return;
-    vec4 t = textureLod(tex, (pc.base + (vec2(p) + 0.5) * pc.scale) * pc.rcp, 0.0);
-    vec3 c = max(t.rgb, vec3(0.0));
+    vec3 c = max(textureLod(tex, (pc.base + (vec2(p) + 0.5) * pc.scale) * pc.rcp, 0.0).rgb, vec3(0.0));
     if (pc.enc != 0) c = dlss_srgb_enc(c);
-    imageStore(dst, p, vec4(c, t.a));
+    float a = textureLod(alpha_src, (pc.abase + (vec2(p) + 0.5) * pc.ascale) * pc.arcp, 0.0).a;
+    imageStore(dst, p, vec4(c, a));
 }

@@ -285,6 +285,9 @@ static int is_annot(uint32_t op) { return op == OpDecorate || op == OpMemberDeco
 static int claim_pass(const uint32_t *w, size_t nw, uint32_t binding, const uint32_t *last, uint32_t *rec, vec_t *o, int *found, char *err, size_t errn) {
 #define FAIL(...) do { snprintf(err, errn, __VA_ARGS__); goto fail; } while (0)
     uint32_t bound = w[3], nb = bound;
+    // From SPIR-V 1.4 (a module vka_spv_no_int64 moved to 1.5) the claim buffer is a Block in the StorageBuffer class (BufferBlock is gone) and the entry point lists it and the
+    // guard variable (every global it uses); before, a BufferBlock in the Uniform class (from Banana Native v0.3.52 #613)
+    const int v14 = w[1] >= 0x10400; const uint32_t scb = v14 ? SCStorageBuffer : SCUniform, blk = v14 ? 2u /* Block */ : DecBufferBlock;
     uint32_t *psc = calloc(bound, 4), *ty = calloc(bound, 4);   // psc[pointer type]: storage class + 1; ty[id]: the type of a pointer-valued id
     if (!psc || !ty) FAIL("out of memory");
     uint32_t t_bool = 0, t_u32 = 0, t_i32 = 0, p_in_i32 = 0, p_priv_bool = 0, p_uni_u32 = 0, main_fn = 0, prim_var = 0;
@@ -296,7 +299,7 @@ static int claim_pass(const uint32_t *w, size_t nw, uint32_t binding, const uint
         if (op == OpTypePointer && len >= 4) {
             if (w[i + 2] == SCInput && w[i + 3] && w[i + 3] == t_i32) p_in_i32 = w[i + 1];
             if (w[i + 2] == SCPrivate && w[i + 3] && w[i + 3] == t_bool) p_priv_bool = w[i + 1];
-            if (w[i + 2] == SCUniform && w[i + 3] && w[i + 3] == t_u32) p_uni_u32 = w[i + 1];
+            if (w[i + 2] == scb && w[i + 3] && w[i + 3] == t_u32) p_uni_u32 = w[i + 1];
         }
         else if ((op == OpVariable || op == OpAccessChain || op == OpInBoundsAccessChain || op == OpPtrAccessChain || op == OpInBoundsPtrAccessChain || op == OpConvertUToPtr ||
                   op == OpBitcast || op == OpCopyObject || op == OpImageTexelPointer || op == OpFunctionParameter) && len >= 3 && w[i + 2] < bound) ty[w[i + 2]] = w[i + 1];
@@ -322,13 +325,13 @@ static int claim_pass(const uint32_t *w, size_t nw, uint32_t binding, const uint
     uint32_t cur = 0, cur_orig = 0; int in_fn = 0, in_main_entry = 0;
     for (size_t i = 5; i < nw;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *in = w + i;
-        if (i == ep_at && !mk_prim) { if (!put_n(o, in, len)) FAIL("out of memory"); i += len; continue; }
-        if (i == ep_at) {   // the PrimitiveId input joins the interface
-            if (!put(o, (len + 1) << 16 | OpEntryPoint) || !put_n(o, in + 1, len - 1) || !put(o, prim_var)) FAIL("out of memory");
-            i += len; continue;
+        if (i == ep_at) {   // the PrimitiveId input joins the interface, and from 1.4 the claim buffer and the guard
+            size_t at = o->n;
+            if (!put_n(o, in, len) || (mk_prim && !put(o, prim_var)) || (v14 && (!put(o, cvar) || !put(o, gvar)))) FAIL("out of memory");
+            o->w[at] = (uint32_t)(o->n - at) << 16 | OpEntryPoint; i += len; continue;
         }
         if (i == first_annot) {
-            uint32_t x[] = {4u << 16 | OpDecorate, rta, DecArrayStride, 4, 3u << 16 | OpDecorate, st, DecBufferBlock, 5u << 16 | OpMemberDecorate, st, 0, DecOffset, 0,
+            uint32_t x[] = {4u << 16 | OpDecorate, rta, DecArrayStride, 4, 3u << 16 | OpDecorate, st, blk, 5u << 16 | OpMemberDecorate, st, 0, DecOffset, 0,
                             4u << 16 | OpDecorate, cvar, DecDescriptorSet, 0, 4u << 16 | OpDecorate, cvar, DecBinding, binding};
             if (!put_n(o, x, sizeof x / 4)) FAIL("out of memory");
             if (mk_prim) { uint32_t y[] = {4u << 16 | OpDecorate, mk_prim, DecBuiltIn, BIPrimitiveId}; if (!put_n(o, y, 4)) FAIL("out of memory"); }
@@ -338,10 +341,10 @@ static int claim_pass(const uint32_t *w, size_t nw, uint32_t binding, const uint
             if (mk_i32) { uint32_t x[] = {4u << 16 | OpTypeInt, mk_i32, 32, 1}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
             if (mk_pin) { uint32_t x[] = {4u << 16 | OpTypePointer, mk_pin, SCInput, t_i32}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
             if (mk_ppb) { uint32_t x[] = {4u << 16 | OpTypePointer, mk_ppb, SCPrivate, t_bool}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
-            if (mk_pu) { uint32_t x[] = {4u << 16 | OpTypePointer, mk_pu, SCUniform, t_u32}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
+            if (mk_pu) { uint32_t x[] = {4u << 16 | OpTypePointer, mk_pu, scb, t_u32}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
             if (mk_prim) { uint32_t x[] = {4u << 16 | OpVariable, p_in_i32, mk_prim, SCInput}; if (!put_n(o, x, 4)) FAIL("out of memory"); }
-            uint32_t x[] = {3u << 16 | OpTypeRuntimeArray, rta, t_u32, 3u << 16 | OpTypeStruct, st, rta, 4u << 16 | OpTypePointer, pst, SCUniform, st,
-                            4u << 16 | OpVariable, pst, cvar, SCUniform, 4u << 16 | OpConstant, t_u32, c0, 0, 4u << 16 | OpConstant, t_u32, c1, 1,
+            uint32_t x[] = {3u << 16 | OpTypeRuntimeArray, rta, t_u32, 3u << 16 | OpTypeStruct, st, rta, 4u << 16 | OpTypePointer, pst, scb, st,
+                            4u << 16 | OpVariable, pst, cvar, scb, 4u << 16 | OpConstant, t_u32, c0, 0, 4u << 16 | OpConstant, t_u32, c1, 1,
                             4u << 16 | OpVariable, p_priv_bool, gvar, SCPrivate};
             if (!put_n(o, x, sizeof x / 4)) FAIL("out of memory");
         }
@@ -1389,4 +1392,367 @@ fail:
     free(def); free(kof); free(isconst); free(tyk); free(o.w); *sites = 0;
     return NULL;
 #undef FAIL
+}
+
+// ---------- vka_spv_exact_float ----------
+// Every float arithmetic result decorated NoContraction (OpFNegate, OpFAdd, OpFSub, OpFMul, OpFDiv, OpFRem, OpFMod, OpVectorTimesScalar, OpMatrixTimesScalar,
+// OpVectorTimesMatrix, OpMatrixTimesVector, OpMatrixTimesMatrix, OpDot), for the compute form of a task / mesh program (vka_shader.c spv_module). The game draws
+// its foliage twice with two mesh programs, a depth-only prepass and a colour pass that tests depth EQUAL, and the sky between them over the whole target: the two
+// programs compute the same positions with the same operations, and must get the same bits. A native mesh stage has an Invariant position (SpirvMeshEntry), which
+// keeps a driver from reassociating or fusing them differently; the compute form writes its positions to a buffer, which no invariance covers, and Mesa folded the
+// two programs' position chains differently (late fusing of the last add into the first multiply, nir_opt_reassociate_matrix_mul), so a pixel whose two depths
+// differed in the last bit kept the sky: white blade tips over Ocarina of Time's grass. After AnkaNative e1159b7 and Banana Native 7daac0fb, which do the same.
+// A result already decorated NoContraction keeps one decoration. A malloc'd copy (*out_nw words, *sites results decorated); NULL with err empty when the module has
+// no float arithmetic left to decorate, NULL with the reason in err when it cannot be read
+enum { XF_OpTypeFloat = 22, XF_OpTypeVector = 23, XF_OpTypeMatrix = 24, XF_OpFunction = 54, XF_OpDecorate = 71, XF_DecNoContraction = 42 };
+static int xf_arith(uint32_t op) {
+    return op == 127 || op == 129 || op == 131 || op == 133 || op == 136 || op == 140 || op == 141 || (op >= 142 && op <= 146) || op == 148;
+}
+static int xf_annot_end(uint32_t op) {   // the first instruction past the annotations: a type, constant, variable, undef or function
+    return (op >= 19 && op <= 39) || (op >= 41 && op <= 52) || op == 59 || op == 1 || op == XF_OpFunction || op == 4472 || op == 4473;
+}
+uint32_t *vka_spv_exact_float(const uint32_t *w, size_t nw, size_t *out_nw, int *sites, char *err, size_t errn) {
+    *sites = 0; err[0] = 0;
+    if (nw < 5 || w[0] != 0x07230203) { snprintf(err, errn, "not SPIR-V"); return NULL; }
+    uint32_t bound = w[3];
+    uint8_t *fty = calloc(bound ? bound : 1, 1), *done = calloc(bound ? bound : 1, 1);
+    uint32_t *ids = NULL; size_t nid = 0, cap = 0, at = 0;
+    if (!fty || !done) { snprintf(err, errn, "out of memory"); goto fail; }
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *x = w + i;
+        if (!len || i + len > nw) { snprintf(err, errn, "bad instruction at word %zu", i); goto fail; }
+        if (!at && xf_annot_end(op)) at = i;
+        if (op == XF_OpTypeFloat && len >= 3 && x[1] < bound) fty[x[1]] = 1;
+        else if ((op == XF_OpTypeVector || op == XF_OpTypeMatrix) && len >= 4 && x[1] < bound && x[2] < bound && fty[x[2]]) fty[x[1]] = 1;
+        else if (op == XF_OpDecorate && len >= 3 && x[2] == XF_DecNoContraction && x[1] < bound) done[x[1]] = 1;
+        else if (xf_arith(op) && len >= 4 && x[1] < bound && x[2] < bound && fty[x[1]] && !done[x[2]]) {
+            if (nid == cap) { cap = cap ? 2 * cap : 256; uint32_t *n2 = realloc(ids, cap * 4); if (!n2) { snprintf(err, errn, "out of memory"); goto fail; } ids = n2; }
+            ids[nid++] = x[2]; done[x[2]] = 1;
+        }
+        i += len;
+    }
+    if (!nid) goto none;
+    if (!at) { snprintf(err, errn, "no type or function section"); goto fail; }
+    *out_nw = nw + 3 * nid;
+    uint32_t *o = malloc(*out_nw * 4);
+    if (!o) { snprintf(err, errn, "out of memory"); goto fail; }
+    memcpy(o, w, at * 4);
+    for (size_t k = 0; k < nid; k++) { o[at + 3 * k] = 3u << 16 | XF_OpDecorate; o[at + 3 * k + 1] = ids[k]; o[at + 3 * k + 2] = XF_DecNoContraction; }
+    memcpy(o + at + 3 * nid, w + at, (nw - at) * 4);
+    *sites = (int)nid;
+    free(fty); free(done); free(ids);
+    return o;
+none:
+fail:
+    free(fty); free(done); free(ids);
+    return NULL;
+}
+
+// The three passes below are from Banana Native v0.3.52-preview (MIT): vka_spv_precise_depth (#590), vka_spv_nonuniform (#618), vka_spv_no_int64 (#613)
+
+// vka_spv_precise_depth: NoContraction on the float arithmetic feeding a pixel shader's FragDepth store, because
+// a later EQUAL pass may compare this depth with a value calculated by a different shader.
+// Preserve the guest's separate arithmetic instructions as well as its explicit fused multiply-add. Follow the
+// scalar SSA expression feeding a direct FragDepth store. Sampling coordinates and unrelated colour math stay fast.
+uint32_t *vka_spv_precise_depth(const uint32_t *w, size_t nw, size_t *out_count) {
+    enum { ExtInstImport = 11, FNegate = 127, FAdd = 129, FSub = 131, FMul = 133, FDiv = 136,
+           GLSLstd450Fma = 50, NoContraction = 42 };
+    if (nw < 5 || w[0] != 0x07230203 || !w[3] || w[3] > 0x3fffff) return NULL;
+    uint32_t bound = w[3], glsl = 0, depth = 0;
+    size_t insert = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || len > nw - i) return NULL;
+        if (op == OpFunction) break;
+        if (op == ExtInstImport && len == 6 && !memcmp(w + i + 2, "GLSL.std.450", 13)) glsl = w[i+1];
+        if (op == OpDecorate && len == 4 && w[i+2] == DecBuiltIn && w[i+3] == PF_BIFragDepth) {
+            insert = i;
+            depth = w[i+1];
+        }
+        i += len;
+    }
+    if (!depth || depth >= bound) return NULL;
+    struct expr { size_t offset; unsigned char first, stride, arithmetic, precise, seen; };
+    struct expr *expr = calloc(bound, sizeof *expr);
+    uint32_t *queue = malloc((size_t)bound * sizeof *queue), *out = NULL;
+    size_t size = 0, additions = 0;
+    if (!expr || !queue) goto done;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || len > nw - i) goto done;
+        if (op == OpDecorate && len == 3 && w[i+2] == NoContraction && w[i+1] < bound)
+            expr[w[i+1]].precise = 1;
+        if (op == OpStore && len >= 3 && w[i+1] == depth && w[i+2] < bound && !expr[w[i+2]].seen) {
+            expr[w[i+2]].seen = 1;
+            queue[size++] = w[i+2];
+        }
+        unsigned first = 0, stride = 1, arithmetic = 0;
+        if ((op == FAdd || op == FSub || op == FMul || op == FDiv) && len == 5) {
+            first = 3; arithmetic = 1;
+        } else if (op == OpExtInst && len == 8 && glsl && w[i+3] == glsl && w[i+4] == GLSLstd450Fma) {
+            first = 5; arithmetic = 1;
+        } else if ((op == FNegate || op == OpCopyObject) && len == 4) first = 3;
+        else if (op == OpSelect && len == 6) first = 4;
+        else if (op == OpPhi && len >= 5) { first = 3; stride = 2; }
+        if (first && w[i+2] < bound) {
+            struct expr *e = &expr[w[i+2]];
+            e->offset = i; e->first = first; e->stride = stride; e->arithmetic = arithmetic;
+        }
+        i += len;
+    }
+    for (size_t q = 0; q < size; q++) {
+        const struct expr *e = &expr[queue[q]];
+        if (!e->first) continue;
+        if (e->arithmetic && !e->precise) additions++;
+        unsigned len = w[e->offset] >> 16;
+        for (unsigned j = e->first; j < len; j += e->stride) {
+            uint32_t id = w[e->offset+j];
+            if (id >= bound || expr[id].seen) continue;
+            expr[id].seen = 1;
+            queue[size++] = id;
+        }
+    }
+    if (!additions || nw > SIZE_MAX / sizeof *out - 3 * additions) goto done;
+    out = malloc((nw + 3 * additions) * sizeof *out);
+    if (!out) goto done;
+    memcpy(out, w, insert * sizeof *out);
+    size_t pos = insert;
+    for (size_t q = 0; q < size; q++) {
+        uint32_t id = queue[q];
+        if (expr[id].arithmetic && !expr[id].precise) {
+            out[pos++] = (3u << 16) | OpDecorate; out[pos++] = id; out[pos++] = NoContraction;
+        }
+    }
+    memcpy(out + pos, w + insert, (nw - insert) * sizeof *out);
+    *out_count = nw + 3 * additions;
+done:
+    free(expr); free(queue);
+    return out;
+}
+
+// vka_spv_nonuniform: NonUniform on the dynamically indexed texture arrays a game profile asks for (nonuniform_texture_arrays; vka_shader.c lib_words). The translator
+// never marks an index NonUniform (its host query for it answers no), so a pixel shader that picks an element of a sampled-image array by a per-pixel value reads it as
+// if the index were the same across the subgroup: Adreno takes one element per 64-lane wave, so in an 8x8 pixel tile whose pixels pick different elements all read one
+// of them (Fire Emblem Fortune's Weave's deferred lighting: its probe cube arrays, square blocks on the walls). Taken: each access chain into a UniformConstant array of
+// sampled images (or of images with Sampled 1), not a buffer or subpass image, outside the texture pool (set pool_set bindings pool_tex and pool_smp: left alone), with
+// an index that is not a constant. The index, the chain, each load of it and each OpSampledImage / OpImage / OpCopyObject of such a load are decorated NonUniform (the
+// Vulkan rule: the value an image instruction uses must be, when its descriptor is not dynamically uniform). ShaderNonUniform and SampledImageArrayNonUniformIndexing are
+// added when a site is decorated, OpExtension "SPV_EXT_descriptor_indexing" below SPIR-V 1.5. Nothing else moves and no id is added (the bound stays). Ids already
+// decorated and capabilities already there are kept, so a second run changes nothing. Counted, not changed: dynamic chains into the pool and into other arrays (storage,
+// buffer or input attachment images, samplers, buffer blocks). Refused (NULL with the reason in err; the module is then used as it is): a chain of more than one index
+// or into an array of such arrays, or a site's chain used by anything but an OpLoad. NULL with err empty: nothing to do. c may be NULL
+enum { NU_OpExtension = 10, NU_OpCapability = 17, NU_OpTypeImage = 25, NU_OpTypeSampler = 26, NU_OpTypeSampledImage = 27, NU_OpTypeArray = 28, NU_OpTypeRuntimeArray = 29,
+       NU_OpTypePointer = 32, NU_OpFunction = 54, NU_OpVariable = 59, NU_OpLoad = 61, NU_OpAccessChain = 65, NU_OpInBoundsAccessChain = 66, NU_OpDecorate = 71,
+       NU_OpCopyObject = 83, NU_OpSampledImage = 86, NU_OpImage = 100, NU_OpLine = 8,
+       NU_DecNonUniform = 5300, NU_CapShaderNonUniform = 5301, NU_CapSampledImageArrayNonUniformIndexing = 5307, NU_DimBuffer = 5, NU_DimSubpassData = 6,
+       NU_SCUniformConstant = 0, NU_SCUniform = 2, NU_SCStorageBuffer = 12, NU_ARRAY = 0x10 };
+static const char NU_EXT[] = "SPV_EXT_descriptor_indexing";
+uint32_t *vka_spv_nonuniform(const uint32_t *w, size_t nw, uint32_t pool_set, uint32_t pool_tex, uint32_t pool_smp, size_t *out_nw, vka_nu_count *c, char *err, size_t errn) {
+    vka_nu_count z; if (!c) c = &z;
+    memset(c, 0, sizeof *c);
+    if (err && errn) err[0] = 0;
+    if (nw < 5 || w[0] != 0x07230203u || !w[3]) { if (err && errn) snprintf(err, errn, "not a SPIR-V module"); c->refused = 1; return NULL; }
+    uint32_t bound = w[3], ver = w[1];
+    // per id: flag 1 a constant, 2 already NonUniform; tkind 1 an eligible element type, 2 another image or sampler type, NU_ARRAY an array (ptee its element);
+    // mark 1 a site's chain, 2 a load of one, 4 to be decorated
+    uint8_t *flag = calloc(bound, 1), *mark = calloc(bound, 1);
+    uint32_t *tkind = calloc(bound, 4), *ptee = calloc(bound, 4), *psc = calloc(bound, 4), *vptr = calloc(bound, 4), *dset = malloc(bound * 4), *dbind = malloc(bound * 4);
+    uint32_t *o = NULL;
+#define NU_FAIL(...) do { if (err && errn) snprintf(err, errn, __VA_ARGS__); c->refused = 1; goto done; } while (0)
+    if (!flag || !mark || !tkind || !ptee || !psc || !vptr || !dset || !dbind) NU_FAIL("out of memory");
+    memset(dset, 0xff, bound * 4); memset(dbind, 0xff, bound * 4);
+    int cap_nu = 0, cap_si = 0, has_ext = 0, in_fn = 0;
+    size_t cap_end = 0, annot_end = 0, pre_end = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) NU_FAIL("bad instruction at word %zu", i);
+        if (op == NU_OpFunction) in_fn = 1;
+        if (!in_fn) {
+            if (op == NU_OpCapability && len >= 2) { cap_end = i + len; if (w[i + 1] == NU_CapShaderNonUniform) cap_nu = 1; if (w[i + 1] == NU_CapSampledImageArrayNonUniformIndexing) cap_si = 1; }
+            else if (op == NU_OpExtension && (size_t)(len - 1) * 4 >= sizeof NU_EXT && !memcmp(w + i + 1, NU_EXT, sizeof NU_EXT)) has_ext = 1;
+            else if (is_annot(op)) annot_end = i + len;
+            if ((op >= 2 && op <= 17 && op != NU_OpLine) || op == 330 || op == 331) pre_end = i + len;   // the preamble and debug instructions (where decorations go in a module that has none)
+            if (op == NU_OpDecorate && len >= 3 && w[i + 1] < bound) {
+                if (w[i + 2] == NU_DecNonUniform) flag[w[i + 1]] |= 2;
+                else if (len >= 4 && w[i + 2] == DecDescriptorSet) dset[w[i + 1]] = w[i + 3];
+                else if (len >= 4 && w[i + 2] == DecBinding) dbind[w[i + 1]] = w[i + 3];
+            }
+            else if (op == NU_OpTypeImage && len >= 9 && w[i + 1] < bound) tkind[w[i + 1]] = w[i + 3] != NU_DimBuffer && w[i + 3] != NU_DimSubpassData && w[i + 7] == 1 ? 1 : 2;
+            else if (op == NU_OpTypeSampledImage && len >= 3 && w[i + 1] < bound) tkind[w[i + 1]] = w[i + 2] < bound && tkind[w[i + 2]] == 1 ? 1 : 2;
+            else if (op == NU_OpTypeSampler && len >= 2 && w[i + 1] < bound) tkind[w[i + 1]] = 2;
+            else if ((op == NU_OpTypeArray || op == NU_OpTypeRuntimeArray) && len >= 3 && w[i + 1] < bound) { tkind[w[i + 1]] = NU_ARRAY; ptee[w[i + 1]] = w[i + 2]; }
+            else if (op == NU_OpTypePointer && len >= 4 && w[i + 1] < bound) { psc[w[i + 1]] = w[i + 2] + 1; ptee[w[i + 1]] = w[i + 3]; }
+            else if (op >= 41 && op <= 52 && len >= 3 && w[i + 2] < bound) flag[w[i + 2]] |= 1;   // OpConstantTrue .. OpSpecConstantOp
+            else if (op == NU_OpVariable && len >= 4 && w[i + 2] < bound) vptr[w[i + 2]] = w[i + 1];
+            i += len; continue;
+        }
+        if ((op == NU_OpAccessChain || op == NU_OpInBoundsAccessChain) && len >= 5 && w[i + 3] < bound && vptr[w[i + 3]] && w[i + 4] < bound && !(flag[w[i + 4]] & 1)) {
+            uint32_t v = w[i + 3], pt = vptr[v] < bound ? vptr[v] : 0, sc = pt && psc[pt] ? psc[pt] - 1 : UINT32_MAX, arr = pt ? ptee[pt] : 0;
+            uint32_t el = arr && arr < bound && tkind[arr] == NU_ARRAY ? ptee[arr] : 0, ek = 0, depth = 1;
+            while (el && el < bound && tkind[el] == NU_ARRAY && depth < 8) el = ptee[el], depth++;   // (an array of arrays: its element type)
+            if (el && el < bound) ek = tkind[el];
+            if (el && (sc == NU_SCUniformConstant || sc == NU_SCUniform || sc == NU_SCStorageBuffer)) {   // a dynamic index into a descriptor array
+                if (dset[v] == pool_set && (dbind[v] == pool_tex || dbind[v] == pool_smp)) c->pool++;
+                else if (sc != NU_SCUniformConstant || ek != 1) c->skipped++;
+                else {
+                    if (len != 5 || depth != 1) NU_FAIL("a texture array access chain with %u indices", len - 4);
+                    c->sites++; mark[w[i + 2]] |= 1 | 4; mark[w[i + 4]] |= 4;
+                    i += len; continue;
+                }
+            }
+        }
+        // a site's chain may be used only as an OpLoad's pointer; an OpSampledImage / OpImage / OpCopyObject of a load of one is decorated too
+        for (uint32_t k = 1; k < len; k++) {
+            uint32_t id = w[i + k];
+            if (id >= bound || !(mark[id] & 3) || pf_lit(op, k) || (op == NU_OpLine && k >= 2)) continue;
+            if (mark[id] & 1) { if (op != NU_OpLoad || k != 3) NU_FAIL("a texture array access chain used by opcode %u, not a load", op); mark[w[i + 2]] |= 2 | 4; }
+            else if ((op == NU_OpSampledImage || op == NU_OpImage || op == NU_OpCopyObject) && k == 3) mark[w[i + 2]] |= 4;
+        }
+        i += len;
+    }
+    {
+        int ndec = 0;
+        for (uint32_t id = 1; id < bound; id++) if ((mark[id] & 4) && !(flag[id] & 2)) ndec++;
+        int add_nu = c->sites && !cap_nu, add_si = c->sites && !cap_si, add_ext = c->sites && ver < 0x10500 && !has_ext;
+        if (!ndec && !add_nu && !add_si && !add_ext) goto done;   // nothing to do: no site, or a module this has been through
+        if (!cap_end) NU_FAIL("no OpCapability");
+        size_t dec_at = annot_end ? annot_end : pre_end, extw = (sizeof NU_EXT + 3) / 4;
+        if (dec_at < cap_end) dec_at = cap_end;
+        if (!(o = malloc((nw + 2 * (size_t)(add_nu + add_si) + (add_ext ? 1 + extw : 0) + 3 * (size_t)ndec) * 4))) NU_FAIL("out of memory");
+        size_t n = cap_end;
+        memcpy(o, w, cap_end * 4);   // the header and capabilities, then the new capabilities and extension
+        if (add_nu) { o[n++] = 2u << 16 | NU_OpCapability; o[n++] = NU_CapShaderNonUniform; }
+        if (add_si) { o[n++] = 2u << 16 | NU_OpCapability; o[n++] = NU_CapSampledImageArrayNonUniformIndexing; }
+        if (add_ext) { o[n++] = (uint32_t)(1 + extw) << 16 | NU_OpExtension; memset(o + n, 0, extw * 4); memcpy(o + n, NU_EXT, sizeof NU_EXT); n += extw; }
+        memcpy(o + n, w + cap_end, (dec_at - cap_end) * 4); n += dec_at - cap_end;   // up to the end of the decorations, then the new ones by id
+        for (uint32_t id = 1; id < bound; id++) if ((mark[id] & 4) && !(flag[id] & 2)) { o[n++] = 3u << 16 | NU_OpDecorate; o[n++] = id; o[n++] = NU_DecNonUniform; }
+        memcpy(o + n, w + dec_at, (nw - dec_at) * 4); n += nw - dec_at;
+        c->decorated = ndec; c->caps = add_nu + add_si; c->ext = add_ext;
+        *out_nw = n;
+    }
+done:
+#undef NU_FAIL
+    free(flag); free(mark); free(tkind); free(ptee); free(psc); free(vptr); free(dset); free(dbind);
+    return o;
+}
+
+// vka_spv_no_int64: a module that declares 64-bit integers only to make a physical-storage-buffer pointer from two 32-bit words, for a device without shaderInt64. The translator
+// writes such a pointer as %u64 = OpBitcast %ulong %uvec2 (the two words), %p = OpConvertUToPtr %ptr %u64, and declares the Int64 capability for that one type. Qualcomm's
+// driver on the Adreno 740 (512.676, Vulkan 1.3.128) has no shaderInt64 and refuses every pipeline of such a module (-13): Kirby and the Forgotten Land - Nintendo Switch 2
+// Edition's Star-Crossed World draws, 7,739 modules of its library and 61% of its draws skipped. SPIR-V 1.5 lets OpBitcast make the pointer from the 2-component 32-bit vector
+// directly, so the pair becomes %p = OpBitcast %ptr %uvec2, and the 64-bit types, their bitcasts and the capability go. The module moves to SPIR-V 1.5 (from 1.4 on an entry
+// point lists every global variable it uses, not only its inputs and outputs: every global variable is added to each entry point's interface; and the BufferBlock decoration
+// is gone: a Uniform-class storage buffer becomes a Block in the StorageBuffer class, with every pointer into it). Kirby's 7,739 such modules all come out valid (spirv-val,
+// Vulkan 1.3). NULL with *changed 0: nothing to
+// do (no Int64, or a 64-bit integer used some other way: the module stays as it is); NULL with err set: a module this does not read
+uint32_t *vka_spv_no_int64(const uint32_t *w, size_t nw, size_t *out_nw, int *changed, char *err, size_t errn) {
+    enum { OpCapability = 17, CapInt64 = 11, OpConvertUToPtr = 120, OpConstant = 43, OpConstantComposite = 44, SCFunction = 7 };
+    *changed = 0; if (err && errn) err[0] = 0;
+    if (nw < 5 || w[0] != 0x07230203) { snprintf(err, errn, "not SPIR-V"); return NULL; }
+    uint32_t bound = w[3];
+    uint8_t *k = calloc(bound, 1);   // 1: a 64-bit integer type; 2: a bitcast to one from a 2 x 32-bit vector; 4: a 2 x 32-bit integer vector type; 8: a global variable
+    uint32_t *vtype = calloc(bound, 4), *bc_from = calloc(bound, 4);   // the result type of a value (bitcast operands); a bitcast's operand
+    if (!k || !vtype || !bc_from) { free(k); free(vtype); free(bc_from); snprintf(err, errn, "out of memory"); return NULL; }
+    int int64 = 0, ok = 1;
+    uint8_t *istype = calloc(bound, 1);
+    if (!istype) { free(k); free(vtype); free(bc_from); snprintf(err, errn, "out of memory"); return NULL; }
+    for (size_t i = 5; i < nw && ok;) {   // pass 1: the types, 64-bit integers, the bitcasts to them, the global variables
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > nw) { snprintf(err, errn, "truncated"); ok = 0; break; }
+        const uint32_t *a = w + i + 1;
+        if (op >= 19 && op <= 39 && len >= 2 && a[0] < bound) istype[a[0]] = 1;   // OpTypeVoid … OpTypeForwardPointer
+        if (op == OpCapability && a[0] == CapInt64) int64 = 1;
+        else if (op == OpTypeInt && len >= 4 && a[0] < bound) { if (a[1] == 64) k[a[0]] |= 1; }
+        else if (op == OpTypeVector && len >= 4 && a[0] < bound && a[1] < bound) {
+            if (k[a[1]] & 1) ok = 0;   // a vector of 64-bit integers: another use
+            else if (a[2] == 2) { size_t j; for (j = 5; j < nw; j += w[j] >> 16) { if (!(w[j] >> 16)) { j = nw; break; } if ((w[j] & 0xffff) == OpTypeInt && w[j + 1] == a[1] && w[j + 2] == 32) break; } if (j < nw) k[a[0]] |= 4; }
+        }
+        else if (op >= 19 && op <= 39) { for (uint32_t x = 1; x < len - 1; x++) if (a[x] < bound && (k[a[x]] & 1)) ok = 0; }   // a struct, pointer, array or function type of one: another use
+        else if (op == OpVariable && len >= 4 && a[1] < bound && a[2] != SCFunction) k[a[1]] |= 8;
+        else if (op == OpBitcast && len == 4 && a[0] < bound && a[1] < bound && a[2] < bound && (k[a[0]] & 1)) { k[a[1]] |= 2; bc_from[a[1]] = a[2]; }
+        if (len >= 3 && a[0] < bound && istype[a[0]] && a[1] < bound) vtype[a[1]] = a[0];   // an instruction with a result type
+        i += len;
+    }
+    for (size_t i = 5; i < nw && ok;) {   // pass 2: any other use of a 64-bit type or of such a bitcast's result
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *a = w + i + 1;
+        int skip = op == OpName || op == OpDecorate || op == OpMemberDecorate || op == OpEntryPoint || (op >= 19 && op <= 39) || op == OpCapability
+                   || (op == OpBitcast && len == 4 && a[1] < bound && (k[a[1]] & 2)) || (op == OpConvertUToPtr && len == 4 && a[2] < bound && (k[a[2]] & 2));
+        // (the literal words of the common instructions are not ids: a constant's value, memory operands, indices and the like)
+        uint32_t ids = len - 1;
+        switch (op) {
+        case 3: case 6: case 7: case 8: case 10: case 11: case 14: case 16: case 246: case 247: ids = 0; break;   // Source, MemberName, String, Line, Extension, ExtInstImport, MemoryModel, ExecutionMode, merges
+        case OpConstant: case 50: ids = 2; break;   // (Spec)Constant: the type and the result
+        case 61: ids = ids < 3 ? ids : 3; break;   // Load: type, result, pointer
+        case 82: ids = ids < 4 ? ids : 4; break;   // CompositeInsert: type, result, object, composite
+        case 62: ids = ids < 2 ? ids : 2; break;   // Store: pointer, object
+        case 81: ids = ids < 3 ? ids : 3; break;   // CompositeExtract: type, result, composite
+        case 79: ids = ids < 4 ? ids : 4; break;   // VectorShuffle: type, result, the two vectors
+        case 251: ids = ids < 1 ? ids : 1; break;   // Switch: the selector (then literals and labels)
+        }
+        if (!skip) for (uint32_t x = 0; x < ids; x++) if (a[x] < bound && (k[a[x]] & 3) && !(op == 12 && x == 3)) { ok = 0; break; }   // (ExtInst: its 4th word is the instruction number)
+        i += len;
+    }
+    free(istype);    for (uint32_t x = 0; x < bound && ok; x++) if ((k[x] & 2) && !(bc_from[x] < bound && (k[vtype[bc_from[x]]] & 4))) ok = 0;   // a bitcast from something other than 2 x 32-bit
+    if (!int64 || !ok) { free(k); free(vtype); free(bc_from); return NULL; }
+    // SPIR-V 1.4 drops the BufferBlock decoration that the translator's storage buffers carry (a Uniform-class block): each becomes Block, its variables and every pointer
+    // into them StorageBuffer-class (a StorageBuffer pointer type to the same pointee: the module's own, or a new one declared after the Uniform one)
+    enum { OpTypeArray = 28, OpTypeRuntimeArray = 29, OpTypePointer = 32, OpFunctionParameter = 55, OpFunctionCall = 57, OpAccessChain = 65, OpInBoundsAccessChain = 66,
+           OpPtrAccessChain = 67, OpInBoundsPtrAccessChain = 70, OpCopyObject = 83, OpSelect = 169, OpPhi = 245, DecBufferBlock = 3, DecBlock = 2, SCUniform = 2, SCStorageBuffer = 12 };
+    uint8_t *sb = calloc(bound, 1);   // 1: a BufferBlock struct or an array of one; 2: a pointer into a storage buffer; 4: a Uniform pointer type such a pointer has
+    uint32_t *pt_sc = calloc(bound, 4), *pt_to = calloc(bound, 4), *sbty = calloc(bound, 4), nbound = bound;   // a pointer type's class and pointee; its StorageBuffer twin
+    if (!sb || !pt_sc || !pt_to || !sbty) { free(sb); free(pt_sc); free(pt_to); free(sbty); free(k); free(vtype); free(bc_from); snprintf(err, errn, "out of memory"); return NULL; }
+    for (size_t i = 5; i < nw && ok; i += w[i] >> 16) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *a = w + i + 1;
+        if (op == OpDecorate && len >= 3 && a[1] == DecBufferBlock && a[0] < bound) sb[a[0]] |= 1;
+        else if ((op == OpTypeArray || op == OpTypeRuntimeArray) && len >= 3 && a[0] < bound && a[1] < bound && (sb[a[1]] & 1)) sb[a[0]] |= 1;
+        else if (op == OpTypePointer && len == 4 && a[0] < bound) { pt_sc[a[0]] = a[1]; pt_to[a[0]] = a[2]; }
+        else if (op == OpVariable && len >= 4 && a[0] < bound && a[1] < bound && a[2] == SCUniform && pt_to[a[0]] < bound && (sb[pt_to[a[0]]] & 1)) { sb[a[1]] |= 2; sb[a[0]] |= 4; }
+        else if ((op == OpAccessChain || op == OpInBoundsAccessChain || op == OpPtrAccessChain || op == OpInBoundsPtrAccessChain || op == OpCopyObject) && len >= 4 && a[0] < bound
+                 && a[1] < bound && a[2] < bound && (sb[a[2]] & 2)) { if (pt_sc[a[0]] != SCUniform) ok = 0; sb[a[1]] |= 2; sb[a[0]] |= 4; }
+        else if (op == OpFunctionParameter && len >= 3 && a[0] < bound && pt_sc[a[0]] == SCUniform) ok = 0;   // (a pointer passed to a function: not rewritten)
+        else if ((op == OpPhi || op == OpSelect || op == OpFunctionCall) && len >= 3) { for (uint32_t x = 2; x < len - 1; x++) if (a[x] < bound && (sb[a[x]] & 2)) ok = 0; }
+    }
+    for (uint32_t t = 0; t < bound && ok; t++) {   // each Uniform pointer type a storage-buffer pointer has: its StorageBuffer twin
+        if (!(sb[t] & 4)) continue;
+        for (uint32_t u = 0; u < bound && !sbty[t]; u++) if (pt_sc[u] == SCStorageBuffer && pt_to[u] == pt_to[t]) sbty[t] = u;
+        if (!sbty[t]) sbty[t] = nbound++;
+    }
+    if (!ok) { snprintf(err, errn, "a storage-buffer pointer passed to a function, selected or merged"); free(sb); free(pt_sc); free(pt_to); free(sbty); free(k); free(vtype); free(bc_from); return NULL; }
+    vec_t o = {0};
+    int good = put_n(&o, w, 5);
+    if (good && o.w[1] < 0x10500) o.w[1] = 0x10500;
+    if (good) o.w[3] = nbound;
+    for (size_t i = 5; i < nw && good;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16; const uint32_t *a = w + i + 1;
+        if (op == OpDecorate && len >= 3 && a[1] == DecBufferBlock) { good = put_n(&o, w + i, len); if (good) o.w[o.n - len + 2] = DecBlock; i += len; continue; }
+        if (op == OpTypePointer && len == 4 && a[0] < bound && (sb[a[0]] & 4) && sbty[a[0]] >= bound) {   // a new StorageBuffer twin after the Uniform type
+            good = put_n(&o, w + i, len) && put(&o, 4u << 16 | OpTypePointer) && put(&o, sbty[a[0]]) && put(&o, SCStorageBuffer) && put(&o, a[2]); i += len; continue; }
+        if (op == OpVariable && len >= 4 && a[1] < bound && (sb[a[1]] & 2)) { good = put_n(&o, w + i, len); if (good) { o.w[o.n - len + 1] = sbty[a[0]]; o.w[o.n - len + 3] = SCStorageBuffer; } i += len; continue; }
+        if ((op == OpAccessChain || op == OpInBoundsAccessChain || op == OpPtrAccessChain || op == OpInBoundsPtrAccessChain || op == OpCopyObject) && len >= 4 && a[1] < bound && (sb[a[1]] & 2)) {
+            good = put_n(&o, w + i, len); if (good) o.w[o.n - len + 1] = sbty[a[0]]; i += len; continue; }
+        if (op == OpCapability && a[0] == CapInt64) { i += len; continue; }
+        if ((op == OpTypeInt && (k[a[0]] & 1)) || (op == OpBitcast && len == 4 && (k[a[1]] & 2))) { i += len; continue; }
+        if ((op == OpName || op == OpDecorate) && len >= 2 && a[0] < bound && (k[a[0]] & 3)) { i += len; continue; }
+        if (op == OpConvertUToPtr && len == 4 && (k[a[2]] & 2)) { good = put(&o, 4u << 16 | OpBitcast) && put(&o, a[0]) && put(&o, a[1]) && put(&o, bc_from[a[2]]); i += len; continue; }
+        if (op == OpEntryPoint && len >= 4) {
+            uint32_t s = 2; while (s < len - 1 && (a[s] >> 24)) s++; s++;   // past the name's last word (its last byte is 0)
+            size_t at = o.n; good = put_n(&o, w + i, len);
+            for (uint32_t g = 0; g < bound && good; g++) {
+                if (!(k[g] & 8)) continue;
+                int listed = 0; for (uint32_t x = s; x < len - 1; x++) if (a[x] == g) listed = 1;
+                if (!listed) good = put(&o, g);
+            }
+            if (good) o.w[at] = (uint32_t)(o.n - at) << 16 | OpEntryPoint;
+            i += len; continue;
+        }
+        good = put_n(&o, w + i, len); i += len;
+    }
+    free(k); free(vtype); free(bc_from); free(sb); free(pt_sc); free(pt_to); free(sbty);
+    if (!good) { free(o.w); snprintf(err, errn, "out of memory"); return NULL; }
+    *changed = 1; *out_nw = o.n; return o.w;
+}
+int vka_spv_declares_int64(const uint32_t *w, size_t nw) {   // 1 = OpCapability Int64
+    if (nw < 5 || w[0] != 0x07230203) return 0;
+    for (size_t i = 5; i < nw;) { uint32_t op = w[i] & 0xffff, len = w[i] >> 16; if (!len) return 0; if (op == 17 && len >= 2 && w[i + 1] == 11) return 1; if (op == 54) return 0; i += len; }   // (capabilities come first; stops at the first function)
+    return 0;
 }

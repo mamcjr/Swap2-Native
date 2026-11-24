@@ -25,7 +25,8 @@ sys.path.insert(0, str(HERE.parent / 'tools'))
 import vk_android_spv as spv  # noqa: E402
 
 M32, M64 = 0xffffffff, (1 << 64) - 1
-ENTRIES, EW = 1 << spv.GMEM_MAP_LOG2, spv.GMEM_MAP_ENTRY_WORDS
+ENTRIES, EW = 1 << spv.GMEM_MAP_LOG2, spv.GMEM_MAP_ENTRY_WORDS   # the Android host's table (vka_draw.c VKA_GMEM_MAP_ENTRIES)
+XL_ENTRIES = 1 << spv.XL_GMEM_MAP_LOG2   # the translator's search covers this many (dmsh_abi.h DMSH_GMEM_MAP_ENTRIES)
 
 
 def word_at(addr): return (addr * 0x9e3779b97f4a7c15 >> 17) & M32   # what the interpreter's physical memory holds at an address nothing wrote
@@ -209,7 +210,7 @@ def table_word(f, table, entry, w):
     return f.local(a.float, f.val(124, a.float, f.val(61, a.uint, f.val(65, a.ptu, table, a.c(a.int, 0), f.ld(a.int, e)))))
 
 
-def search(f, table, plo, phi, steps=spv.GMEM_MAP_LOG2, swap=False, odd=None):
+def search(f, table, plo, phi, steps=spv.XL_GMEM_MAP_LOG2, swap=False, odd=None):
     """GenerateRawAccess's search → the local holding the index. swap: the first comparison's operands exchanged (another function: not the reference);
     odd: a step whose entry is index * 16 (the steps are then not one step repeated)"""
     a = f.a; I, U, F, B = a.int, a.uint, a.float, a.bool
@@ -348,10 +349,11 @@ def some_pools(n, rnd=None):
     return [tuple(p) for p in pools]
 
 
-def model(table, a):
-    """What the raw load reads for address a, by GlobalToStorage's rule: (the physical address, or None in no pool)"""
+def model(table, a, steps=spv.GMEM_MAP_LOG2):
+    """What the raw load reads for address a, by GlobalToStorage's rule with that many search steps (the Android table's 13; the translator's own 12):
+    (the physical address, or None in no pool)"""
     idx = 0
-    for s in range(spv.GMEM_MAP_LOG2 - 1, -1, -1):
+    for s in range(steps - 1, -1, -1):
         c = idx + (1 << s)
         if (table[c * EW] | table[c * EW + 1] << 32) <= a: idx = c
     if a < (table[idx * EW + 2] | table[idx * EW + 3] << 32): return (a + (table[idx * EW + 4] | table[idx * EW + 5] << 32)) & M64
@@ -390,9 +392,12 @@ def passes(data):
 
 class RawGlobal(unittest.TestCase):
     def test_abi(self):
-        """the table's size and entry are dmsh_abi.h's (the reference the load helper is compared with, and the function made for it, are written from them)"""
+        """the table's entry is dmsh_abi.h's and its size vka_draw.c's (the function made for the load helper and the search loop are written from them); the
+        translator's search is dmsh_abi.h's size (the reference the load helper is compared with)"""
         abi = (HERE.parent / 'nvn' / 'dmsh_abi.h').read_text()
-        self.assertEqual(int(re.search(r'#define DMSH_GMEM_MAP_ENTRIES (\d+)', abi).group(1)), 1 << spv.GMEM_MAP_LOG2)
+        self.assertEqual(int(re.search(r'#define DMSH_GMEM_MAP_ENTRIES (\d+)', abi).group(1)), 1 << spv.XL_GMEM_MAP_LOG2)
+        draw = (HERE.parent / 'vk_android' / 'vka_draw.c').read_text()
+        self.assertEqual(int(re.search(r'#define VKA_GMEM_MAP_ENTRIES (\d+)', draw).group(1)), 1 << spv.GMEM_MAP_LOG2)
         self.assertEqual(int(re.search(r'#define DMSH_GMEM_MAP_ENTRY (\d+)', abi).group(1)), 4 * spv.GMEM_MAP_ENTRY_WORDS)
 
     def test_no_helper_untouched(self):
@@ -429,7 +434,7 @@ class RawGlobal(unittest.TestCase):
         """main before and after, over addresses in and out of the pools, runs that leave their pool or cross into the next one, low words that wrap, pools that touch
         or overlap, the last table entry: the same words into io, the same physical reads in the same order, the same stores, the same log"""
         rnd = random.Random(7)
-        for register, pools in ((False, some_pools(40)), (True, some_pools(40)), (False, some_pools(ENTRIES - 1))):
+        for register, pools in ((False, some_pools(40)), (True, some_pools(40)), (False, some_pools(XL_ENTRIES - 1))):
             table = pool_table(pools)
             data, bufs = shader(register=register)
             new, _ = passes(data)
@@ -447,8 +452,28 @@ class RawGlobal(unittest.TestCase):
                     if model(table, s) is not None and s == a: self.assertEqual(got[0][15], 7, 'the load after the store reads the stored word')
             self.assertEqual(kinds, {'in', 'none', 'leaves'})
 
+    def test_android_table(self):
+        """on a full Android table (8,191 pools), main after the passes reads every word the 13-step search finds, the pools past entry 4,095 too, where main
+        before them (the translator's 12 steps) read 0"""
+        rnd = random.Random(11)
+        pools = some_pools(ENTRIES - 1); table = pool_table(pools)
+        data, bufs = shader()
+        new, _ = passes(data)
+        found_past = 0
+        for a in addresses(pools[4093:4097] + pools[-3:], rnd):
+            io = {0: a & M32, 1: a >> 32, 2: a & M32, 3: a >> 32, 4: a & M32, 5: a >> 32}
+            got, before = run_main(new, bufs, table, io), run_main(data, bufs, table, io)
+            where = [model(table, (a + 4 * k) & M64) for k in range(4)]
+            for k in range(4): self.assertEqual(got[0].get(8 + k, 0), 0 if where[k] is None else word_at(where[k]), f'word {k} of {a:#x}')
+            old = model(table, a, spv.XL_GMEM_MAP_LOG2)
+            if where[0] is not None and old is None:
+                found_past += 1
+                self.assertEqual(before[0].get(8, 0), 0, f'{a:#x}: the search of the translator finds no pool there')
+        self.assertGreater(found_past, 0)
+
     def test_helper_search(self):
-        """each helper alone, before and after the loop, against the search written out (model), on a full table: every entry is found, the last one too"""
+        """each helper alone, before and after the loop, against the search written out (model), on a full table: after it every entry is found, the last one
+        too; before it (the translator's 12 steps) the entries up to 4,095, the rest in no pool"""
         pools = some_pools(ENTRIES - 1); table = pool_table(pools)
         data, bufs = shader()
         m0 = spv.Module(data)
@@ -459,15 +484,17 @@ class RawGlobal(unittest.TestCase):
         self.assertEqual([spv.loop_pool_search(m1, f) for f in hs], [spv.GMEM_MAP_LOG2] * 2)
         self.assertEqual([spv.loop_pool_search(m1, f) for f in hs], [0, 0], 'a search that is a loop is not made one again')
         rnd = random.Random(3)
-        for p in [0, 1, 2, 63, 64, 65, 1000, 2047, 2048, 4093, 4094]:
+        for p in [0, 1, 2, 63, 64, 65, 1000, 2047, 2048, 4093, 4094, 4095, 4096, 6000, 8189, 8190]:
             s, e, _ = pools[p]
             for a in (s, e - 4, e, s - 4, s + rnd.randrange(0, e - s, 4)):
                 i0 = Interp(m0, table, bufs); lo, hi = ('v', -1), ('v', -2); i0.mem[lo], i0.mem[hi] = a & M32, a >> 32
                 i1 = Interp(m1, table, bufs)
                 r0, r1 = i0.call(hs[0], [lo, hi]), i1.call(hs[0], [a & M32, a >> 32])
-                want = model(table, a)
-                self.assertEqual((r0, i0.reads), (0 if want is None else word_at(want), [] if want is None else [want]), f'{a:#x}')
-                self.assertEqual((r1, i1.reads), (r0, i0.reads), f'{a:#x}')
+                old, want = model(table, a, spv.XL_GMEM_MAP_LOG2), model(table, a)
+                self.assertEqual((r0, i0.reads), (0 if old is None else word_at(old), [] if old is None else [old]), f'{a:#x}')
+                self.assertEqual((r1, i1.reads), (0 if want is None else word_at(want), [] if want is None else [want]), f'{a:#x}')
+                if p < XL_ENTRIES - 1: self.assertEqual((r1, i1.reads), (r0, i0.reads), f'{a:#x}')
+                elif s <= a < e: self.assertIsNotNone(want, f'{a:#x}: past entry 4,095, found by the 13 steps')
 
     def test_other_shapes(self):
         """a helper that is not the reference keeps its calls: one whose first comparison is the other way round (another function: its search is still n equal

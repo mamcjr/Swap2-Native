@@ -56,6 +56,8 @@
     <string name="s2_play_prewarm_n">Pré-aquecendo %1$d pipelines…</string>
     <string name="s2_play_scene">Carregando texturas e a primeira cena…</string>
     <string name="s2_play_ready">Pronto</string>
+    <string name="s2_play_compiling">Compilando shaders: %1$d de %2$d, faltam cerca de %3$d s · Toque para pular</string>
+    <string name="s2_play_compiling_n">Compilando shaders: %1$d de %2$d · Toque para pular</string>
     <string name="s2_game_settings">Configurações do jogo</string>
     <string name="s2_this_game">SOMENTE ESTE JOGO</string>
     <string name="s2_game_settings_intro">Alterações valem na próxima inicialização. Padrão segue as configurações gerais.</string>
@@ -311,7 +313,7 @@
     <string name="s2_resolution_note">Resolução de renderização do jogo.</string>
     <string name="s2_frame_cap_note">O máximo de quadros por segundo deste jogo.</string>
     <string name="s2_frame_cap_own">Este jogo escolhe a própria taxa de quadros</string>
-    <string name="s2_game_graphics_hint">O upscaling FSR e a geração de quadros são configurações gerais (Configurações › Desempenho) e do painel do jogo.</string>
+    <string name="s2_game_graphics_hint">A geração de quadros é uma configuração geral (Configurações › Desempenho) e do painel do jogo.</string>
     <string name="s2_upscaler">Upscaler</string>
     <string name="s2_upscaler_net">Rede neural do jogo (NDSR)</string>
     <string name="s2_upscaler_fsr">FSR 1 (mais rápido)</string>
@@ -731,8 +733,8 @@
     <string name="s2_gfx_on">Ativado</string>
     <string name="s2_gfx_inherit">Seguir configurações gerais / perfil do jogo</string>
     <string name="s2_gfx_scaling_note">Amplia a imagem para a tela e substitui os ampliadores neurais compatíveis. Nativo mantém a rede do jogo.</string>
-    <string name="s2_gfx_sharp">Nitidez FSR de saída</string>
-    <string name="s2_gfx_sharp_note">Nitidez aplicada ao ampliar a imagem final para a tela.</string>
+    <string name="s2_gfx_sharp">Nitidez</string>
+    <string name="s2_gfx_sharp_note">Quanto o upscaler realça a imagem ampliada.</string>
     <string name="s2_gfx_async">Pipelines em segundo plano</string>
     <string name="s2_gfx_async_note">Vale na próxima abertura. Compila em segundo plano e aguarda quando necessário para preservar os efeitos.</string>
     <string name="s2_gfx_timing">Temporização da GPU</string>
@@ -810,4 +812,22 @@
     <string name="s2_warm_play_now">Jogar agora</string>
     <string name="s2_warm_stop">Parar</string>
     <string name="s2_warm_close">Fechar</string>
+    <string name="s2_sec_image">Imagem</string>
+    <string name="s2_sec_frames">Quadros</string>
+    <string name="s2_sec_scene">Cena</string>
+    <string name="s2_up_original">Original (o do jogo)</string>
+    <string name="s2_up_note">O FSR 1 é o mais leve. O SGSR 2 e o FSR 3.1 reconstroem detalhes a partir dos quadros anteriores nos jogos com DLSS (o SGSR 2 também no Ocarina of Time); nos outros funcionam como o FSR 1. Aplica na hora.</string>
+    <string name="s2_up_level">Nível do upscaler</string>
+    <string name="s2_up_quality">Qualidade (1080p)</string>
+    <string name="s2_up_balanced">Balanceado (720p)</string>
+    <string name="s2_up_performance">Desempenho (540p)</string>
+    <string name="s2_up_level_note">A resolução em que o jogo renderiza antes do upscaler: menor roda mais rápido. A partir do próximo início.</string>
+    <string name="s2_gfx_foliage">Grama e plantas</string>
+    <string name="s2_gfx_foliage_high">Alta (como o jogo desenha)</string>
+    <string name="s2_gfx_foliage_medium">Média (metade da grama)</string>
+    <string name="s2_gfx_foliage_low">Baixa (sem grama, metade das plantas)</string>
+    <string name="s2_gfx_foliage_none">Nenhuma</string>
+    <string name="s2_gfx_foliage_note">Menos grama e vegetação para mais quadros por segundo em campos e florestas. Aplica na hora.</string>
+    <string name="s2_gfx_effect_volume_fog">Névoa</string>
+    <string name="s2_gfx_effect_note">Desligado: o efeito não é desenhado, para mais quadros por segundo. Aplica na hora.</string>
 </resources>

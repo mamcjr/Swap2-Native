@@ -262,9 +262,48 @@ final class PlayCurtain extends FrameLayout {
 
     boolean failed() { return log.failed; }
 
+    private boolean compiling;   // the host's boot hold shows (compiling): tick leaves the bar and the caption to it
+
+    /**
+     * The host's boot hold (vka_pso.c DM_VK_PREPARE, Native.prepareStatus "taken total seconds-left"): the game waits while the pipelines of earlier runs and of the
+     * game's profile are compiled, at most 90 s. The bar shows taken / total and the caption the count, the time left and that a tap skips (skip: Native.prepareSkip,
+     * the game goes on and the rest compiles beside it). status null or empty: no hold (any more); the caption goes back to the log's step. True while the hold shows
+     */
+    boolean compiling(String status, Runnable skip) {
+        if (finishing) return false;
+        int[] st = parseCompiling(status);
+        if (st == null) {
+            if (compiling) { compiling = false; setOnClickListener(null); setClickable(true); tick(); }
+            return false;
+        }
+        if (!compiling) {
+            compiling = true;
+            setOnClickListener(v -> { if (compiling) { compiling = false; setOnClickListener(null); setClickable(true); skip.run(); tick(); } });
+        }
+        bar.indeterminate(false);
+        bar.progress(st[1] > 0 ? Math.min(0.97f, st[0] / (float) st[1]) : 0f);
+        String t = st[2] >= 0 ? getContext().getString(R.string.s2_play_compiling, st[0], st[1], st[2]) : getContext().getString(R.string.s2_play_compiling_n, st[0], st[1]);
+        if (!TextUtils.equals(t, caption.getText())) caption.setText(t);
+        return compiling;
+    }
+
+    /** The host's answer as {taken, total, seconds left or -1}; null when it is not one (no hold to show) */
+    static int[] parseCompiling(String s) {
+        if (s == null) return null;
+        String[] p = s.trim().split("\\s+");
+        if (p.length != 3) return null;
+        try {
+            int done = Integer.parseInt(p[0]), total = Integer.parseInt(p[1]), eta = Integer.parseInt(p[2]);
+            if (total <= 0 || done < 0) return null;
+            return new int[] {Math.min(done, total), total, eta < 0 ? -1 : eta};
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     /** Every poll: the bar creeps through the current step toward the next (never backwards, never past it), the caption names the step */
     void tick() {
-        if (finishing) return;
+        if (finishing || compiling) return;
         long now = SystemClock.uptimeMillis();
         if (log.stage == LoadLog.NONE) { bar.indeterminate(true); return; }
         bar.indeterminate(false);

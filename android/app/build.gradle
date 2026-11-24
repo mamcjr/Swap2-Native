@@ -111,7 +111,17 @@ def fpsHoldOf = { String game -> def v = tsvRows(game, 'fps_hold').collect { it[
 // and the first release date (Profile.release: the library's sort by release date): the profile's release row, YYYY-MM-DD, empty without one
 def releaseOf = { String game -> def v = tsvRows(game, 'release').collect { it[1].trim() }.find() ?: ''
     if (v && !(v ==~ /\d{4}-\d{2}-\d{2}/)) throw new GradleException("dm/games/$game/game.tsv: release must be YYYY-MM-DD, not $v"); v }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), ndsrOf(g), sceneOf(g), ndsrDefaultOf(g), foliageOf(g), fpsHoldOf(g), releaseOf(g)].join('\\t') }.join('\\n')
+// and the foliage programs (Profile.grass, Profile.plants: the Foliage option, DM_VK_FOLIAGE_GRASS / DM_VK_FOLIAGE_PLANTS): the profile's grass_mesh or plant_mesh rows'
+// mesh program keys, '+' between them, empty without rows
+def meshKeysOf = { String game, String row -> tsvRows(game, row).collect { c -> c.drop(1).collect { it.trim().split(/\s+/) as List }.flatten().findAll { it } }.flatten().collect { k ->
+        if (!(k ==~ /[0-9a-f]{16}/)) throw new GradleException("dm/games/$game/game.tsv: $row takes 16-digit lowercase mesh program keys: $k"); k }.join('+') }
+// and the effects Advanced graphics may turn off (Profile.effects: DM_VK_DISPATCH_OFF / DM_VK_DRAW_OFF): the profile's graphics_off rows as "<name>:<dispatch|draw>:<keys, ','>|…",
+// empty without rows
+def effectsOf = { String game -> tsvRows(game, 'graphics_off').collect { c ->
+        if (c.size() < 4 || !(c[1].trim() ==~ /[a-z0-9_]+/) || !(c[2].trim() in ['dispatch', 'draw']) || !(c[3].trim() ==~ /[0-9a-f]{16}(,[0-9a-f]{16})*/))
+            throw new GradleException("dm/games/$game/game.tsv: graphics_off takes <name> <dispatch | draw> <16-digit keys, comma-separated>: ${c.join(' ')}")
+        c[1].trim() + ':' + c[2].trim() + ':' + c[3].trim() }.join('|') }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), ndsrOf(g), sceneOf(g), ndsrDefaultOf(g), foliageOf(g), fpsHoldOf(g), releaseOf(g), meshKeysOf(g, 'grass_mesh'), meshKeysOf(g, 'plant_mesh'), effectsOf(g)].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {

@@ -59,6 +59,8 @@
     <string name="s2_play_prewarm_n">Pre-warming %1$d pipelines…</string>
     <string name="s2_play_scene">Loading textures and the first scene…</string>
     <string name="s2_play_ready">Ready</string>
+    <string name="s2_play_compiling">Compiling shaders: %1$d of %2$d, about %3$d s left · Tap to skip</string>
+    <string name="s2_play_compiling_n">Compiling shaders: %1$d of %2$d · Tap to skip</string>
     <string name="s2_game_settings">Game settings</string>
     <string name="s2_this_game">THIS GAME ONLY</string>
     <string name="s2_game_settings_intro">Changes apply on the next launch. Default follows the general settings.</string>
@@ -318,7 +320,7 @@
     <string name="s2_resolution_note">The size the game renders at.</string>
     <string name="s2_frame_cap_note">The most frames a second this game draws.</string>
     <string name="s2_frame_cap_own">This game picks its own frame rate</string>
-    <string name="s2_game_graphics_hint">FSR upscaling and frame generation are general settings (Settings › Performance) and the in-game panel\'s.</string>
+    <string name="s2_game_graphics_hint">Frame generation is a general setting (Settings › Performance) and the in-game panel\'s.</string>
     <string name="s2_upscaler">Upscaler</string>
     <string name="s2_upscaler_net">The game\'s neural network (NDSR)</string>
     <string name="s2_upscaler_fsr">FSR 1 (faster)</string>
@@ -738,8 +740,8 @@
     <string name="s2_gfx_on">On</string>
     <string name="s2_gfx_inherit">Follow global settings / game profile</string>
     <string name="s2_gfx_scaling_note">Scales the picture to the screen and replaces supported neural upscalers. Native keeps the game network.</string>
-    <string name="s2_gfx_sharp">FSR output sharpness</string>
-    <string name="s2_gfx_sharp_note">Sharpening when the final picture is enlarged to the screen.</string>
+    <string name="s2_gfx_sharp">Sharpness</string>
+    <string name="s2_gfx_sharp_note">How much the upscaler sharpens the enlarged picture.</string>
     <string name="s2_gfx_async">Background pipelines</string>
     <string name="s2_gfx_async_note">Applies at next start. Compiles in the background and waits when needed to preserve effects.</string>
     <string name="s2_gfx_timing">GPU timing</string>
@@ -817,4 +819,25 @@
     <string name="s2_warm_play_now">Play now</string>
     <string name="s2_warm_stop">Stop</string>
     <string name="s2_warm_close">Close</string>
+    <string name="s2_sec_image">Image</string>
+    <string name="s2_sec_frames">Frames</string>
+    <string name="s2_sec_scene">Scene</string>
+    <string name="s2_up_original">Original (the game\'s own)</string>
+    <string name="s2_up_note">FSR 1 is the lightest. SGSR 2 and FSR 3.1 rebuild detail from earlier frames in games with DLSS (SGSR 2 also in Ocarina of Time); elsewhere they work as FSR 1. Applies at once.</string>
+    <string name="s2_up_level">Upscaler level</string>
+    <string name="s2_up_quality">Quality (1080p)</string>
+    <string name="s2_up_balanced">Balanced (720p)</string>
+    <string name="s2_up_performance">Performance (540p)</string>
+    <string name="s2_up_level_note">The resolution the game renders at before the upscaler: lower runs faster. From the next start.</string>
+    <string name="s2_gfx_foliage">Grass and plants</string>
+    <string name="s2_gfx_foliage_high">High (as the game draws them)</string>
+    <string name="s2_gfx_foliage_medium">Medium (half the grass)</string>
+    <string name="s2_gfx_foliage_low">Low (no grass, half the plants)</string>
+    <string name="s2_gfx_foliage_none">None</string>
+    <string name="s2_gfx_foliage_note">Less grass and vegetation for more frames per second in fields and forests. Applies at once.</string>
+    <string name="s2_gfx_effect_volume_fog">Fog</string>
+    <string name="s2_gfx_effect_note">Off: the effect is not drawn, for more frames per second. Applies at once.</string>
+    <string name="s2_up_fsr1" translatable="false">FSR 1</string>
+    <string name="s2_up_sgsr2" translatable="false">SGSR 2</string>
+    <string name="s2_up_fsr3" translatable="false">FSR 3.1</string>
 </resources>

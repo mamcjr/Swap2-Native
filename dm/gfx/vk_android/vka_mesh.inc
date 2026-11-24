@@ -110,7 +110,7 @@ static int mesh_control_init(void) {
     VkDescriptorSetLayoutCreateInfo di = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .flags = l->push ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0, .bindingCount = 4, .pBindings = bindings};
     if (vk.vkCreateDescriptorSetLayout(V.dev, &di, NULL, &l->set0)) return 0;
-    VkPushConstantRange push = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 8};
+    VkPushConstantRange push = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 12};   // phase, batch base, keep (selftest/mesh_control.comp)
     VkPipelineLayoutCreateInfo pi = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &l->set0,
         .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
     if (vk.vkCreatePipelineLayout(V.dev, &pi, NULL, &l->layout)) return 0;
@@ -143,6 +143,50 @@ void vka_mesh_stats(char *b, size_t n, double frames) {
                  (g_mesh_batches - b0) / frames, (g_mesh_ctl - c0) / frames, (g_mesh_cs - s0) / frames, (g_mesh_packed - p0) / frames, (g_mesh_fused - f0) / frames, (g_mesh_fused_task - t0) / frames, (g_mesh_cpu - u0) / frames, (g_mesh_compacted - k0) / frames);
     memcpy(n0, g_mesh_n, sizeof n0); b0 = g_mesh_batches; c0 = g_mesh_ctl; s0 = g_mesh_cs; f0 = g_mesh_fused; k0 = g_mesh_compacted; p0 = g_mesh_packed; u0 = g_mesh_cpu; t0 = g_mesh_fused_task;
 }
+// ---------- Foliage density (DM_VK_FOLIAGE, DM_VK_FOLIAGE_GRASS, DM_VK_FOLIAGE_PLANTS: a player's graphics option) ----------
+// The vegetation the game draws with mesh programs, in two groups the profile names (grass_mesh: Ocarina of Time's tall grass, the costliest of the fallback's
+// computes in Hyrule Field; plant_mesh: the rest of the vegetation that can go without a game object going with it), which the launcher passes as
+// DM_VK_FOLIAGE_GRASS and DM_VK_FOLIAGE_PLANTS (16-digit hex keys, any separator), each list every pass of its programs (the depth prepass, the colour pass, the
+// shadow passes). DM_VK_FOLIAGE sets the level:
+//   3 (the default) high: as the game draws it;  2 medium: half the grass;  1 low: no grass, half the plants;  0 none: neither.
+// Half: the controller keeps the first half of each draw's tasks (or, without a task shader, of its mesh groups; selftest/mesh_control.comp keep). A program's
+// passes read the same count and keep the same groups, so a colour pass never shades a group its prepass left out: the sky would show through, as with the white
+// tips ("The compute form of a mesh program was not exact", shaders.md). All three switches are live. Not a fix: a trade of picture for frame rate, which the
+// player chooses. Native mesh draws (DM_VK_MESH=1) are not cut (open)
+static uint32_t g_mesh_keep = 1;   // (the controller's keep for the draw being recorded: 1 = all)
+static uint64_t g_mesh_foliage_cut[2];   // draws left out and halved
+static int foliage_keys(const char *name, uint64_t *keys, int max) {
+    char s[64 * 17 + 1]; int n = 0;
+    if (vka_env_str(name, s, sizeof s) && *s)
+        for (char *p = s; *p && n < max;) {
+            char c = (char)(*p | 32);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { p++; continue; }
+            char *e; uint64_t k = strtoull(p, &e, 16);
+            if (e - p == 16) keys[n++] = k;
+            p = e;
+        }
+    return n;
+}
+// What a draw of mesh program key does at the current level: 0 left out, 1 half of its groups, 2 all
+static int foliage_action(uint64_t key) {
+    static uint32_t gen; static uint64_t grass[64], plants[64]; static int ng = -1, np, last = -1;
+    uint32_t g = atomic_load_explicit(&vka_env_gen, memory_order_relaxed);
+    if (ng < 0 || g != gen) {   // (read again after a live control line)
+        gen = g; ng = foliage_keys("DM_VK_FOLIAGE_GRASS", grass, 64); np = foliage_keys("DM_VK_FOLIAGE_PLANTS", plants, 64);
+    }
+    if (!ng && !np) return 2;
+    int level = VKA_ENV("DM_VK_FOLIAGE", 3); level = level < 0 ? 0 : level > 3 ? 3 : level;
+    if (level != last) {
+        last = level;
+        static const char *what[4] = {"none: no grass, no plants", "low: no grass, half the plants", "medium: half the grass", "high: as the game draws it"};
+        VLOG("foliage (DM_VK_FOLIAGE=%d; %d grass and %d plant programs): %s; so far %llu draws left out, %llu halved", level, ng, np, what[level],
+             (unsigned long long)g_mesh_foliage_cut[0], (unsigned long long)g_mesh_foliage_cut[1]);
+    }
+    if (level == 3) return 2;
+    for (int i = 0; i < ng; i++) if (grass[i] == key) return level == 2 ? 1 : 0;
+    for (int i = 0; i < np; i++) if (plants[i] == key) return level == 1 ? 1 : level == 0 ? 0 : 2;
+    return 2;
+}
 static int mesh_control(uint32_t phase, uint32_t base, const VkDescriptorBufferInfo *source, int lead) {
     int was_on = R.on; vka_rp_end(); g_mesh_ctl++;
     if (!VKA_ENV("DM_VK_MESH_BARRIERS", 1) || (lead && !(was_on && rp_end_was_full()))) mesh_barrier();
@@ -163,7 +207,7 @@ static int mesh_control(uint32_t phase, uint32_t base, const VkDescriptorBufferI
         vk.vkCmdBindDescriptorSets(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, l->layout, 0, 1, &set, 0, NULL);
     }
     g_pd[1].n = 0;   // (set 0 replaced by the control pass's own: the draws' last compute push is gone, vka_draw.c push_same)
-    uint32_t push[2] = {phase, base};
+    uint32_t push[3] = {phase, base, g_mesh_keep};
     vk.vkCmdBindPipeline(g_cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_mesh_control_pipeline);
     vk.vkCmdPushConstants(g_cb, l->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, push);
     vk.vkCmdDispatch(g_cb, 1, 1, 1); mesh_barrier();
@@ -640,6 +684,9 @@ static int mesh_emulate(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_s
     vka_shader *m2 = NULL; unsigned b2 = 0;
     if (d->bst[1] && d->bst[1] != mp && resolve(d->bst[1], 7, &m2, &b2) && (m2 || (b2 & (1u << 7)))) mp = d->bst[1];
     if (!resolve(mp, 6, &ts, &bad) || !resolve(mp, 7, &ms, &bad) || !resolve(d->bst[1], 1, &fs, &bad) || bad || !ms || !ms->mesh_vertex) return 0;
+    { vka_shader *const tmf[3] = {ts, ms, fs}; if (draw_off(tmf, 3)) return 1; }   // DM_VK_DRAW_OFF (vka_draw.c): left out before its controller, compute and pass break
+    int grass = foliage_action(ms->key);   // (DM_VK_FOLIAGE: 0 this draw is left out, 1 the controller keeps half its groups, 2 all)
+    if (!grass) { g_mesh_foliage_cut[0]++; return 1; }
     // Replay bisection only: omitted geometry is explicitly not a visual fix.
     int diag_limit = VKA_ENV("DM_VK_MESH_DIAG_LIMIT", 0);
     if (diag_limit > 0) {
@@ -682,7 +729,7 @@ static int mesh_emulate(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_s
     ip[11] = pw; ip[12] = stride / 4; ip[13] = prims; ip[14] = topology; ip[15] = capacity; ip[16] = ts != NULL;
     int trace_mesh = VKA_ENV("DM_VK_MESH_TRACE_MS", 0);
     if (trace_mesh) ip[12] = 0;   // unused by production modules/controller; diagnostic counter only
-    if (fit && !ts && !dw->ind && !trace_mesh && !VKA_ENV("DM_VK_MESH_TRACE_GLOBAL", 0) && !VKA_ENV("DM_VK_MESH_DIAG_STAGE", 0) && VKA_ENV("DM_VK_MESH_CPU", 0))
+    if (fit && !ts && !dw->ind && !trace_mesh && !VKA_ENV("DM_VK_MESH_TRACE_GLOBAL", 0) && !VKA_ENV("DM_VK_MESH_DIAG_STAGE", 0) && VKA_ENV("DM_VK_MESH_CPU", 0) && grass == 2)
         return mesh_cpu(d, rt, has_rt, sc, has_sc, dw, ms, fs, capacity, prims, topology, pw, stride);
     VkDescriptorBufferInfo source;
     if (dw->ind) {
@@ -734,6 +781,7 @@ static int mesh_emulate(vka_dstate *d, const p_set_rt *rt, int has_rt, const p_s
     // dispatch after the task compute, phase 4, with one barrier after it instead of two (nothing runs between them). 0 = one by one, as before
     int fuse_task = ts && VKA_ENV("DM_VK_MESH_FUSE_TASK", 0);
     g_mesh_n[(ts ? 2 : 0) + (dw->ind ? 1 : 0)]++;
+    if (grass == 1) { g_mesh_keep = 2; g_mesh_foliage_cut[1]++; }   // (back to 1 at out)
     if (fuse) {
         if (!mesh_control(3, 0, &source, 1)) goto out;
         g_mesh_fused++;
@@ -780,5 +828,5 @@ out:
         if (r) { *r = (mesh_rec){slot, trace_mesh, learn, cover, pair, ts ? ts->key : 0, ms->key}; vka_after(vka_fence_last() + 1, mesh_report_rec, r); }
         else mesh_rep_give(slot);   // (a copy recorded without its report: the slot is only rewritten by a later copy, after this one in queue order)
     }
-    g_mesh_aux = 0; g_mesh_pull = g_mesh_fragment = NULL; g_mesh_compact_on = 0; return ok;
+    g_mesh_aux = 0; g_mesh_pull = g_mesh_fragment = NULL; g_mesh_compact_on = 0; g_mesh_keep = 1; return ok;
 }

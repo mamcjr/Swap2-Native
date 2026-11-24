@@ -240,3 +240,16 @@ def entry_as_manifest(want, got):
     """Whether a library entry's hash (got; None when the library has no entry for the key) is what the manifest has (want: a hash, "-" for a shader that did not build
     in the Mac's build, None when the manifest does not have the key)"""
     return want == got or got is None and want in (None, '-')
+
+
+def package_keys(want, locations, pairs, absent, build_keys):
+    """The build's keys: build_keys(want, locations, pairs) with the shaders the dump lacks (absent: keys, DMSH_VK_ABSENT_FILE) out of both the selection and its vertex /
+    pixel pair expansion, so the expansion cannot add a paired shader of another version back (a one-version split of a multi-version profile can lack one). Without
+    absences it is build_keys itself, the same keys in the same order. Banana Native #534 (MIT)"""
+    if not absent:
+        return build_keys(want, locations, pairs)
+    available = locations.keys() - absent
+    selected = want - absent
+    if not available or (want and not selected):
+        raise ValueError("the shader selection is empty after excluding the validated missing shaders")
+    return build_keys(selected, available, pairs)

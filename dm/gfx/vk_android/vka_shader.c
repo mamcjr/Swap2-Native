@@ -305,12 +305,39 @@ static uint32_t *shuffle_xor(const VkShaderModuleCreateInfo *ci, size_t *on) {
     static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VLOG("a module's %d shuffles made ShuffleXor (DM_VK_SHUFFLE_XOR)", ns);
     return o;
 }
+// A pixel shader's arithmetic into FragDepth keeps its rounding (vka_spv_precise_depth, from Banana Native v0.3.52 #590): a later EQUAL pass may compare that depth with
+// one another shader computed, and a driver that fuses or reorders the multiply-adds of one and not the other fails the test. Only the scalar expression feeding a direct
+// FragDepth store is decorated NoContraction (the guest's own separate instructions and explicit FMAs), so texture coordinates and colour math stay fast. Applied in
+// lib_csm: every library module and variant, and libraries already on the phone, take it. NULL: nothing to decorate (no FragDepth store, or every result already exact)
+static uint32_t *precise_depth(const VkShaderModuleCreateInfo *ci, size_t *on) {
+    if (ci->codeSize < 20 || !VKA_ENV("DM_VK_PRECISE_DEPTH", 1)) return NULL;
+    uint32_t *o = vka_spv_precise_depth(ci->pCode, ci->codeSize / 4, on);
+    if (o) { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 4) VLOG("a pixel shader's arithmetic into FragDepth made NoContraction (%zu words more)", *on - ci->codeSize / 4); }
+    return o;
+}
+// A device without 64-bit integers in shaders (shaderInt64 0: Qualcomm's driver on the Adreno 740 at 512.676, Kirby's Star-Crossed World upstream): a module that declares them only to
+// make physical-storage-buffer pointers from two 32-bit words is rewritten without them, as SPIR-V 1.5 (vka_spv_no_int64, from Banana Native v0.3.52 #613), else the driver
+// refuses every pipeline of it (-13). Last in lib_csm, after every variant is made from the library's words: what runs after it (the pool-read code, the pool fit) reads
+// SPIR-V 1.4 interfaces. The feature is read once here (vka_dev.c enables every core feature the device has). NULL: the module as it is
+static int g_int64 = -1;
+static uint32_t *no_int64(const VkShaderModuleCreateInfo *ci, size_t *on) {
+    if (g_int64 < 0) { VkPhysicalDeviceFeatures f = {0}; vk.vkGetPhysicalDeviceFeatures(V.pd, &f); g_int64 = f.shaderInt64 != 0; }
+    if (g_int64 || ci->codeSize < 20 || !vka_spv_declares_int64(ci->pCode, ci->codeSize / 4)) return NULL;
+    int changed = 0; char e[160] = ""; uint32_t *o = vka_spv_no_int64(ci->pCode, ci->codeSize / 4, on, &changed, e, sizeof e);
+    if (o) { static _Atomic int n; if (!atomic_fetch_add(&n, 1)) VLOG("shaderInt64: none on this device: modules that use 64-bit integers only for buffer addresses are made without them, as SPIR-V 1.5"); }
+    else { static _Atomic int n; if (atomic_fetch_add(&n, 1) < 8) VRED("a module uses 64-bit integers %s and the device has no shaderInt64: its pipelines are likely refused", e[0] ? e : "beyond buffer addresses"); }
+    return o;
+}
 // A library module (or a variant made from one): the only modules the hook above rewrites
 static VkResult lib_csm(const VkShaderModuleCreateInfo *ci, VkShaderModule *m) {
-    size_t sn = 0; uint32_t *sx = shuffle_xor(ci, &sn); VkShaderModuleCreateInfo c2;
+    size_t sn = 0; uint32_t *sx = shuffle_xor(ci, &sn); VkShaderModuleCreateInfo c2, c3, c4;
     if (sx) { c2 = *ci; c2.codeSize = sn * 4; c2.pCode = sx; ci = &c2; }
+    size_t pn = 0; uint32_t *px = precise_depth(ci, &pn);
+    if (px) { c3 = *ci; c3.codeSize = pn * 4; c3.pCode = px; ci = &c3; }
+    size_t ln = 0; uint32_t *lx = no_int64(ci, &ln);
+    if (lx) { c4 = *ci; c4.codeSize = ln * 4; c4.pCode = lx; ci = &c4; }
     t_lib_mod = 1; VkResult r = vk.vkCreateShaderModule(V.dev, ci, NULL, m); t_lib_mod = 0;
-    free(sx); return r;
+    free(sx); free(px); free(lx); return r;
 }
 
 // ---------- Shaders by key ----------
@@ -437,6 +464,17 @@ static int mesh_count_offset(const uint32_t *w, size_t nw) {
     }
     return -1;
 }
+// DM_VK_MESH_EXACT=0 (live: modules made from now on; default 1): the compute form of a task / mesh program keeps the driver's float contraction and reassociation, as
+// before. With 1 every float arithmetic result of it is NoContraction (vka_spv_exact_float): a depth prepass and its EQUAL colour pass then compute the same bits, so
+// the sky the game draws between them does not show through (Ocarina of Time's white grass tips on Turnip)
+static void mesh_exact(uint64_t key, uint32_t **w, size_t *nb) {
+    if (!VKA_ENV("DM_VK_MESH_EXACT", 1)) return;
+    size_t on = 0; int ns = 0; char e[256] = ""; uint32_t *o = vka_spv_exact_float(*w, *nb / 4, &on, &ns, e, sizeof e);
+    if (!o) { if (e[0]) { static _Atomic int nr; if (atomic_fetch_add(&nr, 1) < 4) VRED("mesh compute form %016llx: float results not made exact (%s)", (unsigned long long)key, e); } return; }
+    static _Atomic int nm; static _Atomic long long nr_all; long long all = atomic_fetch_add(&nr_all, ns) + ns; int k = atomic_fetch_add(&nm, 1) + 1;
+    if (k == 1 || k % 64 == 0) VLOG("mesh compute forms with every float result NoContraction (DM_VK_MESH_EXACT): %d modules, %lld results so far (%016llx: %d)", k, all, (unsigned long long)key, ns);
+    free(*w); *w = o; *nb = on * 4;
+}
 static void mesh_fragment(const dmsh_vk_entry *e, uint32_t *w, size_t *nb) {
     if (!V.mesh && e->stage == DMSH_VK_STAGE_FS && (e->flags & DMSH_VK_F_MESH_PRIM)) {
         size_t nw = *nb / 4;
@@ -451,6 +489,7 @@ static VkShaderModule spv_module(const vka_shlib *L, const dmsh_vk_entry *e, con
     int stage = m->variant == DMSH_VK_MOD_MESH_COMPUTE ? DMSH_VK_STAGE_CS : m->variant == DMSH_VK_MOD_MESH_VERTEX ? DMSH_VK_STAGE_VS : e->stage;
     if (e->flags & DMSH_VK_F_SUBGROUP) { single_lane(key, stage, &w, &nb); shuffle_halves(key, stage, &w, &nb); }
     gs_fill(key, stage, &w, &nb);
+    if (m->variant == DMSH_VK_MOD_MESH_COMPUTE) mesh_exact(key, &w, &nb);
     VkShaderModuleCreateInfo ci = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = w};
     VkShaderModule mod = VK_NULL_HANDLE; VkResult r = lib_csm(&ci, &mod);
     free(w);

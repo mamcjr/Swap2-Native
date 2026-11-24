@@ -46,6 +46,7 @@ int nxhost_main(int argc, char **argv);
 #pragma weak nxhost_audio_route_changed
 #pragma weak nxhost_fps
 #pragma weak nxhost_framegen_set
+#pragma weak nxhost_framegen_quality
 #pragma weak nxhost_framegen_status
 #pragma weak nxhost_picture_place
 #pragma weak nxhost_fps_cap_set
@@ -342,6 +343,9 @@ JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_fps(JNIEnv *env, jcl
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_frameGenSet(JNIEnv *env, jclass cls, jboolean on, jint mult, jint target, jint flow) {
     (void)env; (void)cls; if (nxhost_framegen_set) nxhost_framegen_set(on, mult, target, flow);
 }
+JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_frameGenQuality(JNIEnv *env, jclass cls, jboolean quality) {
+    (void)env; (void)cls; if (nxhost_framegen_quality) nxhost_framegen_quality(quality);
+}
 JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_frameGenStatus(JNIEnv *env, jclass cls) {
     (void)cls; char buf[300], out[320];
     if (!nxhost_framegen_status) return (*env)->NewStringUTF(env, "-2 not in this host");
@@ -423,3 +427,16 @@ JNIEXPORT jboolean JNICALL Java_dev_nxnative_android_Native_warmProgress(JNIEnv 
 }
 // Ends the warm early (Play now): the cache keeps what was made
 JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_warmStop(JNIEnv *env, jclass cls) { (void)env; (void)cls; if (nxhost_vk_warm_stop) nxhost_vk_warm_stop(); }
+
+// ---- The boot hold (vka_pso.c DM_VK_PREPARE; Banana Native v0.3.52 #576): "<taken> <total> <seconds left or -1>" while the host holds the game for its pipelines
+// (the loading curtain shows it, PlayCurtain.compiling), else ""; skip ends the hold ----
+#pragma weak nxhost_pso_prepare_status
+#pragma weak nxhost_pso_prepare_skip
+void nxhost_pso_prepare_status(char *buf, size_t n);   // vka_pso.c
+void nxhost_pso_prepare_skip(void);
+JNIEXPORT jstring JNICALL Java_dev_nxnative_android_Native_prepareStatus(JNIEnv *env, jclass cls) {
+    (void)cls; char buf[64] = "";
+    if (nxhost_pso_prepare_status) nxhost_pso_prepare_status(buf, sizeof buf);
+    return (*env)->NewStringUTF(env, buf);
+}
+JNIEXPORT void JNICALL Java_dev_nxnative_android_Native_prepareSkip(JNIEnv *env, jclass cls) { (void)env; (void)cls; if (nxhost_pso_prepare_skip) nxhost_pso_prepare_skip(); }

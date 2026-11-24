@@ -189,7 +189,7 @@ static void t_vibration(void) {
     CHECK(h_hid_VibHandles(h, 2, &id, STYLE_FULLKEY) == 2, "merged controller supplies rumble when player 1 has no physical output");
     g_mode = 0; id = NPAD_HANDHELD;
     CHECK(h_hid_VibHandles(h, 2, &id, STYLE_HANDHELD) == 2 && h[0] == 0x2004 && h[1] == 0x12004, "handheld SDK vibration handles");
-    CHECK(!vib_targets(3), "old docked handle is not valid in handheld mode");
+    CHECK(!vib_targets(3, NULL), "old docked handle is not valid in handheld mode");
     CHECK(!h_hid_VibMounted(&(uint32_t){3}) && h_hid_VibMounted(&h[0]), "mounted follows the connected controller's style");
     dm_haptics_route(1, 0);
     CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
@@ -489,6 +489,66 @@ static void t_motion_hid(void) {
     dm_pad_players(1); g_phone_mode = -1;
 }
 
+// A whole controller shown in the supported style closest to it when the game takes no full-key one (pad_style): a Joy-Con pair (Nintendo Switch Sports Resort's lobby, Handheld |
+// JoyDual), else one Joy-Con, the right one first (Pokémon: Let's Go, Handheld | JoyLeft | JoyRight | Palma); its state, six-axis sensors and vibration devices follow
+static void t_joy_styles(void) {
+    NpadState s; uint32_t h[2] = {0}, id = 0, info[2];
+    g_mode = 1; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3); dm_pad_players(0x3);
+    dm_input_set(0, 0, 0, 0, 0); dm_pad_set(0, 0, 0, 0, 0); dm_pad_set_player(1, 0, 0, 0, 0, 0); buttons_of(0, STYLE_FULLKEY);
+    dm_haptics_init(vibration_sink, 1); dm_haptics_route(0, 1); dm_haptics_route(1, 1);
+    static uint8_t ev0[0x40], ev1[0x40];
+    h_hid_BindStyleEv(&(uint32_t){0}, ev0, 0); h_hid_BindStyleEv(&(uint32_t){1}, ev1, 0);
+
+    g_signals = 0; h_hid_SetStyles(STYLE_HANDHELD | STYLE_JOYDUAL);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYDUAL, "Handheld | JoyDual: each whole controller is a Joy-Con pair");
+    CHECK(g_signals == 2, "the style change signals both connected npads' style events");
+    dm_pad_set(DM_BTN_A | DM_BTN_UP, 0, 0, 20000, 0);
+    fill(&s, 0, STYLE_JOYDUAL);
+    CHECK(s.buttons == (DM_BTN_A | DM_BTN_UP | 1u << 22) && s.rx == 20000 && s.attributes == (ATTR_CONNECTED | ATTR_LEFT_CONN | ATTR_RIGHT_CONN), "a pair reads every button and both sticks");
+    CHECK(buttons_of(0, STYLE_FULLKEY) == 0, "no full-key state while the controller is a pair");
+    CHECK(h_hid_SixHandles(h, 2, &id, STYLE_FULLKEY | STYLE_JOYDUAL) == 2 && h[0] == 0x2 && h[1] == 0x10002 && six_connected(h[0]) && six_connected(h[1]),
+          "a set holding the shown style gets the pair's two sensors");
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYDUAL) == 2 && h[0] == 0x5 && h[1] == 0x10005, "a pair's vibration handles: style 5, Joy-Cons 0 and 1");
+    h_hid_VibInfo(info, &h[1]); CHECK(info[0] == 1 && info[1] == 2 && h_hid_VibMounted(&h[0]), "the pair's right Joy-Con is a mounted right actuator");
+    CHECK(h_hid_VibMounted(&(uint32_t){3}) && h_hid_VibMounted(&(uint32_t){0x10003}), "full-key handles a game kept reach the pair");
+
+    g_signals = 0; vibration_calls = 0;
+    h_hid_SetStyles(STYLE_HANDHELD | STYLE_JOYLEFT | STYLE_JOYRIGHT | 1u << 5);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYRIGHT && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT && g_signals == 2, "single Joy-Cons only: each whole controller is a right Joy-Con");
+    dm_pad_set(0, 0, 0, 0, 0); dm_input_set(DM_BTN_UP | DM_BTN_L | DM_BTN_MINUS | DM_BTN_B, -20000, 18000, 500, 0);
+    fill(&s, 0, STYLE_JOYRIGHT);
+    CHECK(s.buttons == (DM_BTN_X | DM_BTN_R | DM_BTN_PLUS | DM_BTN_B | 1u << 20 | 1u << 21) && s.lx == 0 && s.ly == 0 && s.rx == -20000 && s.ry == 18000,
+          "the left half folds onto the right Joy-Con: D-pad up is X, L is R, - is +, the left stick is its stick");
+    CHECK(s.attributes == (ATTR_CONNECTED | ATTR_RIGHT_CONN), "only the right half is connected");
+    CHECK(buttons_of(0, STYLE_FULLKEY) == 0 && buttons_of(0, STYLE_JOYDUAL) == 0 && buttons_of(0, STYLE_JOYLEFT) == 0, "no other style reads the controller");
+    dm_input_set(0, 100, 0, -4000, 0); fill(&s, 0, STYLE_JOYRIGHT);
+    CHECK(s.rx == -4000 && s.lx == 0, "the stick deflected more is the Joy-Con's stick");
+    CHECK(h_hid_SixHandles(h, 2, &id, STYLE_FULLKEY | STYLE_JOYRIGHT) == 1 && h[0] == 0x10004 && six_connected(h[0]), "one sensor, the right Joy-Con's device 1 (0x10004 on No1)");
+    CHECK(h_hid_VibHandles(h, 2, &id, STYLE_JOYRIGHT) == 1 && h[0] == 0x10007, "one vibration device: style 7, the right side");
+    h_hid_VibInfo(info, &h[0]); CHECK(info[0] == 1 && info[1] == 2, "a right Joy-Con's actuator is a right one");
+    CHECK(!h_hid_VibMounted(&(uint32_t){0x7}) && h_hid_VibMounted(&(uint32_t){0x10003}) && !h_hid_VibMounted(&(uint32_t){0x3}),
+          "a right Joy-Con has no left device; a kept full-key handle reaches only its right motor");
+    dm_vibration v = {0.5, 160, 0, 320}; h_hid_SendVib(&h[0], &v);
+    CHECK(vibration[0].motor[1].amplitude_low == 0.5f && dm_haptics_actual(0, 1).amplitude_low == 0.5f, "a right Joy-Con's rumble drives the pad's right motor");
+    dm_pad_set_player(1, DM_BTN_RIGHT, 0, 0, 0, 0);
+    CHECK(buttons_of(1, STYLE_JOYRIGHT) == DM_BTN_A, "player 2's controller is a right Joy-Con too");
+
+    h_hid_SetStyles(STYLE_JOYLEFT);
+    dm_input_set(DM_BTN_A | DM_BTN_ZR, 0, 0, 0, 17000); fill(&s, 0, STYLE_JOYLEFT);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYLEFT && s.buttons == (DM_BTN_RIGHT | DM_BTN_ZL | 1u << 17) && s.ly == 17000 && s.ry == 0 && s.attributes == (ATTR_CONNECTED | ATTR_LEFT_CONN),
+          "left Joy-Cons only: A is D-pad right, ZR is ZL, the right stick is the left one");
+    CHECK(h_hid_SixHandles(h, 1, &id, STYLE_JOYLEFT) == 1 && h[0] == 0x3 && h_hid_VibHandles(h, 2, &id, STYLE_JOYLEFT) == 1 && h[0] == 0x6, "a left Joy-Con: sensor 0x3, vibration handle 0x6");
+
+    h_hid_SetStyles(STYLE_HANDHELD | 1u << 5);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "a game with none of these styles keeps full-key");
+    g_mode = 0;
+    h_hid_SetStyles(STYLE_HANDHELD | STYLE_JOYRIGHT);
+    CHECK(h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "handheld: player 1 stays Handheld, player 2 is a right Joy-Con");
+    g_mode = 1; h_hid_SetStyles(0xffffffffu);
+    CHECK(h_hid_GetStyle(&(uint32_t){0}) == STYLE_FULLKEY, "every style supported: full-key again");
+    dm_input_set(0, 0, 0, 0, 0); dm_pad_set(0, 0, 0, 0, 0); dm_pad_set_player(1, 0, 0, 0, 0, 0); dm_pad_players(1);
+}
+
 int main(void) {
     CHECK(setenv("DM_RUMBLE_LOG", "1", 1) == 0, "enable rumble diagnostics");
     t_slots();
@@ -500,6 +560,7 @@ int main(void) {
     t_motion_live();
     t_motion_hid();
     t_rec();
+    t_joy_styles();
     printf("hid players: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

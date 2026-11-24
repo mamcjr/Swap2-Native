@@ -7,7 +7,6 @@
 # Literals, & K, % K, >> K, min, max, clamp and casts bound a value; inputs, buffer reads and anything not understood are unbounded. Every stage's c1 counts (vp_, fp_, cp_, gp_ ...).
 # The first version followed only the last variable of an index and took any mask, min or clamp it met as proof: `_1 + (_2 & 3u)` with _1 read from an input passed,
 # masks wider than the data passed, and compute shaders (cp_c1) were never checked.
-import datetime
 import json
 import multiprocessing
 import os
@@ -222,6 +221,22 @@ def unproven(job):
     return None if all(proven(index, definitions, span) for index in accesses) else key
 
 
+def write_table(version_dir, output, lines):
+    """Writes a table the host takes beside library version_dir: its header (the library's chain version and the profile inputs it was built from), then lines. No clock time
+    in the header, and a table that already holds the same bytes is left untouched (bytes and modification time), so a shader build that changes nothing changes no packed
+    file (upstream nxnative 410f0c9e: the time made every full build rewrite both tables and invalidated the packed app's reuse keys). The readers take the header alone or
+    followed by a space (older tables, with the time)"""
+    text = f"{dmsh_chain.table_head(version_dir)}\n" + "".join(line + "\n" for line in lines)
+    try:
+        with open(output, encoding="utf-8", newline="") as stream:
+            if stream.read() == text: return False
+    except (OSError, UnicodeDecodeError): pass
+    parent = os.path.dirname(output)
+    if parent: os.makedirs(parent, exist_ok=True)
+    with open(output, "w", encoding="utf-8", newline="") as stream: stream.write(text)
+    return True
+
+
 def main():
     if len(sys.argv) != 3:
         raise SystemExit(f"usage: {sys.argv[0]} <dmsh_b version dir> <output tsv>")
@@ -229,12 +244,7 @@ def main():
     jobs = [(version_dir, name) for name in outputs(version_dir, "metal")]
     with multiprocessing.Pool() as pool:   # map keeps the sorted order, so the list is the same as one core's
         keys = [key for key in pool.map(unproven, jobs, chunksize=64) if key]
-    os.makedirs(os.path.dirname(output), exist_ok=True)
-    with open(output, "w", encoding="utf-8", newline="") as stream:
-        stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-        stream.write(f"{dmsh_chain.table_head(version_dir)} {stamp}\n")   # the library's chain version and the profile inputs it was built from
-        for key in keys:
-            stream.write(key + "\n")
+    write_table(version_dir, output, keys)
     print(f"not proven bounded: {len(keys)} shaders")
 
 

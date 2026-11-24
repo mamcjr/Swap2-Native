@@ -25,6 +25,7 @@ struct dm_game_rt {
     unsigned shader_key_skip_off, shader_key_skip_len;
     int shared_font_ttf;            // -1: the profile has no shared_font (the host decides by the SDK)
     int nvn_api_major, nvn_api_minor;   // -1: no device_api (by the SDK)
+    const char *turnip_env;   // the TURNIP_ENV row (Mesa's variables, vka_driver.c); NULL: a pack from a packer before it
     uint64_t core_mask; int ideal_core;   // the NPDM's cores (CORE_MASK / IDEAL_CORE rows); core_mask 0: a pack from a packer before them (hle_thread.c takes a Switch 1's 0x7)
     const char *modules[DM_GAME_RT_MAXMOD]; int nmod;
     struct dm_game_ver vers[DM_GAME_RT_MAXVER]; int nvers;
@@ -75,5 +76,6 @@ int dm_game_load(const char *path);
 #define DM_GAME_TEX_DYN_SLOTS (dm_game.tex_dyn_slots)
 #define DM_GAME_GPU_TS_SEGMENT (dm_game.gpu_ts_segment)
 #define DM_GAME_VCONV_RANGE (dm_game.vconv_range)
+#define DM_GAME_TURNIP_ENV (dm_game.turnip_env ? dm_game.turnip_env : "")
 #define DM_GAME_NWINDOW_FN (dm_game.nwfn)
 #define DM_GAME_NRES_LEVELS (dm_game.nrlv)

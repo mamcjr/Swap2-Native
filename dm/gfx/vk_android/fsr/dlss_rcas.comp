@@ -7,10 +7,15 @@
 // AMD's FsrRcasF (ffx_fsr1.h, 32-bit path, no denoise, no alpha), written out as fsr/ndsr_rcas.comp has it: its two limiters divide by values kept at least 2^-20 away
 // from zero instead of taking exact reciprocals, which are infinite where the ring is black (0) or white (1); 0 * inf is NaN, which AMD's code expects min / max to drop,
 // and Qualcomm's driver does not (docs/reference/shaders.md, FSR's RCAS wrote NaN on Qualcomm's driver)
+//
+// The alpha is the input colour's (binding 1, a linear sampler), read bilinearly at the output pixel's place in the input rectangle (abase: its origin plus the frame's
+// jitter, as EASU and GSR2 read the colour; ascale: input texels per output texel; arcp: 1 / the input image's size): NVN2's DLSS carries the colour's alpha into its
+// output, and games composite that output by it (Fast Fusion draws its 3D layer over the menu with SRC_ALPHA blending). The upscalers keep colour only (alpha 1)
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(set = 0, binding = 1) uniform sampler2D src;
 layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D dst;
-layout(push_constant) uniform P { uvec4 con0; ivec2 size; int itm; int enc; } pc;
+layout(push_constant) uniform P { uvec4 con0; ivec2 size; int itm; int enc; vec2 abase, ascale, arcp; } pc;
 #include "dlss_srgb.h"
 const float RCAS_LIMIT = 0.25 - 1.0 / 16.0;   // FSR_RCAS_LIMIT
 const float TINY = 1.0 / 1048576.0;
@@ -33,5 +38,6 @@ void main() {
     c = clamp(c, 0.0, 1.0);
     if (pc.itm != 0) c /= max(1.0 - max(c.r, max(c.g, c.b)), 1.0 / 1024.0);
     if (pc.enc != 0) c = dlss_srgb_enc(c);
-    imageStore(dst, p, vec4(c, 1.0));
+    float a = textureLod(src, (pc.abase + (vec2(p) + 0.5) * pc.ascale) * pc.arcp, 0.0).a;
+    imageStore(dst, p, vec4(c, a));
 }

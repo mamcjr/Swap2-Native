@@ -1,7 +1,10 @@
 // nn::oe (application operating environment): on the real device the console state is queried through the am/oe services; the host gives fixed state directly.
 // oe::Initialize is in hle_sdkinit.c, not here.
-// Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default en-US; the iOS app sets it from the IPA's DMLanguage, main.m).
+// Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default: the first supported language in control.nacp, else en-US; the iOS app sets it from the IPA's DMLanguage, main.m, the Android app from Game language);
+// DM_CONTROL_NACP=path of the title's control.nacp (default: control.nacp beside DM_ROMFS).
 #include "hle.h"
+#include <fcntl.h>
+#include <unistd.h>
 
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
 #include <stdatomic.h>
@@ -90,6 +93,8 @@ void dm_focus_set(int st) {
     focus_sync(0);
 }
 static int opmode(void) { return dm_opmode(); }
+// Weak default for builds without loader.c (the unit tests that include this file): a Switch 1 sdk
+__attribute__((weak)) int dm_sdk_ounce(void) { return 0; }
 
 // Screenshot / video recording switches: the host has no system screenshot service, no-op
 HLE_FORCE("_ZN2nn2oe17FinishStartupLogoEv", "dismiss the system boot screen (through the am application proxy); the host has no boot screen", void, h_oe_FinishLogo, void) {}   // Metroid Dread calls it at main+0xadfed0
@@ -182,8 +187,9 @@ HLE_FORCE("_ZN2nn2gs3sdk26SetGraphicsFrameLengthModeENS1_23GraphicsFrameLengthMo
           void, h_gs_FrameLength, int mode) {
     static int last = -1; if (mode != last) { LOG("gs: graphics frame length mode %d (0 auto, 1 30 fps, 2 60 fps, 3 120 fps)", mode); last = mode; }
 }
-HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld", void, h_oe_DefRes, int *w, int *h) {
-    int con = opmode() == 1; if (w) *w = con ? 1920 : 1280; if (h) *h = con ? 1080 : 720;
+// Switch 1: 1920x1080 docked, 1280x720 handheld; Switch 2 (Ounce): its built-in panel is 1080p, so 1920x1080 in handheld too, as vi::QueryDisplayBufferMaxResolution (Banana Native #529)
+HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld (1920x1080 on Switch 2)", void, h_oe_DefRes, int *w, int *h) {
+    int fhd = opmode() == 1 || dm_sdk_ounce(); if (w) *w = fhd ? 1920 : 1280; if (h) *h = fhd ? 1080 : 720;
 }
 HLE_FORCE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", "default display resolution change event: bound, never signaled (the operation mode notification carries the change)",
           void, h_oe_DefResEv, void *ev) { hle_bind_system_event(ev, 0); }
@@ -281,19 +287,55 @@ HLE_FORCE("_ZN2nn2oe28SetResumeNotificationEnabledEb", "resume notification swit
 HLE_FORCE("_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb", "operation mode change notification switch", void, h_oe_SetOpModeNtf, unsigned on) { g_ntf_opmode = on & 0xff; }
 HLE_FORCE("_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb", "performance mode change notification switch", void, h_oe_SetPerfModeNtf, unsigned on) { g_ntf_perfmode = on & 0xff; }
 
-// nn::settings::LanguageCode = struct { char string[8]; }, 8 bytes returned by value in x0
-HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; value from DM_LANG", uint64_t, h_oe_GetLang, void) {
+// Read len bytes at off from the application's control.nacp (nn::ns::ApplicationControlProperty, 0x4000 bytes): DM_CONTROL_NACP, else control.nacp beside DM_ROMFS
+// (the NSP script's extraction folder <version>/{RomFS,control.nacp}). Returns 0 on success, -1 if missing, -2 if too short (upstream nxnative 7130d4db)
+static int oe_control_read(off_t off, void *out, size_t len) {
+    char p[1100]; const char *e = getenv("DM_CONTROL_NACP");
+    if (e && *e) snprintf(p, sizeof p, "%s", e);
+    else {
+        const char *rom = getenv("DM_ROMFS");
+        if (!rom || !*rom) return -1;
+        snprintf(p, sizeof p, "%s", rom);
+        size_t k = strlen(p); while (k > 1 && p[k - 1] == '/') p[--k] = 0;
+        char *sl = strrchr(p, '/'); if (sl) sl[1] = 0; else p[0] = 0;
+        strlcat(p, "control.nacp", sizeof p);
+    }
+    int fd = open(p, O_RDONLY); ssize_t r = fd < 0 ? -1 : pread(fd, out, len, off);
+    if (fd >= 0) close(fd);
+    return r == (ssize_t)len ? 0 : (fd < 0 ? -1 : -2);
+}
+// The game's language: DM_LANG, else the first language control.nacp's SupportedLanguageFlag (+0x302C) lists, in NACP bit order (dm/tools/nacp.py LANGUAGES: en-US,
+// then en-GB, then the game's first), as Horizon only gives a language the title declares; en-US without control data. Xenoblade Chronicles 3 lists en-GB and no en-US and
+// crashed at boot when given en-US (upstream nxnative 7130d4db)
+static const char *oe_lang(void) {
     const char *e = getenv("DM_LANG");
+    if (e && *e) return e;
+    static const char *const k_nacp_lang[] = {
+        "en-US", "en-GB", "ja", "fr", "de", "es-419", "es", "it",
+        "nl", "fr-CA", "pt", "ru", "ko", "zh-Hant", "zh-Hans", "pt-BR",
+        "pl", "th",
+    };
+    uint8_t b[4];
+    if (!oe_control_read(0x302C, b, sizeof b)) {
+        uint32_t flag = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+        for (unsigned i = 0; i < sizeof k_nacp_lang / sizeof *k_nacp_lang; i++)
+            if (flag & (1u << i)) return k_nacp_lang[i];
+    }
+    return "en-US";
+}
+// nn::settings::LanguageCode = struct { char string[8]; }, 8 bytes returned by value in x0
+HLE_FORCE("_ZN2nn2oe18GetDesiredLanguageEv", "system language query; value from DM_LANG, else control.nacp", uint64_t, h_oe_GetLang, void) {
+    const char *e = oe_lang();
     char code[8] = {0};
-    strncpy(code, e && *e ? e : "en-US", sizeof code - 1);
+    strncpy(code, e, sizeof code - 1);
     uint64_t v; memcpy(&v, code, 8);
     return v;
 }
 
 // The console's region (Animal Crossing: New Horizons 3.0.3): the SDK asks settings::system::GetRegionCode, which reaches set:sys. A region that fits the language the game is given:
 // 0 Japan, 1 the Americas, 2 Europe, 4 Hong Kong / Taiwan / Korea (nn::settings::system::RegionCode; 3 Australia and 5 China are left out, no language points at them alone)
-HLE_FORCE("_ZN2nn2oe13GetRegionCodeEv", "console region (set:sys); from DM_LANG", int, h_oe_GetRegion, void) {
-    const char *e = getenv("DM_LANG"); if (!e || !*e) e = "en-US";
+HLE_FORCE("_ZN2nn2oe13GetRegionCodeEv", "console region (set:sys); from DM_LANG, else control.nacp", int, h_oe_GetRegion, void) {
+    const char *e = oe_lang();
     int r = !strncmp(e, "ja", 2) ? 0 : !strncmp(e, "ko", 2) || !strncmp(e, "zh", 2) ? 4 : !strcmp(e, "en-US") || !strcmp(e, "fr-CA") || !strcmp(e, "es-419") || !strcmp(e, "pt-BR") ? 1 : 2;
     static int once; if (!once++) LOG("oe::GetRegionCode: %d for language %s", r, e);
     return r;

@@ -51,12 +51,17 @@ typedef struct {
     char name[32]; char dir[1024]; char overlay[4096]; char commit[1024];
     romfs_img *img;                  // non-NULL: dir is a RomFS image file
     int ro;
+    int releasable;                  // add-on content and cache storage: Unmount releases the name (mount_releasable)
+    int released;                    // a releasable entry after its Unmount: kept for open handles and a later mount of its target, matched by no name (mnt_is)
     int txn_root;                    // canonical mount entry for this backing transaction, or -1
     _Atomic int poison;              // failure state belongs to this backing, not to the process
     _Atomic uint64_t first_write_ns;
 } mount_t;
 static mount_t g_mnt[MAX_MOUNT];   // commit non-empty = transactional save mount
 static int g_nmnt;
+// Whether entry m is mounted under the n-byte name s; a released entry (host_unmount) is under none
+static int mnt_is(const mount_t *m, const char *s, size_t n) { return !m->released && strlen(m->name) == n && !strncmp(m->name, s, n); }
+static int mnt_named(const mount_t *m, const char *name) { return mnt_is(m, name, strlen(name)); }
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_path_lock = PTHREAD_MUTEX_INITIALIZER;
 static void path_unlock(pthread_mutex_t **m) { pthread_mutex_unlock(*m); }
@@ -114,7 +119,7 @@ static const char *envdir(const char *var, const char *rel, char *buf, size_t n)
 }
 
 // Steps that end in a failed write: test injection DM_TEST_FS_FAILAT=<point>[:<count>][,...] -- in a save transaction, mountclone (clone the work directory at mount),
-// reclone (reclone after a refused commit), guestname (write the guest name after a rename), renameback (rename rollback) fail with ENOSPC for the first <count> times (default 1),
+// reclone (reclone after a refused commit), commitsync (fsync of a commit's new version), guestname (write the guest name after a rename), renameback (rename rollback) fail with ENOSPC for the first <count> times (default 1),
 // to check "no exit, committed version unchanged, next commit works" (tests/t_fs.c 6). Without the variable it costs one getenv
 static int dm_fs_test_fail(const char *pt) {
     static char spec[256]; static int cnt[8]; const char *e = getenv("DM_TEST_FS_FAILAT"); if (!e || !e[0]) return 0;
@@ -127,6 +132,31 @@ static int dm_fs_test_fail(const char *pt) {
 }
 static int in_txn_dir(const char *hp) { return save_txn_from_path(hp); }
 static int rm_tree(const char *p);
+// Commit durability. A commit's new version is a fresh copy (.new); the swap that makes it the save is a rename (or, on shared storage, a journal of renames whose marker
+// is fsynced). Without the copy's data on the storage first, a power loss or a forced restart (the phone held off, a kernel reset) after the swap could leave the save as
+// files of the right names and sizes with their data never written: zeros, or nothing. So every file and folder of .new is fsynced before the swap, and the folder holding
+// the save after it. A filesystem that cannot sync (EINVAL, ENOTSUP, EROFS) is taken as it is; a file whose fsync fails otherwise (EIO, ENOSPC) refuses the commit
+static int sync_ok(int r) { return !r || errno == EINVAL || errno == ENOTSUP || errno == EROFS; }
+static void sync_one(const char *p) { int fd = open(p, O_RDONLY | O_DIRECTORY | O_CLOEXEC); if (fd >= 0) { fsync(fd); close(fd); } }   // a folder: best effort
+static void sync_dir_of(const char *p) { char d[1100]; snprintf(d, sizeof d, "%s", p); char *s = strrchr(d, '/'); if (s && s != d) { *s = 0; sync_one(d); } else sync_one(s ? "/" : "."); }
+static int sync_tree(const char *p) {
+    struct stat st; if (lstat(p, &st)) return -1;
+    if (S_ISLNK(st.st_mode)) return 0;
+    if (!S_ISDIR(st.st_mode)) { int fd = open(p, O_RDONLY | O_CLOEXEC); if (fd < 0) return -1; int r = fsync(fd), e = errno; close(fd); errno = e; return sync_ok(r) ? 0 : -1; }
+    DIR *d = opendir(p); if (!d) return -1;
+    struct dirent *e; char c[1100]; int rc = 0;
+    while (!rc && (e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (snprintf(c, sizeof c, "%s/%s", p, e->d_name) >= (int)sizeof c) { errno = ENAMETOOLONG; rc = -1; break; }
+        rc = sync_tree(c);
+    }
+    int er = errno; closedir(d); sync_one(p); errno = er; return rc;
+}
+// Whether a save swap journal (plat_rename_swap's file-level fallback: <save>.pend1 / .pend2) stands beside the save
+static int swap_journal_left(const char *b) {
+    char m[1100]; snprintf(m, sizeof m, "%s.pend1", b); if (!access(m, F_OK)) return 1;
+    snprintf(m, sizeof m, "%s.pend2", b); return !access(m, F_OK);
+}
 // Reads and checks a RomFS image's header and index; NULL (and a red line) when it is not a complete image. A NUP container package
 // ("<file>.nup[:<selector>]", nup_image.h, android/NUP.md) opens as an image too
 static romfs_img *img_open(const char *path) {
@@ -184,7 +214,7 @@ static int img_path(const char *p, int *mi, int64_t *k) {
     PATH_LOCK(); char fwd[1024]; p = fwd_slashes(p, fwd, sizeof fwd); const char *c = p ? strchr(p, ':') : NULL; if (!c) return 0;
     size_t ln = c - p;
     for (int i = 0; i < g_nmnt; i++) {
-        if (strlen(g_mnt[i].name) != ln || strncmp(g_mnt[i].name, p, ln)) continue;
+        if (!mnt_is(&g_mnt[i], p, ln)) continue;
         if (!g_mnt[i].img) return 0;
         char normed[1024]; const char *rest = c + 1; *mi = i;
         if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) { *k = -1; return 1; } rest = normed; }
@@ -193,14 +223,33 @@ static int img_path(const char *p, int *mi, int64_t *k) {
     }
     return 0;
 }
-static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
+static Result mount_impl(const char *name, const char *dir, int ro, int txn, int releasable) {
     pthread_once(&g_txn_lock_once, txn_locks_init);
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
-    for (int i = 0; i < g_nmnt; i++)
-        if (!strcmp(g_mnt[i].name, name)) { pthread_mutex_unlock(&g_lock); return RES_OK; }
+    int back = -1;
+    for (int i = 0; i < g_nmnt; i++) {
+        if (mnt_named(&g_mnt[i], name)) {
+            // Repeating a mount is harmless. A releasable mount (add-on content, cache storage) of another target under a name still in use is refused, as on Horizon,
+            // so the game does not silently read the old one; other mounts keep answering success with their first target, as before
+            const char *backing = g_mnt[i].commit[0] ? g_mnt[i].commit : g_mnt[i].dir;
+            Result r = !releasable || (!strcmp(backing, dir) && g_mnt[i].ro == ro) ? RES_OK : RES_PATH_EXISTS;
+            pthread_mutex_unlock(&g_lock); return r;
+        }
+        if (releasable && !txn && g_mnt[i].released && g_mnt[i].releasable &&
+            g_mnt[i].ro == ro && !g_mnt[i].commit[0] && !strcmp(g_mnt[i].dir, dir))
+            back = i;
+    }
+    if (back >= 0) {   // the entry this target had before its Unmount: the table does not grow when a game cycles through indices under one name
+        strlcpy(g_mnt[back].name, name, sizeof g_mnt[0].name);
+        g_mnt[back].released = 0;
+        pthread_mutex_unlock(&g_lock);
+        if (!ro) mkdir(dir, 0755);
+        LOG("fs mount %s: → %s (%sthe entry it had before its unmount)", name, dir, ro ? "read-only, " : "");
+        return RES_OK;
+    }
     if (g_nmnt >= MAX_MOUNT) die("mount table full");
     strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
-    g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
+    g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].releasable = releasable; g_mnt[g_nmnt].released = 0; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
@@ -218,7 +267,10 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         plat_swap_recover(dir);   // a commit killed inside the file-level swap that stands in for RENAME_EXCHANGE on shared storage is finished (plat_rename_swap)
         mkdir(dir, 0755);
         const char *why = NULL;
-        if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
+        // A journal the recovery could not finish (its [RED] line says why) still names <save>.new: clearing that copy below would leave the save as the half-swapped
+        // mix for good. Both stay as they are, and the save mounts read-only
+        if (swap_journal_left(dir)) { errno = EBUSY; why = "an unfinished save swap journal is left beside it (the line above says why; the save and its .new are kept as they are)"; }
+        else if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
         else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
         else if (dm_fs_test_fail("mountclone") || plat_clone_tree(dir, work))   // ENOTSUP: HFS+ and exFAT can neither clone nor swap directories (RENAME_SWAP), so no transaction can work on them
             why = errno == ENOTSUP ? "the save folder's filesystem cannot clone directories (save transactions need APFS: set DM_SAVE to a folder on an APFS volume)" : "cloning the work directory failed";
@@ -248,7 +300,27 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     LOG("fs mount %s: → %s%s%s", name, txn ? g_mnt[g_nmnt - 1].dir : dir, ro || txn_err ? " (read-only)" : txn ? " (transactional save: work directory, swapped in atomically on Commit)" : "", g_mnt[g_nmnt - 1].overlay[0] ? " (overlay first)" : "");
     return RES_OK;
 }
-static Result mount(const char *name, const char *dir, int ro) { return mount_ex(name, dir, ro, 0); }
+static Result mount_ex(const char *name, const char *dir, int ro, int txn) { return mount_impl(name, dir, ro, txn, 0); }
+static Result mount(const char *name, const char *dir, int ro) { return mount_impl(name, dir, ro, 0, 0); }
+// Add-on content and cache storage under a name the game gives back (upstream nxnative 82cad791). On Horizon Unmount releases the name and the next mount under it gets the
+// target it names: Pokémon Friends mounts each add-on as "AVCtitle" in turn, Taiko no Tatsujin: Rhythm Festival mounts cache storage index 1, unmounts it, and mounts index 2
+// under the same name. The host's table keeps its entries, as an open image file names its entry by index (IMG_HANDLE): Unmount marks a releasable entry released
+// (host_unmount; it keeps its name for the log, no name lookup matches it, mnt_is), and a later mount of the same target and mode takes that entry back (mount_impl)
+static Result mount_releasable(const char *name, const char *dir, int ro) { return mount_impl(name, dir, ro, 0, 1); }
+// Unmount of a host mount: releases the name of a releasable one (the entry and any open image stay, so handles left open still read); other host mounts are permanent
+static void host_unmount(const char *name) {
+    char released_dir[1024]; released_dir[0] = 0;
+    {
+        PATH_LOCK(); pthread_mutex_lock(&g_lock);
+        for (int i = 0; i < g_nmnt; i++)
+            if (mnt_named(&g_mnt[i], name)) {
+                if (g_mnt[i].releasable) { g_mnt[i].released = 1; strlcpy(released_dir, g_mnt[i].dir, sizeof released_dir); }
+                break;
+            }
+        pthread_mutex_unlock(&g_lock);
+    }
+    if (released_dir[0]) LOG("fs unmount %s: released (%s)", name, released_dir);
+}
 
 // APFS is case-insensitive by default, Horizon paths are case-sensitive: every component is looked up exactly by guest name.
 // Ordinary host names are unchanged; only when a name collides on the host is a separate physical name chosen, with the guest name stored in an xattr.
@@ -394,7 +466,7 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
     if (!c) { errno = ENOENT; return 0; }
     size_t ln = c - p;
     for (int i = 0; i < g_nmnt; i++) {
-        if (strlen(g_mnt[i].name) != ln || strncmp(g_mnt[i].name, p, ln)) continue;
+        if (!mnt_is(&g_mnt[i], p, ln)) continue;
         if (ro) *ro = g_mnt[i].ro;
         char normed[1024]; const char *rest = c + 1;
         if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) return 0; rest = normed; }   // only paths with "." components are normalized; the rest walk component by component as before
@@ -449,7 +521,7 @@ HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", 
     const char *overlay = getenv("DM_ROMFS_OVERLAY");   // (read once, as mount_ex does)
     if (r == RES_OK && overlay) {
         PATH_LOCK();
-        for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) {
+        for (int i = 0; i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) {
             strlcpy(g_mnt[i].overlay, overlay, sizeof g_mnt[i].overlay); break;
         }
     }
@@ -514,7 +586,7 @@ HLE_FORCE("_ZN2nn2fs17MountAddOnContentEPKciPvm", "fsp-srv; add-on content → D
         LOG("fs mount add-on content %s: index %d does not exist (DM_AOC_DIR=%s)", name, index, getenv("DM_AOC_DIR") ? getenv("DM_AOC_DIR") : "unset");
         return RES_TARGET_NOT_FOUND;
     }
-    return mount(name, dir, 1);   // mount_ex logs it
+    return mount_releasable(name, dir, 1);   // mount_impl logs it
 }
 // System data archives are firmware content, which the host does not have. The one a game has needed so far is 0100000000000802, MiiModel (Mario Kart 8 Deluxe mounts it as MiiResource: and
 // builds Mii heads from it at boot, for the title screen's demo race): the host writes a stand-in with every part empty (hle_mii.c dm_mii_standin) into <DM_TEMP>_sysdata/<id> and mounts it
@@ -539,7 +611,7 @@ HLE_FORCE("_ZN2nn2fs15MountSystemDataEPKcNS_3ncm12SystemDataIdEPvm", "fsp-srv; s
 // IsMounted: the original SDK checks its own mount table, which stays empty because the host takes over mounting. Engage (IL2CPP) uses it to check whether "rom:" is mounted before opening a file; a "no" fails with an invalid-parameter error (0x57) and global-metadata.dat cannot be opened
 HLE_FORCE("_ZN2nn2fs9IsMountedEPKc", "fsp-srv; looks up the host mount table", int, h_fs_IsMounted, const char *name) {   // bool in w0: 1 / 0
     PATH_LOCK();
-    for (int i = 0; name && i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) return 1;
+    for (int i = 0; name && i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) return 1;
     return 0;
 }
 // IsPathMounted / GetPathLengthMax: the SDK's C library (nnmusl) checks every path with them before it calls nn::fs (sdk+0x8ef50, under open / stat / opendir), and the original SDK answers from
@@ -548,7 +620,7 @@ HLE_FORCE("_ZN2nn2fs9IsMountedEPKc", "fsp-srv; looks up the host mount table", i
 HLE_FORCE("_ZN2nn2fs13IsPathMountedEPKc", "fsp-srv; looks up the host mount table", int, h_fs_IsPathMounted, const char *path) {   // bool in w0: 1 / 0
     const char *c = path ? strchr(path, ':') : NULL;
     PATH_LOCK();
-    for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == (size_t)(c - path) && !strncmp(g_mnt[i].name, path, c - path)) return 1;
+    for (int i = 0; c && i < g_nmnt; i++) if (mnt_is(&g_mnt[i], path, (size_t)(c - path))) return 1;
     if (g_flag.fs) LOG("fs path not mounted: %s", path ? path : "(null)");
     return 0;
 }
@@ -579,7 +651,7 @@ HLE_FORCE("_ZN2nn2fs18CreateCacheStorageEill", "fsp-srv; cache storage → host 
     char b[1100]; LOG("fs create cache storage %d (%lld bytes, journal %lld) → %s", index, (long long)size, (long long)journal, cache_dir(index, b, sizeof b)); mkdir(b, 0755); return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs17MountCacheStorageEPKci", "fsp-srv; cache storage → host directory", Result, h_fs_MountCache, const char *name, int index) {
-    char b[1100]; cache_dir(index, b, sizeof b); mkdir(b, 0755); return mount(name, b, 0);
+    char b[1100]; cache_dir(index, b, sizeof b); mkdir(b, 0755); return mount_releasable(name, b, 0);
 }
 HLE_FORCE("_ZN2nn2fs18DeleteCacheStorageEi", "fsp-srv; cache storage → deletes the host directory", Result, h_fs_DeleteCache, int index) {
     char b[1100]; rm_tree(cache_dir(index, b, sizeof b)); return RES_OK;
@@ -647,6 +719,50 @@ int dm_fs_clone_committed(const char *dir, const char *to) {
     pthread_mutex_unlock(&g_lock);
     errno = e; return r;
 }
+// Deduplicate repeated commit failures on the same .new path (e.g. a leftover directory the app lacks permission to remove) so a retry loop does not flood the log. Caller holds g_lock.
+enum { COMMIT_ERR_NONE = 0, COMMIT_ERR_CLEAR, COMMIT_ERR_CLONE, COMMIT_ERR_SWAP };
+#define COMMIT_ERR_MAX 32
+typedef struct {
+    char path[1100];
+    int kind, err;
+    uint64_t count, next_log;
+} commit_err_t;
+static commit_err_t g_commit_err[COMMIT_ERR_MAX];
+static int g_ncommit_err;
+static commit_err_t *commit_err_find(const char *path, int create) {
+    for (int i = 0; i < g_ncommit_err; i++)
+        if (!strcmp(g_commit_err[i].path, path)) return &g_commit_err[i];
+    if (!create || g_ncommit_err >= COMMIT_ERR_MAX) return NULL;
+    commit_err_t *e = &g_commit_err[g_ncommit_err++];
+    memset(e, 0, sizeof *e);
+    strlcpy(e->path, path, sizeof e->path);
+    return e;
+}
+static void commit_err_emit(const char *path, int kind, int err) {
+    if (kind == COMMIT_ERR_CLEAR) LOG("[RED] save commit: cannot clear the %s left over errno=%d (committed version unchanged)", path, err);
+    else if (kind == COMMIT_ERR_CLONE) LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)%s", path, err, err == ENOSPC ? "; the storage is full: the game's saves are not kept until space is freed" : "");
+    else LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", err);
+}
+static void commit_err_log(const char *path, int kind, int err) {
+    commit_err_t *e = commit_err_find(path, 1);
+    if (!e) { commit_err_emit(path, kind, err); return; }
+    if (e->count && e->kind == kind && e->err == err) {
+        if (++e->count == e->next_log) {
+            LOG("[RED] save commit: %s still failing (errno=%d, %llu times so far)", path, err, (unsigned long long)e->count);
+            e->next_log = e->next_log <= UINT64_MAX / 10 ? e->next_log * 10 : UINT64_MAX;
+        }
+        return;
+    }
+    if (e->count > 1) LOG("save commit: %s previous error (errno=%d) occurred %llu times", path, e->err, (unsigned long long)e->count);
+    e->kind = kind; e->err = err; e->count = 1; e->next_log = 10;
+    commit_err_emit(path, kind, err);
+}
+static void commit_err_clear(const char *path) {
+    commit_err_t *e = commit_err_find(path, 0);
+    if (!e || !e->count) return;
+    if (e->count > 1) LOG("save commit: %s cleared after %llu failed attempts (last errno=%d)", path, (unsigned long long)e->count, e->err);
+    e->kind = COMMIT_ERR_NONE; e->err = 0; e->count = 0; e->next_log = 0;
+}
 // Both Commit overloads share this transaction engine. Caller holds the path
 // and mount locks; front-end failure notification is delivered after unlocking.
 static Result commit_mount_locked(int i, int *notify_error) {
@@ -684,16 +800,23 @@ static Result commit_mount_locked(int i, int *notify_error) {
     }
     char neu[1100]; snprintf(neu, sizeof neu, "%s.new", g_mnt[i].commit);
     Result r = RES_OK;
-    if (!access(neu, F_OK) && rm_tree(neu)) { LOG("[RED] save commit: cannot clear the %s left over errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
+    if (swap_journal_left(g_mnt[i].commit)) plat_swap_recover(g_mnt[i].commit);   // a swap an earlier commit of this run left part way: finished first, never its .new cleared
+    if (swap_journal_left(g_mnt[i].commit)) { LOG("[RED] save commit: an unfinished save swap journal is left beside %s: refused, the save and its .new are kept for the next start's recovery", g_mnt[i].commit); r = RES_FAIL; }
+    else if (!access(neu, F_OK) && rm_tree(neu)) { commit_err_log(neu, COMMIT_ERR_CLEAR, errno); r = RES_FAIL; }
     else if (plat_clone_tree(g_mnt[i].dir, neu)) {   // the half-made copy goes at once: on Android the clone is a full copy, and one left by ENOSPC held the space every later commit needed
         int e = errno; rm_tree(neu);
-        LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)%s", neu, e, e == ENOSPC ? "; the storage is full: the game's saves are not kept until space is freed" : "");
+        commit_err_log(neu, COMMIT_ERR_CLONE, e);
         r = RES_FAIL;
     }
-    else if (plat_rename_swap(neu, g_mnt[i].commit)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(neu); r = RES_FAIL; }
-    else rm_tree(neu);                                                  // the old version that was swapped out
+    else if (dm_fs_test_fail("commitsync") || sync_tree(neu)) { LOG("[RED] save commit: the new version %s could not be written to the storage (fsync errno=%d; committed version unchanged)", neu, errno); rm_tree(neu); r = RES_FAIL; }
+    else if (plat_rename_swap(neu, g_mnt[i].commit)) {
+        int e = errno;
+        if (swap_journal_left(g_mnt[i].commit)) LOG("[RED] save commit: the file-level swap stopped part way errno=%d: %s and its journal are kept, the next start (or commit) finishes it", e, neu);
+        else { commit_err_log(neu, COMMIT_ERR_SWAP, e); rm_tree(neu); }
+        r = RES_FAIL;
+    } else { sync_dir_of(g_mnt[i].commit); sync_one(g_mnt[i].commit); rm_tree(neu); }   // the swap on the storage before the old version (swapped out into .new) goes
     // Timing readouts (integer microseconds, no floating point): how long the clone + atomic swap took; how long in total from this transaction's first save write to the end of the commit (the game writing files + the commit; 0 = no save write in this transaction)
-    static int n; if (r == RES_OK) { uint64_t tc2 = plat_clock_ns(CLOCK_MONOTONIC);
+    static int n; if (r == RES_OK) { commit_err_clear(neu); uint64_t tc2 = plat_clock_ns(CLOCK_MONOTONIC);
         LOG("save commit #%d: %s swapped atomically into %s (%d save writes so far) (clone + swap %llu us, since this transaction's first write %llu us)", ++n, g_mnt[i].dir, g_mnt[i].commit, atomic_load(&g_save_writes),
             (unsigned long long)((tc2 - tc1) / 1000), (unsigned long long)(tw0 ? (tc2 - tw0) / 1000 : 0)); atomic_fetch_add(&g_save_commits, 1);
         save_sync_committed();   // wakes the cloud sender, which clones the committed save through dm_fs_clone_committed above (save_sync.h)
@@ -702,7 +825,7 @@ static Result commit_mount_locked(int i, int *notify_error) {
 }
 HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv; transactional save: the whole work directory tree is cloned, then swapped atomically with the committed directory (renamex_np RENAME_SWAP)", Result, h_fs_Commit, const char *name) {
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
-    int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, name)) i++;
+    int i = 0; while (i < g_nmnt && !mnt_named(&g_mnt[i], name)) i++;
     if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_OK; }   // non-transactional mount: nothing to commit
     int notify_error = 0; Result r = commit_mount_locked(i, &notify_error);
     pthread_mutex_unlock(&g_lock);
@@ -721,7 +844,7 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKPKci", "fsp-srv; commit a validated mount list sha
     int target = -1, notify_error = 0; Result r = RES_FAIL;
     for (int k = 0; k < count; k++) {
         if (!names[k] || strnlen(names[k], sizeof g_mnt[0].name) == sizeof g_mnt[0].name) goto out;
-        int i = 0; while (i < g_nmnt && strcmp(g_mnt[i].name, names[k])) i++;
+        int i = 0; while (i < g_nmnt && !mnt_named(&g_mnt[i], names[k])) i++;
         if (i == g_nmnt || g_mnt[i].ro) goto out;
         if (!g_mnt[i].commit[0]) continue;
         if (target >= 0 && (strcmp(g_mnt[target].commit, g_mnt[i].commit) || strcmp(g_mnt[target].dir, g_mnt[i].dir))) {
@@ -740,7 +863,11 @@ out:
 HLE_FORCE("_ZN2nn2fs6CommitEPKcRKNS0_12CommitOptionE", "fsp-srv; same as Commit (the option only clears the restore flag)", Result, h_fs_CommitOpt, const char *name, const void *opt) { (void)opt; return h_fs_Commit(name); }
 // SDK 11's old name: CommitSaveData(mount name) is the later Commit (Metroid Dread)
 HLE_FORCE("_ZN2nn2fs14CommitSaveDataEPKc", "fsp-srv; same as Commit (SDK 11's old name)", Result, h_fs_CommitSaveData, const char *name) { return h_fs_Commit(name); }
-HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; the mount table is permanent, unmounting is a no-op", void, h_fs_Unmount, const char *name) { (void)name; }
+// The host's mount table is permanent, so unmounting one of its names changes nothing, except an add-on content or cache storage mount's, whose name is released
+// (host_unmount, mount_releasable: a game may mount the next add-on or cache storage index under it)
+HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; host mounts are permanent, a no-op, but an add-on content or cache storage mount releases its name", void, h_fs_Unmount, const char *name) {
+    if (name) host_unmount(name);
+}
 
 // ---------- Files ----------
 // With DM_FS: the host's time in open(2) and pread(2) for the game, one line every 2 s while it reads (how much of a load the files take; on Android's shared storage each
@@ -817,7 +944,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     if (fd >= (int)sizeof g_fmode) die("fd beyond the table");
     g_fmode[fd] = (uint8_t)mode; *out = FH_OUT(fd);
     { const char *c = strchr(path, ':'); size_t ln = c ? (size_t)(c - path) : 0; uint16_t token = 0;
-      for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == ln && !strncmp(g_mnt[i].name, path, ln) && g_mnt[i].txn_root >= 0) { token = (uint16_t)(g_mnt[i].txn_root + 1); break; }
+      for (int i = 0; c && i < g_nmnt; i++) if (mnt_is(&g_mnt[i], path, ln) && g_mnt[i].txn_root >= 0) { token = (uint16_t)(g_mnt[i].txn_root + 1); break; }
       atomic_store(&g_ftxn[fd], token); }
     fslog_init();
     if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }
@@ -1086,7 +1213,7 @@ HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → o
     if (!h) { int e = errno; closedir(d); errno = e; return err_res("directory allocation", hp); }
     h->d = d; strlcpy(h->path, hp, sizeof h->path); h->mode = mode;
     const char *c = strchr(path, ':');
-    if (c) for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].overlay[0] && strlen(g_mnt[i].name) == (size_t)(c - path) && !strncmp(g_mnt[i].name, path, (size_t)(c - path))) {
+    if (c) for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].overlay[0] && mnt_is(&g_mnt[i], path, (size_t)(c - path))) {
         dir_snapshot(h, &g_mnt[i], c + 1); break;
     }
     *out = (uint64_t)h; return RES_OK;

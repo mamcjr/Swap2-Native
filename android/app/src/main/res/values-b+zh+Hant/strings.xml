@@ -54,6 +54,8 @@
     <string name="s2_play_prewarm_n">正在預熱 %1$d 條管線…</string>
     <string name="s2_play_scene">正在載入材質與第一個場景…</string>
     <string name="s2_play_ready">已就緒</string>
+    <string name="s2_play_compiling">正在編譯著色器：%1$d / %2$d，約剩 %3$d 秒 · 輕觸略過</string>
+    <string name="s2_play_compiling_n">正在編譯著色器：%1$d / %2$d · 輕觸略過</string>
     <string name="s2_game_settings">遊戲設定</string>
     <string name="s2_this_game">僅限此遊戲</string>
     <string name="s2_game_settings_intro">變更會在下次啟動時套用。「預設」會遵循一般設定。</string>
@@ -303,7 +305,7 @@
     <string name="s2_resolution_note">遊戲繪製的尺寸。</string>
     <string name="s2_frame_cap_note">此遊戲每秒最多繪製的影格數。</string>
     <string name="s2_frame_cap_own">此遊戲會自行決定影格率</string>
-    <string name="s2_game_graphics_hint">FSR 放大與影格生成屬於一般設定（設定 › 效能），也可在遊戲內面板中調整。</string>
+    <string name="s2_game_graphics_hint">影格生成屬於一般設定(設定 › 效能),也可在遊戲內面板中調整。</string>
     <string name="s2_upscaler">放大方式</string>
     <string name="s2_upscaler_net">遊戲的神經網路（NDSR）</string>
     <string name="s2_upscaler_fsr">FSR 1（較快）</string>
@@ -721,8 +723,8 @@
     <string name="s2_gfx_on">開啟</string>
     <string name="s2_gfx_inherit">跟隨全域設定 / 遊戲設定檔</string>
     <string name="s2_gfx_scaling_note">將畫面縮放至螢幕尺寸，並取代支援的神經網路放大器。「原生」會保留遊戲的神經網路。</string>
-    <string name="s2_gfx_sharp">FSR 輸出銳利度</string>
-    <string name="s2_gfx_sharp_note">最終畫面放大至螢幕時的銳化程度。</string>
+    <string name="s2_gfx_sharp">銳利度</string>
+    <string name="s2_gfx_sharp_note">放大後畫面的銳化程度。</string>
     <string name="s2_gfx_async">背景管線</string>
     <string name="s2_gfx_async_note">下次啟動時套用。在背景編譯，必要時會等待以保留效果。</string>
     <string name="s2_gfx_timing">GPU 計時</string>
@@ -800,4 +802,22 @@
     <string name="s2_warm_play_now">立即開始遊戲</string>
     <string name="s2_warm_stop">停止</string>
     <string name="s2_warm_close">關閉</string>
+    <string name="s2_sec_image">畫面</string>
+    <string name="s2_sec_frames">影格</string>
+    <string name="s2_sec_scene">場景</string>
+    <string name="s2_up_original">原始(遊戲本身)</string>
+    <string name="s2_up_note">FSR 1 最省資源。SGSR 2 與 FSR 3.1 在使用 DLSS 的遊戲中依先前的影格重建細節(SGSR 2 也適用於 Ocarina of Time);在其他遊戲中以 FSR 1 方式運作。立即生效。</string>
+    <string name="s2_up_level">放大等級</string>
+    <string name="s2_up_quality">畫質(1080p)</string>
+    <string name="s2_up_balanced">平衡(720p)</string>
+    <string name="s2_up_performance">效能(540p)</string>
+    <string name="s2_up_level_note">遊戲在放大之前的算繪解析度:越低越快。下次啟動時生效。</string>
+    <string name="s2_gfx_foliage">草與植物</string>
+    <string name="s2_gfx_foliage_high">高(依遊戲原樣繪製)</string>
+    <string name="s2_gfx_foliage_medium">中(一半的草)</string>
+    <string name="s2_gfx_foliage_low">低(無草,一半的植物)</string>
+    <string name="s2_gfx_foliage_none">無</string>
+    <string name="s2_gfx_foliage_note">減少草與植被,提高原野與森林中的影格率。立即生效。</string>
+    <string name="s2_gfx_effect_volume_fog">霧</string>
+    <string name="s2_gfx_effect_note">關閉:不繪製此效果,以提高影格率。立即生效。</string>
 </resources>

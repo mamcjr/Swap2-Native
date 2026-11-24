@@ -51,7 +51,7 @@ module_t *module_of(const void *p) {
     for (int i = 0; i < g_nmod; ++i) {
         uintptr_t b = (uintptr_t)g_mod[i].base;
         if (a >= b && a - b < g_mod[i].size) return &g_mod[i];
-        if (g_mod[i].patch_off < 0 && a >= b + g_mod[i].patch_off && a < b) return &g_mod[i];
+        if (g_mod[i].patch_off < 0 && a >= b + g_mod[i].patch_off && a < b + g_mod[i].patch_off + g_mod[i].patch_len) return &g_mod[i];
     }
     return NULL;
 }
@@ -185,6 +185,31 @@ static void alias_lifecycle(void) {
     assert(pages(1, alias + g_alias_cap - P, 2 * P) == BAD);
 }
 
+// UnmapMemory gives back the host pages a stack held wholly and keeps the edge pages its 4 KiB neighbours still use (upstream nxnative 6c50d74e)
+static void stack_pages_released(void) {
+    size_t pg = memory_getpagesize(), last = 3 * pg - P, size = last - P;
+    uintptr_t dst = stack + P, src = alias + P;
+    assert(!pages(1, alias, 3 * pg));
+    memset((void *)src, 0x5a, size);
+    *(uint8_t *)alias = 0x18;
+    *(uint8_t *)(alias + last) = 0x29;
+    assert(!map(stack, alias, P) && !map(stack + last, alias + last, P));
+    assert(!map(dst, src, size));
+    memset((void *)dst, 0x6b, size);
+    assert(!unmap(dst, src, size));
+    assert(*(uint8_t *)src == 0x6b && *(uint8_t *)(src + size - 1) == 0x6b);
+    assert(*(uint8_t *)stack == 0x18 && *(uint8_t *)(stack + last) == 0x29);
+    for (uintptr_t p = stack + pg; p < stack + 2 * pg; p += pg) {   // the middle host page: given back
+        unsigned char resident;
+        assert(!mincore((void *)p, pg, (void *)&resident) && !(resident & 1));
+    }
+    memset((void *)src, 0x7c, size);
+    assert(!map(dst, src, size) && *(uint8_t *)dst == 0x7c && *(uint8_t *)(dst + size - 1) == 0x7c);
+    assert(!unmap(dst, src, size));
+    assert(!unmap(stack, alias, P) && !unmap(stack + last, alias + last, P));
+    assert(!pages(0, alias, 3 * pg));
+}
+
 static void ownership(void) {
     assert(!pages(1, alias, 16 * P));
     memset((void *)alias, 0x34, 16 * P);
@@ -204,7 +229,6 @@ static void ownership(void) {
     assert(!pages(1, alias + 15 * P, 2 * P));
     expect(alias + P, alias + P, 2 * P, 5, 1, 0);
     assert(*(uint8_t *)(alias + P) == 0x34);
-    expect(UINTPTR_MAX, UINTPTR_MAX - P + 1, P, 0, 0, 0);
     assert(call(2, alias + P, P, 3) == BAD && call(3, alias + P, P, 0) == BAD);
     assert(unmap(stack + P, alias + P, P) == BAD);
     assert(unmap(stack + P, alias + 4 * P, 2 * P) == BAD);
@@ -268,6 +292,7 @@ static void module_back_patch(void) {
     assert(!mprotect(b + 0x10000, 0x4000, PROT_READ));
     assert(!mprotect(b + 0x20000, 0x8000, PROT_READ));
     expect((uintptr_t)b - 0x8000, (uintptr_t)b - 0x8000, 0x4000, 4, 0, 5);
+    expect((uintptr_t)b - 0x4000, (uintptr_t)b - 0x4000, 0x4000, 0, 0, 0);
     expect((uintptr_t)b + 0x4000, (uintptr_t)b + 0x4000, 0xc000, 4, 0, 3);
     expect((uintptr_t)b + 0x14000, (uintptr_t)b + 0x14000, 0xc000, 4, 0, 3);
     expect((uintptr_t)b + 0x20000, (uintptr_t)b + 0x20000, 0x8000, 4, 0, 5);
@@ -277,6 +302,38 @@ static void module_back_patch(void) {
     assert(!map(stack, (uintptr_t)b + 0x14000, P));
     assert(!unmap(stack, (uintptr_t)b + 0x14000, P));
     g_nmod = 0; memset(g_mod, 0, sizeof test_modules); assert(!munmap(a, 0x30000));
+}
+
+// The SDK's module parser starts at zero and advances to each returned block's end.
+static void process_memory_walk(void) {
+    const uintptr_t nso = 0x10000, nro = 0x30000;
+    g_mod[0] = (module_t){.base = (uint8_t *)nro, .size = 3 * P, .ro_off = P, .data_off = 2 * P, .nro = 1};
+    g_mod[1] = (module_t){.base = (uint8_t *)nso, .size = 3 * P, .ro_off = P, .data_off = 2 * P, .loaded = 1};
+    g_nmod = 2;
+    expect(0, 0, nso, 0, 0, 0);
+    expect(nso, nso, P, 3, 0, 5);
+    expect(nso + P, nso + P, P, 3, 0, 1);
+    assert(query(nro).state == 0);
+    g_mod[0].loaded = 1;
+    expect(nro - 1, nso + 3 * P, nro - (nso + 3 * P), 0, 0, 0);
+    expect(nro, nro, P, 3, 0, 5);
+
+    uintptr_t cursor = 0;
+    unsigned code_blocks = 0;
+    for (unsigned i = 0; i < 20; ++i) {
+        memory_info m = query(cursor);
+        code_blocks += m.state == 3;
+        uintptr_t next = m.base + m.size;
+        if (!next) {
+            assert(m.state == 0x10 && m.perm == 0 && code_blocks == 4);
+            expect(UINTPTR_MAX, m.base, m.size, 0x10, 0, 0);
+            g_nmod = 0; memset(g_mod, 0, sizeof test_modules);
+            return;
+        }
+        assert(next > cursor);
+        cursor = next;
+    }
+    assert(!"whole-process QueryMemory walk did not terminate");
 }
 
 // Apple has no pthread_barrier. The gate makes races deterministic at entry,
@@ -554,7 +611,7 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) assert(!pthread_create(&threads[i], NULL, init_worker, &addresses[i]));
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
-    lazy_commit(); alias_lifecycle(); ownership(); module_sources(); module_back_patch(); failures(); release_fallback(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); ownership(); stack_pages_released(); module_sources(); module_back_patch(); process_memory_walk(); failures(); release_fallback(); concurrency(); fragmented_queries();
     guest_helper(); read_mapped_race();
     if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
 #ifdef TEST_REAL_DIRTY

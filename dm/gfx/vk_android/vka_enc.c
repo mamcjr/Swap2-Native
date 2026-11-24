@@ -19,6 +19,7 @@
 #include <string.h>
 #include <time.h>
 #include <errno.h>
+#include <stdio.h>
 
 #define ENC_FNS(X) \
     X(vkCmdPipelineBarrier) X(vkCmdCopyBuffer) X(vkCmdUpdateBuffer) X(vkCmdFillBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
@@ -27,10 +28,11 @@
     X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers2) X(vkCmdBindIndexBuffer) \
     X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDispatchBase) \
     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetPrimitiveTopology) \
-    X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) \
+    X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetDepthBounds) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) \
     X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetDepthBiasEnable) \
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetBlendConstants) X(vkCmdSetLineWidth) \
-    X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) X(vkCmdDrawMeshTasksIndirectEXT)
+    X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) X(vkCmdDrawMeshTasksIndirectEXT) \
+    X(vkCmdBeginQuery) X(vkCmdEndQuery)
 #define ENC_ID(f) E_##f,
 enum { E_WRAP = 0, E_CALL, ENC_FNS(ENC_ID) E_N };
 #define ENC_REAL(f) PFN_##f f;
@@ -139,6 +141,7 @@ typedef struct { CB_FIELD uint32_t v[5]; float f[4]; } r_val;               // t
 typedef struct { CB_FIELD VkPipelineBindPoint bp; VkPipelineLayout l; uint32_t set, n; const VkWriteDescriptorSet *w; } r_push;
 typedef struct { CB_FIELD uint32_t nb, na; const VkVertexInputBindingDescription2EXT *b; const VkVertexInputAttributeDescription2EXT *a; } r_vin;
 typedef struct { CB_FIELD VkPipelineLayout l; VkShaderStageFlags st; uint32_t o, n; const void *p; } r_pc;
+typedef struct { CB_FIELD VkQueryPool pool; uint32_t q; VkQueryControlFlags flags; } r_qry;
 typedef struct { CB_FIELD void (*fn)(const void *); } r_call;   // a function of the replay's own, made in order with the calls (its argument bytes follow)
 
 static inline int mine(VkCommandBuffer cb) { return cb && cb == atomic_load_explicit(&g_ecb, memory_order_relaxed); }
@@ -288,6 +291,9 @@ TWO(vkCmdSetStencilCompareMask) TWO(vkCmdSetStencilWriteMask) TWO(vkCmdSetStenci
 static void VKAPI_CALL e_vkCmdSetDepthBias(VkCommandBuffer cb, float a, float b, float c) {
     DIRECT(vkCmdSetDepthBias, cb, a, b, c); BEGIN(r_val, E_vkCmdSetDepthBias, 0); r->f[0] = a; r->f[1] = b; r->f[2] = c; END();
 }
+static void VKAPI_CALL e_vkCmdSetDepthBounds(VkCommandBuffer cb, float lo, float hi) {
+    DIRECT(vkCmdSetDepthBounds, cb, lo, hi); BEGIN(r_val, E_vkCmdSetDepthBounds, 0); r->f[0] = lo; r->f[1] = hi; END();
+}
 static void VKAPI_CALL e_vkCmdSetBlendConstants(VkCommandBuffer cb, const float c[4]) {
     DIRECT(vkCmdSetBlendConstants, cb, c); BEGIN(r_val, E_vkCmdSetBlendConstants, 0); memcpy(r->f, c, 16); END();
 }
@@ -329,6 +335,14 @@ static void VKAPI_CALL e_vkCmdSetVertexInputEXT(VkCommandBuffer cb, uint32_t nb,
 static void VKAPI_CALL e_vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayout l, VkShaderStageFlags st, uint32_t o, uint32_t n, const void *p) {
     DIRECT(vkCmdPushConstants, cb, l, st, o, n, p);
     BEGIN(r_pc, E_vkCmdPushConstants, A8(n)); r->l = l; r->st = st; r->o = o; r->n = n; r->p = cpy(&at, p, n); END();
+}
+static void VKAPI_CALL e_vkCmdBeginQuery(VkCommandBuffer cb, VkQueryPool pool, uint32_t q, VkQueryControlFlags flags) {
+    DIRECT(vkCmdBeginQuery, cb, pool, q, flags);
+    BEGIN(r_qry, E_vkCmdBeginQuery, 0); r->pool = pool; r->q = q; r->flags = flags; END();
+}
+static void VKAPI_CALL e_vkCmdEndQuery(VkCommandBuffer cb, VkQueryPool pool, uint32_t q) {
+    DIRECT(vkCmdEndQuery, cb, pool, q);
+    BEGIN(r_qry, E_vkCmdEndQuery, 0); r->pool = pool; r->q = q; END();
 }
 
 // ---------- The encoder thread ----------
@@ -383,11 +397,14 @@ static void run(const hdr *h) {
     case E_vkCmdSetDepthBiasEnable: { C(r_val); R.vkCmdSetDepthBiasEnable(r->cb, r->v[0]); break; }
     case E_vkCmdSetRasterizerDiscardEnable: { C(r_val); R.vkCmdSetRasterizerDiscardEnable(r->cb, r->v[0]); break; }
     case E_vkCmdSetPrimitiveRestartEnable: { C(r_val); R.vkCmdSetPrimitiveRestartEnable(r->cb, r->v[0]); break; }
+    case E_vkCmdSetDepthBounds: { C(r_val); R.vkCmdSetDepthBounds(r->cb, r->f[0], r->f[1]); break; }
     case E_vkCmdSetBlendConstants: { C(r_val); R.vkCmdSetBlendConstants(r->cb, r->f); break; }
     case E_vkCmdSetLineWidth: { C(r_val); R.vkCmdSetLineWidth(r->cb, r->f[0]); break; }
     case E_vkCmdPushDescriptorSetKHR: { C(r_push); R.vkCmdPushDescriptorSetKHR(r->cb, r->bp, r->l, r->set, r->n, r->w); break; }
     case E_vkCmdSetVertexInputEXT: { C(r_vin); R.vkCmdSetVertexInputEXT(r->cb, r->nb, r->b, r->na, r->a); break; }
     case E_vkCmdPushConstants: { C(r_pc); R.vkCmdPushConstants(r->cb, r->l, r->st, r->o, r->n, r->p); break; }
+    case E_vkCmdBeginQuery: { C(r_qry); R.vkCmdBeginQuery(r->cb, r->pool, r->q, r->flags); break; }
+    case E_vkCmdEndQuery: { C(r_qry); R.vkCmdEndQuery(r->cb, r->pool, r->q); break; }
     case E_CALL: { C(r_call); r->fn((const uint8_t *)r + A8(sizeof *r)); break; }
     default: break;
     }

@@ -12,6 +12,9 @@
 #include <sys/uio.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <mach/vm_param.h>   // MACH_VM_MAX_ADDRESS (user_va_end)
+#else
+#include <sys/auxv.h>        // getauxval(AT_EXECFN) (user_va_end)
 #endif
 
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
@@ -119,6 +122,29 @@ static uint8_t g_seen[256];
 static struct { uint64_t base, size, src; uint32_t state; } g_map[MAX_MAP];
 static int g_nmap;
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
+// In-flight stack placements handed out by dm_stack_alloc before the caller's svcMapMemory adds them to g_map (upstream nxnative 8e0a772b):
+// prevents concurrent CreateThread / fiber setup from picking the same slot and hitting [RED] MapMemory refused.
+// Cleared on svcMapMemory (success or refusal) and used only as a pass-1 avoidance hint so a stale entry never causes OOM. Under g_map_lock
+#define STACK_PENDING_MAX 64
+static struct { pthread_t tid; uint64_t base, size; int used; } g_stack_pending[STACK_PENDING_MAX];
+static unsigned g_stack_pending_rr;
+static void stack_pending_clear(pthread_t tid, uint64_t dst, uint64_t size) {
+    for (int i = 0; i < STACK_PENDING_MAX; i++) {
+        if (!g_stack_pending[i].used) continue;
+        int same_tid = pthread_equal(g_stack_pending[i].tid, tid);
+        int overlap = size && dst < g_stack_pending[i].base + g_stack_pending[i].size && g_stack_pending[i].base < dst + size;
+        if (same_tid || overlap) g_stack_pending[i].used = 0;
+    }
+}
+static void stack_pending_set(pthread_t tid, uint64_t base, uint64_t size) {
+    int slot = -1;
+    for (int i = 0; i < STACK_PENDING_MAX; i++) {
+        if (g_stack_pending[i].used && pthread_equal(g_stack_pending[i].tid, tid)) { slot = i; break; }
+        if (!g_stack_pending[i].used && slot < 0) slot = i;
+    }
+    if (slot < 0) slot = (int)(g_stack_pending_rr++ % STACK_PENDING_MAX);
+    g_stack_pending[slot].tid = tid; g_stack_pending[slot].base = base; g_stack_pending[slot].size = size; g_stack_pending[slot].used = 1;
+}
 // A hole-free read / write of guest heap bytes for the cheat VM (hle_cheats.c): under g_map_lock no concurrent SetHeapSize
 // can mprotect the span away between the bounds check and the copy (both hold this same lock), so a live heap address cannot
 // turn into a fault while the cheat VM touches it. Both return 0 when every byte was inside the currently opened (readable
@@ -146,6 +172,142 @@ static void map_add(uint64_t b, uint64_t n, uint64_t src, uint32_t st) {   // ca
     g_map[g_nmap++] = (typeof(g_map[0])){b, n, src, st};
 }
 static void map_del(int i) { g_map[i] = g_map[--g_nmap]; }   // caller holds g_map_lock
+
+// ---- Deterministic stack-region placement (hle_stack_alloc.c; upstream nxnative 8e0a772b) ----
+// Horizon gives a 39-bit process a 2 GB stack region, where the SDK's AddressSpaceAllocator probes up to 512 random addresses via QueryMemory with no fallback.
+// In the host's compact guest block (256 MB default mem_stack), a few 8 MB Unity worker stacks plus dozens of 1 MB stacks fragment random placement until no 8 MB gap
+// remains (upstream issues #1809, #2012; Super Monkey Ball Banana Rumble). Placing stacks deterministically against g_map eliminates random fragmentation without shrinking
+// mem_alias: large stacks (>= 2 MB) pack top-down and smaller stacks pack bottom-up so short-lived thread churn does not fragment large-stack room.
+typedef struct { uint64_t lo, hi; } stack_span_t;
+static int stack_span_cmp(const void *a, const void *b) {
+    const stack_span_t *x = a, *y = b;
+    if (x->lo != y->lo) return x->lo < y->lo ? -1 : 1;
+    return x->hi < y->hi ? -1 : x->hi > y->hi ? 1 : 0;
+}
+static uint64_t stack_align_up(uint64_t lo, uint64_t align, uint64_t off) {
+    uint64_t rem_off = off % align;
+    if (lo <= off) return off;
+    uint64_t rem = (lo - rem_off) % align;
+    if (!rem) return lo;
+    uint64_t add = align - rem;
+    return lo > UINT64_MAX - add ? 0 : lo + add;
+}
+static uint64_t stack_align_down(uint64_t hi, uint64_t align, uint64_t off) {
+    if (hi < off) return 0;
+    return hi - ((hi - (off % align)) % align);
+}
+// Find a slot [cand, cand + size) in [sb, se) disjoint from sorted, merged occupied spans[0..n-1] with guard bytes free on both sides.
+static uint64_t stack_find_gap(const stack_span_t *spans, int n, uint64_t sb, uint64_t se,
+                               uint64_t size, uint64_t align, uint64_t off, uint64_t guard, int top_down) {
+    if (se <= sb || guard > (se - sb) / 2 || se - sb - 2 * guard < size) return 0;
+    uint64_t lo_lim = sb + guard, hi_lim = se - guard;
+    if (off > lo_lim) lo_lim = off;
+    if (lo_lim > hi_lim || hi_lim - lo_lim < size) return 0;
+    if (!top_down) {
+        uint64_t cur = lo_lim;
+        for (int i = 0; i <= n; i++) {
+            uint64_t gap_hi = hi_lim;
+            if (i < n) {
+                uint64_t edge = spans[i].lo > guard ? spans[i].lo - guard : 0;
+                if (edge < gap_hi) gap_hi = edge;
+            }
+            if (cur <= gap_hi && gap_hi - cur >= size) {
+                uint64_t cand = stack_align_up(cur, align, off);
+                if (cand && cand <= gap_hi && gap_hi - cand >= size) return cand;
+            }
+            if (i < n) {
+                uint64_t next = spans[i].hi > UINT64_MAX - guard ? UINT64_MAX : spans[i].hi + guard;
+                if (next > cur) cur = next;
+            }
+        }
+        return 0;
+    }
+    uint64_t cur = hi_lim;
+    for (int i = n - 1; i >= -1; i--) {
+        uint64_t gap_lo = lo_lim;
+        if (i >= 0) {
+            uint64_t edge = spans[i].hi > UINT64_MAX - guard ? UINT64_MAX : spans[i].hi + guard;
+            if (edge > gap_lo) gap_lo = edge;
+        }
+        if (cur >= size && cur - size >= gap_lo) {
+            uint64_t cand = stack_align_down(cur - size, align, off);
+            if (cand >= gap_lo && cand <= cur - size) return cand;
+        }
+        if (i >= 0) {
+            uint64_t next = spans[i].lo > guard ? spans[i].lo - guard : 0;
+            if (next < cur) cur = next;
+        }
+    }
+    return 0;
+}
+static uint64_t stack_try_place(uint64_t sb, uint64_t se, uint64_t sz, uint64_t align, uint64_t off,
+                                uint64_t guard, int with_pending, int *live_out, uint64_t *bytes_out) {
+    static stack_span_t spans[MAX_MAP + STACK_PENDING_MAX];   // caller holds g_map_lock
+    int n = 0, live = 0; uint64_t live_bytes = 0;
+    for (int i = 0; i < g_nmap; i++) {
+        uint64_t lo = g_map[i].base, hi = lo + g_map[i].size;
+        if (hi <= sb || lo >= se) continue;
+        if (lo < sb) lo = sb;
+        if (hi > se) hi = se;
+        spans[n++] = (stack_span_t){lo, hi};
+        live++; live_bytes += hi - lo;
+    }
+    if (live_out) *live_out = live;
+    if (bytes_out) *bytes_out = live_bytes;
+    if (with_pending) {
+        pthread_t self = pthread_self();
+        for (int i = 0; i < STACK_PENDING_MAX; i++) {
+            if (!g_stack_pending[i].used || pthread_equal(g_stack_pending[i].tid, self)) continue;
+            uint64_t lo = g_stack_pending[i].base, hi = lo + g_stack_pending[i].size;
+            if (hi <= sb || lo >= se) continue;
+            if (lo < sb) lo = sb;
+            if (hi > se) hi = se;
+            spans[n++] = (stack_span_t){lo, hi};
+        }
+    }
+    if (n > 1) {
+        qsort(spans, (size_t)n, sizeof spans[0], stack_span_cmp);
+        int m = 0;
+        for (int i = 1; i < n; i++) {
+            if (spans[i].lo <= spans[m].hi) { if (spans[i].hi > spans[m].hi) spans[m].hi = spans[i].hi; }
+            else spans[++m] = spans[i];
+        }
+        n = m + 1;
+    }
+    int top_down = sz >= (2u << 20);
+    size_t pg = (size_t)getpagesize();
+    // Prefer host-page alignment when compatible so UnmapMemory gives back every host page cleanly without edge-page sharing (16 KB on Apple, 4 or 16 KB on Android)
+    if (!off && align < pg && (pg % align) == 0) {
+        uint64_t dst = stack_find_gap(spans, n, sb, se, sz, pg, 0, guard, top_down);
+        if (dst) return dst;
+    }
+    return stack_find_gap(spans, n, sb, se, sz, align, off, guard, top_down);
+}
+int dm_stack_region_matches(uint64_t start, uint64_t end) {
+    mem_init();
+    uint64_t sb = (uintptr_t)g_stack;
+    return g_stack && start == sb && end == sb + g_stack_cap;
+}
+uint64_t dm_stack_alloc(size_t size, size_t align, size_t align_offset, size_t guard_size) {
+    mem_init();
+    if (!size || size > UINT64_MAX - 0xfff || !align || (align & 0xfff) || (align_offset & 0xfff) || guard_size > UINT64_MAX - 0xfff) return 0;
+    uint64_t sz = (size + 0xfffull) & ~0xfffull;
+    uint64_t guard = (guard_size + 0xfffull) & ~0xfffull;
+    uint64_t sb = (uintptr_t)g_stack, se = sb + g_stack_cap;
+    int live = 0; uint64_t live_bytes = 0;
+    pthread_mutex_lock(&g_map_lock);
+    uint64_t dst = stack_try_place(sb, se, sz, align, align_offset, guard, 1, &live, &live_bytes);
+    if (!dst) dst = stack_try_place(sb, se, sz, align, align_offset, guard, 0, &live, &live_bytes);
+    if (dst) stack_pending_set(pthread_self(), dst, sz);
+    pthread_mutex_unlock(&g_map_lock);
+    if (!dst) {
+        static _Atomic int nred;
+        if (atomic_fetch_add(&nred, 1) < 8)
+            LOG("[RED] [mem] stack region full: request %#llx bytes (align %#zx, guard %#llx) in %.1f MB stack region (%d live stacks, %.1f MB mapped)",
+                (unsigned long long)sz, align, (unsigned long long)guard, g_stack_cap / 1048576.0, live, live_bytes / 1048576.0);
+    }
+    return dst;
+}
 
 // One bit per 4 KB page of the alias region (mapped = 1): Map sets bits, Unmap clears them; returns the number of pages whose state really changed (signed: positive for Map, negative for Unmap)
 static int64_t alias_pages(uint64_t off, uint64_t n, int map) {
@@ -367,6 +529,51 @@ static void map_source_query(uint64_t addr, uint64_t *base, uint64_t *size, uint
     *base = lo; *size = remaining;
 }
 
+// The end of the host's user address space, where svcQueryMemory reports the reserved block Horizon puts past its process limit. Apple: MACH_VM_MAX_ADDRESS.
+// Linux arm64 (Android): TASK_SIZE, 1 << VA_BITS (39 or 48 on Android kernels; 48 for mappings without a hint on a 52-bit kernel), which no interface reports. The process's
+// initial stack ends at it, less at most the stack's random offset (1 GB with 4 KB pages, 16 GB with 64 KB), and the executable's name (AT_EXECFN) is stored at that stack's top,
+// so the end is the first power of two above that address
+static uint64_t user_va_end(void) {
+#if defined(__APPLE__)
+    return MACH_VM_MAX_ADDRESS;
+#else
+    static _Atomic uint64_t end;
+    uint64_t e = atomic_load_explicit(&end, memory_order_relaxed);
+    if (!e) {
+        uint64_t top = (uint64_t)getauxval(AT_EXECFN);
+        e = top ? UINT64_C(1) << (64 - __builtin_clzll(top)) : UINT64_C(1) << 48;
+        atomic_store_explicit(&end, e, memory_order_relaxed);
+    }
+    return e;
+#endif
+}
+
+// Clip an unmapped interval to the regions on either side of the queried address.
+static void query_gap_bound(uint64_t addr, uint64_t start, uint64_t end, uint64_t *lo, uint64_t *hi) {
+    if (end <= addr && end > *lo) *lo = end;
+    if (start > addr && start < *hi) *hi = start;
+}
+
+static void query_external_gap(uint64_t addr, uint64_t stack_lo, uint64_t stack_hi, const module_t *inactive,
+                               uint64_t *base, uint64_t *size) {
+    uint64_t lo = 0, hi = user_va_end();
+    uint64_t guest = (uintptr_t)g_as;
+    query_gap_bound(addr, guest, guest + g_reserve, &lo, &hi);
+    query_gap_bound(addr, stack_lo, stack_hi, &lo, &hi);
+    for (int i = 0; i < g_nmod; ++i) {
+        const module_t *m = &g_mod[i];
+        if (m == inactive || !m->loaded) continue;
+        uint64_t start = (uintptr_t)m->base;
+        query_gap_bound(addr, start, start + m->size, &lo, &hi);
+        if (m->patch_off < 0 && m->patch_len) {
+            uint64_t patch = start + m->patch_off;
+            query_gap_bound(addr, patch, patch + m->patch_len, &lo, &hi);
+        }
+    }
+    *base = lo;
+    *size = hi - lo;
+}
+
 // Diagnostic DM_ALIAS_WINDOWS=<window MB>: every 30 s, the mapped memory of each window of that size in the alias region (windows aligned to the size in absolute addresses, counted from the page
 // bitmap; windows with nothing mapped are left out). For sizing an allocator that reserves fixed, aligned windows and commits pages from each window's start: Unreal's FMallocBinned3 takes
 // 74 pools of 512 MB (Octopath Traveler 0, main+0x9f748)
@@ -579,7 +786,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         pthread_mutex_lock(&g_map_lock);
         if (map_find(dst, size) || map_source_busy(src, size) || !map_source_backed(src, size)) result = 0xD401;
         else if (g_nmap == MAX_MAP) result = 0xCE01;
-        if (result) { pthread_mutex_unlock(&g_map_lock); regs[0] = result; LOG("[RED] MapMemory refused (%#x): %#llx <- %#llx +%#llx", result, (unsigned long long)dst, (unsigned long long)src, (unsigned long long)size); return 0; }
+        if (result) { stack_pending_clear(pthread_self(), 0, 0); pthread_mutex_unlock(&g_map_lock); regs[0] = result; LOG("[RED] MapMemory refused (%#x): %#llx <- %#llx +%#llx", result, (unsigned long long)dst, (unsigned long long)src, (unsigned long long)size); return 0; }
         // Apple pages are 16K, Horizon pages 4K: the accessible region is extended to a 16K boundary (the extra pages opened are unused pages of the same region, semantics unaffected)
         uint64_t mask = (size_t)getpagesize() - 1;
         uint64_t lo = dst & ~mask, hi = (dst + size + mask) & ~mask;
@@ -587,11 +794,12 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         dm_guest_write_prepare((void *)lo, hi - lo);
         memcpy((void *)dst, (void *)src, size);   // move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
         map_add(dst, size, src, 0x0B /*MappedMemory*/);
+        stack_pending_clear(pthread_self(), dst, size);
         pthread_mutex_unlock(&g_map_lock);
         if (g_flag.svc) LOG("MapMemory %#llx <- %#llx +%#llx", dst, src, size);
         regs[0] = 0; return 0;
     }
-    case 0x05: {  // UnmapMemory(dst, src, size): contents are moved back to the source region; a 16K page may be shared with an adjacent mapping, permissions are not revoked
+    case 0x05: {  // UnmapMemory(dst, src, size): contents are moved back to the source region, and the stack pages it held wholly are given back
         uint64_t dst = regs[0], src = regs[1], size = regs[2];
         uint32_t result = map_arguments(dst, src, size);
         if (result) { regs[0] = result; return 0; }
@@ -602,6 +810,13 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         dm_guest_write_prepare((void *)src, size);
         memcpy((void *)src, (void *)dst, size);
         map_del(k - 1);
+        // A thread's stack is placed at a random address in the stack region, so each MapMemory dirties pages there and they stayed resident after the unmap (upstream
+        // nxnative 6c50d74e, PR #2720). The host pages wholly inside the range are given back (fresh zero pages; MapMemory opens them again); an edge page another mapping
+        // shares is kept. (Upstream also refuses device-shared ranges and keeps file-backed stacks: this tree tracks neither, and a stack is not an NVN pool's storage)
+        {
+            uintptr_t mask = (uintptr_t)getpagesize() - 1, rlo = ((uintptr_t)dst + mask) & ~mask, rhi = ((uintptr_t)dst + size) & ~mask;
+            if (rhi > rlo) (void)guest_release(rlo, rhi);
+        }
         pthread_mutex_unlock(&g_map_lock);
         regs[0] = 0; return 0;
     }
@@ -612,6 +827,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         uint64_t base, size, state, perm;
         uint32_t attr = 0;
         int k;
+        module_t *mm;
         pthread_mutex_lock(&g_map_lock);   // the registry branches read g_map; the other branches are cheap, so the lock simply spans the whole chain
         uint64_t ab = (uintptr_t)g_alias, ae = ab + g_alias_cap, rb = 0, rn = 0;
         int mapped = 0, in_alias = addr >= ab && addr < ae;
@@ -641,16 +857,16 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
                 if (g_map[i].base > addr && g_map[i].base < hi) hi = g_map[i].base;
             }
             base=lo; size=hi-lo; state=0; perm=0; }
-        else if (module_of(a)) {
+        else if ((mm = module_of(a)) && mm->loaded) {
             // Loaded module: report the regions in Horizon's layout -- code [0, ro) Code+RX, read-only [ro, data) Code+R, data and bss [data, patch area) CodeData+RW.
             // The SDK's C++ exception unwinding (nn::ro::detail::GetExceptionInfo) walks back from the PC over "Code+RX" regions to find the module start, forward over Code then CodeData to find its end, then reads MOD0 at the module start for .eh_frame_hdr.
             // Previously "the 4 KiB page around it, Code+RX" was reported: the backward walk ran on into other memory, found no MOD0 and aborted (Engage's IL2CPP throws a C++ exception for every managed exception).
             // The rewriter's patch area is reported as CodeData+RX: modules sit back to back in the host, and an executable patch area reported as Code+RX would merge the previous module into the backward walk
             // Modules with the patch area before the base (patch_off < 0): the patch area is reported alone as CodeData+RX, and data and bss run to the end of the image, or to a back patch area
             // (patch_nso.py TWO), which is reported as CodeData+RX like a patch area after the image
-            module_t *mm = module_of(a); uint64_t off = (uint64_t)(a - mm->base), mb = (uint64_t)mm->base;
+            uint64_t mb = (uintptr_t)mm->base, off = addr - mb;
             uint64_t ro = mm->ro_off ? mm->ro_off : mm->text_end, da = mm->data_off ? mm->data_off : ro, pa = mm->patch_off > 0 ? (uint64_t)mm->patch_off : mm->back_len ? mm->back_off : mm->size;
-            if (a < mm->base)  { base = mb + mm->patch_off; size = mm->patch_len; state = 4/*CodeData*/; perm = 5; }
+            if (addr < mb)     { base = mb + mm->patch_off; size = mm->patch_len; state = 4/*CodeData*/; perm = 5; }
             else if (off < ro) { base = mb;      size = ro;            state = 3/*Code*/;     perm = 5; }
             else if (off < da) { base = mb + ro; size = da - ro;       state = 3/*Code*/;     perm = 1; }
             else if (off < pa) { base = mb + da; size = pa - da;       state = 4/*CodeData*/; perm = 3; }
@@ -661,14 +877,20 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
                 base = mb + lo; size = hi - lo;
             }
         }
-        else {
+        else if (addr >= user_va_end()) {
+            // Horizon describes addresses past the process limit with a reserved block whose end wraps to zero.
+            base = user_va_end(); size = 0 - base; state = 0x10; perm = 0;
+        } else {
             // The address lies in "the current host thread's stack": report the whole stack (state 0xB = stack). When the SDK initializes the main thread record it queries here with the sp at that moment and takes the reported range as the main thread stack;
             // later nn::os::GetCurrentStackInfo asserts that sp is still inside that range and aborts if not. Previously every address outside the guest address space was reported as "the 4 KiB page containing it",
             // so the main thread stack was recorded as one page. Whether the sp at init and a later sp share a page depends on the absolute position of the host stack top, which moves with the total length of environment variables / launch arguments (a different environment occasionally aborts at startup).
             uint64_t top, ssz; plat_thread_stack(&top, &ssz);
-            if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
-            // Other host memory: report "free, no permissions" (the 4 KiB page around it) as Horizon does for unmapped addresses. It used to report Code+RX, and GetExceptionInfo walking back from main merged on through host memory down to 0
-            else { base=addr & ~0xFFFull; size=0x1000; state=0/*Free*/; perm=0; } }
+            uint64_t bottom = top - ssz;
+            if (addr < top && addr >= bottom) { base = bottom; size = ssz; state = 0xB/*Stack*/; perm = 3; }
+            // Other host memory: free, no permissions, as Horizon reports unmapped addresses (it used to report Code+RX, and GetExceptionInfo walking back from main merged on
+            // through host memory down to 0). The whole span up to the next module, stack or guest reservation, so a walk from 0 advances past it in one query
+            else { query_external_gap(addr, bottom, top, mm, &base, &size); state = 0/*Free*/; perm = 0; }
+        }
         map_source_query(addr, &base, &size, &attr, &perm);
         pthread_mutex_unlock(&g_map_lock);
         if (mi) {

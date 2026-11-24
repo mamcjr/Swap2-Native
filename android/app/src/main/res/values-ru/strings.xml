@@ -57,6 +57,8 @@
     <string name="s2_play_prewarm_n">Предварительная подготовка конвейеров: %1$d…</string>
     <string name="s2_play_scene">Загрузка текстур и первой сцены…</string>
     <string name="s2_play_ready">Готово</string>
+    <string name="s2_play_compiling">Компиляция шейдеров: %1$d из %2$d, осталось около %3$d с · Нажмите, чтобы пропустить</string>
+    <string name="s2_play_compiling_n">Компиляция шейдеров: %1$d из %2$d · Нажмите, чтобы пропустить</string>
     <string name="s2_game_settings">Настройки игры</string>
     <string name="s2_this_game">ТОЛЬКО ДЛЯ ЭТОЙ ИГРЫ</string>
     <string name="s2_game_settings_intro">Изменения вступят в силу при следующем запуске. «По умолчанию» следует общим настройкам.</string>
@@ -315,7 +317,7 @@
     <string name="s2_resolution_note">Размер, в котором отрисовывается игра.</string>
     <string name="s2_frame_cap_note">Наибольшее число кадров в секунду, которое отрисовывает эта игра.</string>
     <string name="s2_frame_cap_own">Эта игра сама выбирает частоту кадров</string>
-    <string name="s2_game_graphics_hint">Масштабирование FSR и генерация кадров — общие настройки (Настройки › Производительность) и настройки игровой панели.</string>
+    <string name="s2_game_graphics_hint">Генерация кадров — общая настройка (Настройки › Производительность) и настройка игровой панели.</string>
     <string name="s2_upscaler">Масштабирование</string>
     <string name="s2_upscaler_net">Нейросеть игры (NDSR)</string>
     <string name="s2_upscaler_fsr">FSR 1 (быстрее)</string>
@@ -736,8 +738,8 @@
     <string name="s2_gfx_on">Вкл.</string>
     <string name="s2_gfx_inherit">Как в общих настройках / профиле игры</string>
     <string name="s2_gfx_scaling_note">Масштабирует изображение под экран и заменяет поддерживаемые нейросетевые апскейлеры. «Исходное» сохраняет нейросеть игры.</string>
-    <string name="s2_gfx_sharp">Резкость вывода FSR</string>
-    <string name="s2_gfx_sharp_note">Повышение резкости, когда итоговое изображение увеличивается до размера экрана.</string>
+    <string name="s2_gfx_sharp">Резкость</string>
+    <string name="s2_gfx_sharp_note">Насколько масштабирование повышает резкость увеличенного изображения.</string>
     <string name="s2_gfx_async">Фоновые конвейеры</string>
     <string name="s2_gfx_async_note">Применяется при следующем запуске. Компилирует в фоне и при необходимости ждёт, чтобы сохранить эффекты.</string>
     <string name="s2_gfx_timing">Тайминг GPU</string>
@@ -815,4 +817,22 @@
     <string name="s2_warm_play_now">Играть сейчас</string>
     <string name="s2_warm_stop">Остановить</string>
     <string name="s2_warm_close">Закрыть</string>
+    <string name="s2_sec_image">Изображение</string>
+    <string name="s2_sec_frames">Кадры</string>
+    <string name="s2_sec_scene">Сцена</string>
+    <string name="s2_up_original">Оригинал (как в игре)</string>
+    <string name="s2_up_note">FSR 1 — самый лёгкий. SGSR 2 и FSR 3.1 восстанавливают детали по предыдущим кадрам в играх с DLSS (SGSR 2 также в Ocarina of Time); в остальных работают как FSR 1. Применяется сразу.</string>
+    <string name="s2_up_level">Уровень масштабирования</string>
+    <string name="s2_up_quality">Качество (1080p)</string>
+    <string name="s2_up_balanced">Баланс (720p)</string>
+    <string name="s2_up_performance">Производительность (540p)</string>
+    <string name="s2_up_level_note">Разрешение, в котором игра рендерит до масштабирования: ниже — быстрее. Со следующего запуска.</string>
+    <string name="s2_gfx_foliage">Трава и растения</string>
+    <string name="s2_gfx_foliage_high">Высокий (как рисует игра)</string>
+    <string name="s2_gfx_foliage_medium">Средний (половина травы)</string>
+    <string name="s2_gfx_foliage_low">Низкий (без травы, половина растений)</string>
+    <string name="s2_gfx_foliage_none">Нет</string>
+    <string name="s2_gfx_foliage_note">Меньше травы и растительности — больше кадров в секунду в полях и лесах. Применяется сразу.</string>
+    <string name="s2_gfx_effect_volume_fog">Туман</string>
+    <string name="s2_gfx_effect_note">Выкл.: эффект не рисуется, ради большего числа кадров в секунду. Применяется сразу.</string>
 </resources>

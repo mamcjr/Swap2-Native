@@ -119,6 +119,8 @@ def run_one(a, label, env, n, out):
     at(a.start + a.secs); t1, m1 = thermal(a), mem_available(a)
     alive = bool(sh(a, f'pidof {a.package}:game', check=False).strip())
     shot = adb_bytes(a, 'exec-out', 'screencap -p', check=False)
+    if alive and a.drain > 0:   # HOME first: the activity's pause drains the replay (mtl_drain), which saves the pipeline cache and its prewarm keys; a bare force-stop
+        sh(a, 'input keyevent KEYCODE_HOME', check=False); time.sleep(a.drain)   # lost every pipeline made since the last timed save (vka_pso_save: at most every 120 s, deferred while compiling)
     sh(a, f'am force-stop {a.package}')
     time.sleep(2)
     rd = out / f'{label}-{n}'; rd.mkdir(parents=True, exist_ok=True)
@@ -159,6 +161,7 @@ def main():
     ap.add_argument('--keys', default='35:A*6/4', help='DM_KEYS that reach the scene (default: the test save into Kokiri Forest)')
     ap.add_argument('--start', type=float, default=100, help='window start, seconds after the intent')
     ap.add_argument('--secs', type=float, default=60, help='window length')
+    ap.add_argument('--drain', type=float, default=15, help='seconds after HOME before the force-stop, so the pipeline cache and its prewarm keys are saved (0: force-stop at once, as before)')
     ap.add_argument('--cool', type=float, default=90, help='idle seconds between runs')
     ap.add_argument('--ctl', action='append', default=[], type=lambda v: (float(v.split(':', 1)[0]), v.split(':', 1)[1]),
                     help='S:LINE: a live control line (for example 20:env DM_VK_SYNCLOG=40) S seconds into the window')

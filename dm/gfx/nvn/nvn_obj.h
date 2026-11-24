@@ -79,7 +79,8 @@ typedef struct {
     uint64_t used;                       // Bytes written since the game last added command memory, across recordings and host segments, including segment-switch JUMPs (returned by GetCommandMemoryUsed)
     int32_t tex_base, samp_base;         // Host-table bases of the texture / sampler pool this command buffer last bound (hle_nvn.c dpool_add; 0 = the first pool of its kind)
     size_t ctl_size;                     // Bytes in the last control memory block supplied by the game (the host records no control commands)
-} cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
+    int64_t copy_row, copy_image;        // SetCopyRowStride / SetCopyImageStride as last recorded (also recorded as OP_COPY_STRIDE, which the replays follow): the layout of a staged upload's bytes (hle_nvn.c tex_copy_staging)
+} cmd_t;                                                                                  FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------
 typedef struct { uint32_t blend_en : 8, logic_op : 4, alpha_func : 4; } color_st;            FITS(color_st, NVNcolorState);
@@ -109,6 +110,7 @@ enum {
     OP_SET_TEX_POOL, OP_SET_SAMP_POOL, OP_COPY_B2T, OP_COPY_STRIDE, OP_BLEND_COLOR, OP_COPY_T2B, OP_BIND_IMG, OP_COPY_T2T, OP_RESET_COUNTER, OP_CLEAR_TEX, OP_CLEAR_BUF, OP_DEPTH_CLAMP, OP_RENDER_COND, OP_FENCE_SYNC, OP_TF_BIND, OP_TF_STATE, OP_RAST_DISCARD, OP_VP_SWIZZLE, OP_BIND_TEX1, OP_PRIM_RESTART, OP_BIND_UBO_SMALL, OP_BIND_VBUF1, OP_DRAW_TEX, OP_ALPHA_REF, OP_PUSH_CONST,
     OP_WAIT_EVENT, OP_WAIT_SYNC,   // GPU waits: the queue goes on past them once the event or sync is reached (vk_android/vka_qsched.h; the Metal replay passes them at once)
     OP_DLSS,   // NVN2's DLSS evaluation (p_dlss; hle_nvn.c "NVN2's DLSS")
+    OP_DEPTH_BOUNDS,   // SetDepthBounds (p_depth_bounds; nvn_dbnd.h; Banana Native v0.3.51, 94009e1d: the same op number there)
     OP_COUNT_
 };
 // Payload (immediately follows op_hdr)
@@ -123,6 +125,7 @@ typedef struct { int32_t first, n; float v[16][6]; } p_viewports;          // x,
 typedef struct { int32_t x, y, w, h; } p_scissor;
 typedef struct { float n, f; } p_depth_range;
 typedef struct { uint32_t on, index; } p_prim_restart;
+typedef struct { int32_t on; float lo, hi; } p_depth_bounds;   // SetDepthBounds: the enable and the bounds as the game passed them (clamped and checked at replay, nvn_dbnd.h)
 typedef struct { int32_t on; } p_depth_clamp;   // SetDepthClamp: depth outside [near, far] is clamped instead of clipped (Metal's depth clip mode)
 typedef struct { int32_t first, n; uint8_t sw[16][4]; } p_vp_swizzle;   // SetViewportSwizzles: per viewport the source of clip x, y, z, w (NVNviewportSwizzle) XOR the identity (0, 2, 4, 6), so 0 = unchanged
 typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;
@@ -130,7 +133,7 @@ typedef struct { const prog_t *prog; int32_t stages; } p_bind_program;
 // 24 for blend, multisample and depth-stencil, instead of 40 for all. Readers take that kind's size from bytes. Games size display-list heaps by GetCommandMemoryUsed: Super Mario Odyssey's
 // "DisplayList" GPU heap (62 MB, a bump allocator, main+0x5e8280) filled while a kingdom loaded with 40-byte state binds (39% of its bytes), and every display list after that got no memory
 typedef struct { int32_t kind; uint8_t bytes[0x18]; } p_bind_state;
-typedef struct { int32_t first, n; uint32_t st[16]; } p_bind_vattr;
+typedef struct { int32_t first, n; uint32_t st[32]; } p_bind_vattr;   // NVN2 (Ampere) has 32 vertex attributes, the X1 16; the record holds n of them (RECN)
 typedef struct { int32_t first, n; vs_st st[16]; } p_bind_vstream;
 typedef struct { int32_t first, n; NVNbufferRange r[16]; } p_bind_vbuf;
 // Games measure scratch recordings to size resource heaps. Keep a single bounded binding at 24 bytes including its header (the native vertex-buffer command is 24 bytes).
@@ -186,6 +189,18 @@ static inline const p_draw_idx *draw_idx_rec(const void *a, uint32_t size, p_dra
 typedef struct { int32_t x, y, z; uint64_t caller, ind; } p_dispatch;   // caller: return address of the game call site (to locate the dispatcher); ind != 0: DispatchComputeIndirect, the group counts are read by the GPU from that address
 typedef struct { const dpool_t *pool; } p_set_pool;
 typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; NVNcopyRegion r; int32_t flags; } p_copy_b2t;
+#define DM_COPY_SNAPSHOT 0x20000000   // buffer-to-texture transfer with CPU bytes inline after the copy strides
+// A staged upload (DM_COPY_SNAPSHOT, hle_nvn.c rec_staged_texture_upload): the record, its texture snapshot, then the strides the bytes are laid out with (the record-time
+// SetCopyRowStride / SetCopyImageStride, 0 = tightly packed) and the source bytes as they were when the copy was recorded. src still holds the guest address, so a replay that
+// does not read the bytes copies from the live buffer as for any other copy
+typedef struct { int64_t row, image; } p_copy_strides;
+#define COPY_STRIDES_OFF ((((sizeof(p_copy_b2t) + 7) & ~(size_t)7) + sizeof(tex_t) + 7) & ~(size_t)7)   // payload offset: after the record and its one texture snapshot (REC_SNAP)
+// The strides of a staged upload, its bytes right after them; *avail = the bytes the record holds there (with its padding). NULL when the record is not a staged one or is too short
+static inline const p_copy_strides *copy_staged(const p_copy_b2t *c, uint32_t size, size_t *avail) {
+    if (!(c->flags & DM_COPY_SNAPSHOT) || size < 8 || size - 8 < COPY_STRIDES_OFF + sizeof(p_copy_strides)) return NULL;
+    *avail = size - 8 - COPY_STRIDES_OFF - sizeof(p_copy_strides);
+    return (const p_copy_strides *)((const uint8_t *)c + COPY_STRIDES_OFF);
+}
 // A host-only bit in flags: DM_COPY_RESOLVE = this is a Downsample (multisample resolve), recorded as a texture copy so everything else treats it as one (reads the source, writes the destination)
 #define DM_COPY_RESOLVE 0x40000000
 typedef struct { const tex_t *src, *dst; view_t sv, dv; uint8_t has_sv, has_dv; NVNcopyRegion sr, dr; int32_t flags; } p_copy_t2t;   // Reused for T2B: src stores the destination buffer address

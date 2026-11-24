@@ -103,6 +103,7 @@ void hle_bind_system_event(void *ev, int ac) {
     event_binds++;
 }
 uint32_t hle_dup_readable_handle(uint32_t h) { assert(h == 0x1002); return 0x1003; }
+void hle_clear_system_event(void *g) { (void)g; }   // Update clears the renderer's kernel event (hle_thread.c)
 
 int main(void) {
     uint8_t param[P_SIZE] = {0}, saved[P_SIZE];

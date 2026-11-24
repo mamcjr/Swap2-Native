@@ -206,6 +206,7 @@ int main(void) {
     CHECK(!other, "bytes outside the named fields are unchanged");
     // the walk refuses what it does not know; a truncated file is reported, not read past
     uint8_t junk[16] = {0}; CHECK(!cap_rec_fields(OP_COUNT_, junk, 16, &enc, NULL), "an unknown op is refused");
+    uint8_t bounds[16] = {0}; CHECK(cap_rec_fields(OP_DEPTH_BOUNDS, bounds, 8 + sizeof(p_depth_bounds), &enc, NULL), "a depth bounds record has no pointer to walk");
     CHECK(!cap_rec_fields(OP_SET_RT, junk, 16, &enc, NULL), "a record too short for its fields is refused");
     FILE *f = fopen(path, "r+b"); fseeko(f, 0, SEEK_END); off_t n = ftello(f); fclose(f); truncate(path, n - 40);
     CHECK(cap_load(&rd, path) == 1, "a truncated capture still opens"); int r, bad = 0; while ((r = cap_next(&rd, &c, &d)) == 1) free(d); bad = r < 0; cap_unload(&rd);

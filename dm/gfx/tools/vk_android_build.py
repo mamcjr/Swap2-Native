@@ -16,6 +16,7 @@
 #        vk_android_build.py --check <dmsh_vk.lib>   read a library back as the replay does and run spirv-val on every module it holds
 # Environment: DM_GAME (required), XLATE (default the in-repo dmsh_xlate_bin), SPIRV_VAL (default spirv-val on PATH), J (concurrency, default 8), WORK (temporary folder),
 #   DMSH_VK_LOOSE=1 also writes each module as spv/<key>[_gl].spv beside the library (for spirv-dis)
+#   DMSH_VK_ABSENT_FILE a file of shader keys (one a line) the dump lacks, which the vertex / pixel pair expansion leaves out (vk_android_delta.py package_keys)
 #   XLATE / SPIRV_VAL naming a shared library (.so / .dylib) call it in this process through ctypes instead of starting a program (the phone, android/ONDEVICE.md): XLATE the
 #   translator's libdmsh_xlate (dmsh_xlate_android, export dmsh_xlate_main), SPIRV_VAL SPIRV-Tools' libSPIRV-Tools-shared (spvValidateWithOptions, Vulkan 1.3 environment)
 #   DMSH_VK_RESULTS the result folder (default <output>/v-<V>/results), DMSH_VK_BATCH shaders per translator call (default 64), DMSH_VK_PROGRESS a file the progress is also
@@ -178,6 +179,8 @@ def check_translator(xlate=None):
     emb = tool_lock.xlate_embedded()
     if emb.startswith(tool_lock.NO_RUN): bad.append(tool_lock.no_run_message(emb))
     elif emb != want.get('xlate_source') or emb != dmsh_chain.xlate_source_sha(): bad.append(f'translator source: embedded {emb} / lock {want.get("xlate_source")} / in repo {dmsh_chain.xlate_source_sha()}')
+    if want.get('xlate_inputs') != dmsh_chain.xlate_inputs_sha():   # the translator's sources with the vendored Ryujinx changed since the lock (dmsh_chain.py xlate_inputs_sha)
+        bad.append(f'translator sources: lock {want.get("xlate_inputs")} / in repo {dmsh_chain.xlate_inputs_sha()} (rebuild dmsh_xlate, then update the lock)')
     return bad
 
 
@@ -416,6 +419,18 @@ def ubo_img(nm):
     return (bank - 3, (h & 0x3fff) * 4) if 3 <= bank <= 16 and h >> 28 == 0 else None
 
 
+def query_3d_slots(m):
+    """The 2D texture variables (ids) whose handle word the shader also binds as a 3D image or texture (decode_ubo_tex, ubo_img): vk_android_spv.py query_dim3's candidates
+    (Banana Native #467, MIT)"""
+    def words(nm):
+        ut, ui = NS['decode_ubo_tex'](nm), ubo_img(nm)
+        return set(ut) if ut else {ui} if ui else set()
+    res = m.resources(); w3 = set()
+    for r in res:
+        if r['dim'] and r['dim']['dim'] == 2: w3 |= words(r['name'])
+    return [r['id'] for r in res if r['dim'] and r['dim']['dim'] == 1 and not r['dim']['array'] and words(r['name']) & w3]
+
+
 def classify(stage, r, res, m):
     """A descriptor variable → its binding record (dict): the kind and slot from its name (dmsh_build.py reflect's rules, on the SPIR-V names the MSL members come from)"""
     nm, desc = r['name'], r['desc']
@@ -591,6 +606,7 @@ def finish(key, w, job, c1):
     n_precise = spv.precise_minmax(m)
     hmma = stage == 'cs' and spv.hmma_lds(m)   # the HMMA helper's calls lowered at their sites, gathers shared (vk_android_spv.py hmma_lds)
     scse = spv.shuffle_cse(m)   # shuffles with their constant addends taken out, repeats in a block shared: the base module and, below, shuffle_lds's (vk_android_spv.py shuffle_cse)
+    spv.query_dim3(m, query_3d_slots(m))   # 2D slots only size-queried, whose handle the shader binds as 3D too: 3D (vk_android_spv.py query_dim3)
     binds = [classify(stage, r, res, m) for r in m.resources()]
     storage_slots(stage, binds, res)
     try: place(stage, binds, m)
@@ -791,7 +807,11 @@ def write_library(results):
 # which differs across a subgroup; the device's ...ArrayNonUniformIndexing features, vka_dev.c). The Apple jobs carry none of these keys, so their translations stay as they were
 ANSWERS = {'subgroup_size': VK['SUBGROUP_SIZE'], 'ssbo_align': VK['SSBO_ALIGN'], 'gs_passthrough': False, 'shared_max': VK['SHARED_MAX'], 'offset_gather_only': True,
            'nonuniform_index': True}
-keys = NS['build_keys'](want, loc, PAIRS) if want else sorted(loc)
+# the shaders the dump lacks (DMSH_VK_ABSENT_FILE: one key a line), kept out of the pair expansion (vk_android_delta.py package_keys); no file: the keys as before
+absent = set()
+if absent_file := os.environ.get('DMSH_VK_ABSENT_FILE'):
+    with open(absent_file, encoding='utf-8') as f: absent = set(f.read().split())
+keys = delta.package_keys(set(want), loc, PAIRS, absent, NS['build_keys']) if want else sorted(set(loc) - absent)
 NJ = int(os.environ.get('J', '8')); BATCH = max(1, int(os.environ.get('DMSH_VK_BATCH', '64')))
 STAGE_OF = {k: loc[k][0][:2] for k in keys}   # the package file's name gives the stage (dmsh_build.py job_for)
 ORDER = [k for k in keys if STAGE_OF[k] != 'vs'] + [k for k in keys if STAGE_OF[k] == 'vs']   # pixel shaders first: their inputs pad their vertex shaders' outputs

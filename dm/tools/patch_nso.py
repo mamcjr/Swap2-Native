@@ -1522,12 +1522,14 @@ def spin_lock(a):
     'acq'  ld(a)xr wA,[xN]; cbz wA,+16; clrex; b <the load>; st(l)xr wS,wK,[xN]; cbnz wS,<the load>    test-and-set, retried until the store succeeds (wK not zero)
     'rel'  clrex; ld(a)xr wA,[xN]; cmp wA,#k; b.ne <the clrex>; st(l)xr wS,wzr,[xN]; cbnz wS,<the load>  compare-and-clear, entered at the load; or stlr wzr,[xN]
     'tst'  ldr|ldrb|ldrh wA,[xN{,#imm}]; cmp wA,#k; b.eq|b.ne <the load>                                 a test loop that only another thread ends"""
-    l = [spin_ins(a + 4 * i) for i in range(6)]
-    if l[0] is None: return None
+    # The words after a are decoded only when a's own instruction can start one of these sequences (a plain instruction, most of the nodes, decodes nothing more)
+    x0 = spin_ins(a)
+    if x0 is None: return None
     r = lambda x, i: x.reg_name(x.operands[i].reg)
     plain = lambda x, i: x.operands[i].type == ARM64_OP_MEM and not x.operands[i].mem.index and not x.operands[i].mem.disp
-    m0 = l[0].mnemonic
-    if m0 in ('ldxr', 'ldaxr') and None not in l and r(l[0], 0).startswith('w') and plain(l[0], 1):
+    m0 = x0.mnemonic
+    l = [x0] + [spin_ins(a + 4 * i) for i in range(1, 6)] if m0 in ('ldxr', 'ldaxr') and r(x0, 0).startswith('w') and plain(x0, 1) else None
+    if l is not None and None not in l:
         base = l[0].operands[1].mem.base; bn = spin_norm(l[0].reg_name(base))
         if (l[1].mnemonic == 'cbz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a + 16 and l[2].mnemonic == 'clrex' and l[3].mnemonic == 'b' and l[3].operands[0].imm == a
                 and l[4].mnemonic in ('stxr', 'stlxr') and plain(l[4], 2) and l[4].operands[2].mem.base == base and r(l[4], 1) not in ('wzr', 'xzr')
@@ -1538,12 +1540,14 @@ def spin_lock(a):
                 and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a - 4 and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
                 and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
             return ('rel', bn, [p] + l[:5], 1, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
-    if m0 == 'stlr' and len(l[0].operands) == 2 and r(l[0], 0) in ('wzr', 'xzr') and plain(l[0], 1):
-        bn = spin_norm(l[0].reg_name(l[0].operands[1].mem.base)); return ('rel', bn, l[:1], 0, 1, {bn}, set())
-    if (m0 in ('ldr', 'ldrb', 'ldrh') and None not in l[:3] and len(l[0].operands) == 2 and r(l[0], 0).startswith('w') and l[0].operands[1].type == ARM64_OP_MEM
-            and not l[0].operands[1].mem.index and not l[0].writeback and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
-            and l[2].mnemonic in ('b.eq', 'b.ne') and l[2].operands[0].imm == a):
-        bn = spin_norm(l[0].reg_name(l[0].operands[1].mem.base)); return ('tst', bn, l[:3], 0, 3, {bn}, {spin_norm(r(l[0], 0)), 'nzcv'})
+    if m0 == 'stlr' and len(x0.operands) == 2 and r(x0, 0) in ('wzr', 'xzr') and plain(x0, 1):
+        bn = spin_norm(x0.reg_name(x0.operands[1].mem.base)); return ('rel', bn, [x0], 0, 1, {bn}, set())
+    if (m0 in ('ldr', 'ldrb', 'ldrh') and len(x0.operands) == 2 and r(x0, 0).startswith('w') and x0.operands[1].type == ARM64_OP_MEM
+            and not x0.operands[1].mem.index and not x0.writeback):
+        l = [x0, spin_ins(a + 4), spin_ins(a + 8)]
+        if (None not in l and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
+                and l[2].mnemonic in ('b.eq', 'b.ne') and l[2].operands[0].imm == a):
+            bn = spin_norm(l[0].reg_name(l[0].operands[1].mem.base)); return ('tst', bn, l, 0, 3, {bn}, {spin_norm(r(l[0], 0)), 'nzcv'})
     return None
 def spin_store(ins):
     """str / strb / strh / stur / sturb / sturh of a w register or zr to [xN{,#imm}] (no writeback, no register offset) → (value register or None for zr, base register), or None"""
@@ -1589,18 +1593,22 @@ def spin_region(T, bes):
     the paths through it are dropped and the region is found again without them (a poll that takes its item once the wait is over stores the new cursor there). When the paths
     through stores bring in a register that a pass changes, the region is looked for once more with every store ending its path, as before stores could be part of one"""
     # spin_ins' decodes (capstone instructions with details, about 1 KB each) serve one head's search: kept across heads they held every word any search visited, 5.7 GB on
-    # The Legend of Zelda: Ocarina of Time's main (60 MB of text) when the phone's rewrite ran out of memory. A region keeps the instructions it holds by itself
-    spin_dec.clear()
-    ban = set()
-    for _ in range(8):
-        g = spin_region1(T, bes, ban, True)
-        if not isinstance(g, set): break
-        ban |= g
-    old = spin_region1(T, bes, set(), False)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
-    return g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
-def spin_region1(T, bes, ban, stores):
+    # The Legend of Zelda: Ocarina of Time's main (60 MB of text) when the phone's rewrite ran out of memory. A region keeps the instructions it holds by itself. The cache is
+    # cleared after every head, found or not, and a head that DATA_BLOCKS or spin_quick turns down is turned down once, before anything is decoded (upstream 65b1523b)
     hi = max(bes)
     if any(s < hi + 4 and T < e for s, e in DATA_BLOCKS) or not spin_quick(T, hi): return None
+    try:
+        ban = set()
+        for _ in range(8):
+            g = spin_region1(T, bes, ban, True)
+            if not isinstance(g, set): break
+            ban |= g
+        old = spin_region1(T, bes, set(), False)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
+        return g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
+    finally:
+        spin_dec.clear()
+def spin_region1(T, bes, ban, stores):
+    hi = max(bes)
     nodes, back, bad, inner = {}, set(), set(), set()
     todo = [T]
     while todo:
@@ -1614,8 +1622,8 @@ def spin_region1(T, bes, ban, stores):
             n = {'kind': 'rmw', 'base': rmw[0], 'k': rmw[1], 'ins': rmw[3], 'uses': {rmw[0]}, 'defs': rmw[2], 'succ': [a + 16]}
         elif lk:
             n = {'kind': lk[0], 'base': lk[1], 'k': {'acq': 1, 'rel': -1, 'tst': 0}[lk[0]], 'ins': lk[2], 'pre': lk[3], 'uses': lk[5], 'defs': lk[6], 'succ': [a + 4 * lk[4]]}
-        elif stores and (st := spin_store(spin_ins(a))):
-            x = spin_ins(a); n = {'kind': 'stc', 'st': st, 'ins': [x], 'uses': {st[1]} | ({st[0]} - {None}), 'defs': set(), 'succ': [a + 4]}
+        elif stores and (st := spin_store(x := spin_ins(a))):
+            n = {'kind': 'stc', 'st': st, 'ins': [x], 'uses': {st[1]} | ({st[0]} - {None}), 'defs': set(), 'succ': [a + 4]}
         else:
             x = spin_ins(a); k = spin_kind(x)
             if k is None: bad.add(a); continue
@@ -1741,7 +1749,8 @@ def find_spin_regions():
     heads = []
     for found in in_parallel(spin_heads_with_region, [(first, step) for first in range(step)]):
         heads += found
-    return [spin_region(T, spin_cand[T]) for T in sorted(heads)]
+    regions = [spin_region(T, spin_cand[T]) for T in sorted(heads)]
+    return [g for g in regions if g is not None]   # every head here has one (the workers kept only those); the filter narrows the type
 
 spin_regions = find_spin_regions()   # all found on the unchanged image first: emitting patches back-edges
 spin_sites = [(g['T'], sorted(g['valid']), sum(len(g['nodes'][a]['ins']) for a in g['R'])) for g in spin_regions]

@@ -1169,12 +1169,16 @@ def hmma_lds(m, keep=HMMA_KEEP):
 
 # ---- raw global memory (Ryujinx GlobalToStorage.cs TryGenerateRawStorageOp; dmsh_abi.h DMSH_GMEM_MAP_*): the helpers' temporaries as values, the pool table search as one
 # loop, and load calls read through the pool entry kept last. Adapted from Banana Native's promote_locals, loop_pool_search and cache_raw_loads (eden/v0.3.11) to the
-# helper this translator emits: a 12-step search over the 4,096-entry table, no chunk hint, no sink word, the hash-set write log. Nothing here changes what a helper
-# reads or writes; a module without a raw helper is left byte for byte as it was (raw_global_memory)
+# helper this translator emits: a 12-step search over the 4,096-entry table, no chunk hint, no sink word, the hash-set write log. The search runs 13 steps here, over
+# the Android host's 8,192-entry table (vka.h VKA_GMEM_MAP_ENTRIES; the Mac host's stays dmsh_abi.h's 4,096): Ocarina of Time's Hyrule Field places more than 4,095
+# segments, and the translator's 12 steps never reach an entry past 4,095, whose reads went to no pool and read 0. On a table of at most 4,095 entries the 13 steps
+# find what the 12 do (the entries past the last are all ones, never at or below an address). Otherwise nothing here changes what a helper reads or writes; a module
+# without a raw helper is left byte for byte as it was (raw_global_memory)
 OP_VECTOR_INSERT_DYNAMIC, OP_VECTOR_SHUFFLE, OP_CONVERT_U_TO_PTR, OP_INOT_EQUAL, OP_ULESS_THAN, OP_ULESS_THAN_EQUAL = 78, 79, 120, 171, 176, 178
 OP_LOGICAL_OR, OP_LOGICAL_AND, OP_LOOP_MERGE, OP_BRANCH, OP_SWITCH = 166, 167, 246, 249, 251
 SC_PHYSICAL_STORAGE_BUFFER, CAP_PHYSICAL_STORAGE_BUFFER, LOOP_DONT_UNROLL = 5349, 5347, 0x2
-GMEM_MAP_LOG2, GMEM_MAP_ENTRY_WORDS = 12, 8   # dmsh_abi.h DMSH_GMEM_MAP_ENTRIES (1 << 12), DMSH_GMEM_MAP_ENTRY / 4 (GlobalToStorage.GmemMapLog2, GmemMapEntryWords)
+XL_GMEM_MAP_LOG2 = 12   # the translator's search: GlobalToStorage.GmemMapLog2, dmsh_abi.h DMSH_GMEM_MAP_ENTRIES (1 << 12, the Mac host's table)
+GMEM_MAP_LOG2, GMEM_MAP_ENTRY_WORDS = 13, 8   # the Android host's table: vka.h VKA_GMEM_MAP_ENTRIES (1 << 13); dmsh_abi.h DMSH_GMEM_MAP_ENTRY / 4 (GmemMapEntryWords)
 GMEM_RUN_WORDS = 4   # the most words of one run cache_raw_loads reads at once (the translator splits a 128-bit global load into four 32-bit raw loads)
 GMEM_CACHE_MIN_CALLS = 4   # a module with fewer raw load calls keeps its helper (with the search as a loop): its few inlined helpers cost little
 
@@ -1425,7 +1429,10 @@ def loop_pool_search(m, f):
     Done only when every step is the second step's instructions with its own results, its index before and its constant in their places (compared operand by
     operand; the first step with the constant 0 as its index before), the steps follow each other, hold nothing but arithmetic, comparisons and reads through a
     pointer the step made, and nothing outside them uses a step's value but the last index. The loop then runs the same instructions on the same values in the same
-    order: iteration k has the index of step k - 1 and the step first >> (k - 1). → n (0: not this shape; f is left as it is)"""
+    order: iteration k has the index of step k - 1 and the step first >> (k - 1). The translator's search (n = XL_GMEM_MAP_LOG2) becomes a loop of GMEM_MAP_LOG2
+    iterations from 2^(GMEM_MAP_LOG2-1): the search over the Android table, which the same steps make; on a table of at most 2^n - 1 entries its first steps never
+    take a candidate (their entries start at ~0) and the index after them is 0, as before the translator's first step. → the loop's iterations (0: not this shape;
+    f is left as it is)"""
     a, e = m.function_range(f)
     body = m.ins[a:e + 1]
     at = {x[2]: k for k, x in enumerate(body) if len(x) > 2 and (x[0] & 0xffff) not in NO_RESULT_OPS and x[0] & 0xffff != OP_LABEL}
@@ -1483,6 +1490,7 @@ def loop_pool_search(m, f):
         if lo_k <= k <= hi_k: continue
         pos = value_operands(x)
         if pos is None or any(x[p] in all_defs and x[p] != last for p in pos): return 0   # nothing else reads a step's value but the last index
+    if n == XL_GMEM_MAP_LOG2: n, first = GMEM_MAP_LOG2, 1 << (GMEM_MAP_LOG2 - 1)   # the Android table's search
     bty = m.add_type(OP_TYPE_BOOL)   # declarations first (they move the function)
     c0, c1, cfirst = m.add_const(ity, 0), m.add_const(ity, 1), m.add_const(ity, first)
     idx, st, stn, more, lbl_h, lbl_b, lbl_c, lbl_m = (m.new_id() for _ in range(8))
@@ -1515,7 +1523,7 @@ def _raw_load_helper(m, f):
     """Raw helper f's facts when it is the translator's raw load of a 32-bit word (GlobalToStorage.cs GenerateRawAccess, after value_params and promote_locals), read
     by what it computes and not by its looks: every value of the function is numbered by its operation and its operands' numbers (bit casts and copies keep the
     number: they keep the bits), and the branch condition, the physical pointer and the returned values must have the numbers of this reference, built the same way:
-        index = 0; for step = 2^(GMEM_MAP_LOG2-1) .. 1: c = index + step; index = start(c) <= address ? c : index      (start(c): words 8c, 8c + 1 of the table)
+        index = 0; for step = 2^(XL_GMEM_MAP_LOG2-1) .. 1: c = index + step; index = start(c) <= address ? c : index   (start(c): words 8c, 8c + 1 of the table)
         in a pool = address < end(index)                                                                                 (words 8 index + 2, + 3)
         in a pool: return the word at the physical address  address + delta(index)  (words + 4, + 5; the carry into the high word);  else: return 0
     with the 64-bit comparisons and the carry written as the translator writes them. So a function that passes reads exactly what cache_raw_loads' function reads.
@@ -1572,7 +1580,7 @@ def _raw_load_helper(m, f):
     def tw(entry, w): return N('tw', N(OP_IADD, entry, C(w)))
     def below(ah, al, bh, bl, op): return N(OP_LOGICAL_OR, N(OP_ULESS_THAN, ah, bh), N(OP_LOGICAL_AND, N(OP_IEQUAL, ah, bh), N(op, al, bl)))   # (ah:al) < (bh:bl), or <=
     index = C(0)
-    for s in range(GMEM_MAP_LOG2 - 1, -1, -1):
+    for s in range(XL_GMEM_MAP_LOG2 - 1, -1, -1):
         cand = N(OP_IADD, index, C(1 << s)); entry = N(OP_IMUL, cand, C(GMEM_MAP_ENTRY_WORDS))
         index = N(OP_SELECT, below(tw(entry, 1), tw(entry, 0), hi, lo, OP_ULESS_THAN_EQUAL), cand, index)
     found = N(OP_IMUL, index, C(GMEM_MAP_ENTRY_WORDS))
@@ -1702,7 +1710,8 @@ def cache_raw_loads(m, helpers):
             for k, _, _ in c[1:]: rep[k] = []
             done += n; hist[n] = hist.get(n, 0) + 1
         out = []
-        for k, x in enumerate(body): out += rep.get(k, [x])
+        defs = {x[2]: x for x in body if len(x) > 2 and (x[0] & 0xffff) not in NO_RESULT_OPS and x[0] & 0xffff != OP_LABEL}
+        out = _sink_raw_calls(m, defs, [rep[k] if k in rep else x for k, x in enumerate(body) if rep.get(k, True)])
         k = next(k for k, x in enumerate(out) if x[0] & 0xffff == OP_LABEL) + 1
         out[k:k] = [[4 << 16 | OP_VARIABLE, T['pfu'], v, SC_FUNCTION] for v in cache]
         while out[k][0] & 0xffff == OP_VARIABLE: k += 1
@@ -1717,6 +1726,38 @@ def cache_raw_loads(m, helpers):
         m.ins = [y for y in m.ins if not (y[0] & 0xffff in (OP_NAME, OP_DECORATE) and y[1] in gone)]
     m.index()
     return done, hist
+
+
+_SINK_STOPS = _RUN_BREAKERS | {OP_FUNCTION_CALL, OP_LABEL, OP_PHI, 246, 247, 249, 250, 251, 252, OP_RETURN, OP_RETURN_VALUE, 255, OP_FUNCTION_END}
+
+
+def _sink_raw_calls(m, defs, items):
+    """cache_raw_loads' calls moved down their block: items is a function's body in order, each an instruction or a list (a replaced call with the extracts and casts
+    of its words); each list is placed just before the first instruction that uses a value it defines, else before the next one that writes memory other than Function,
+    Private or Output variables, calls anything, orders memory, ends the invocation or ends the block (_SINK_STOPS, a store into other memory). A call reads only memory
+    no shader stage writes during the draw between those points, and the kept pool entry it updates is a hint every call checks, so each word comes out as before.
+    The translator keeps Maxwell's order, every global load early: Ocarina of Time's skinned vertex shader b1f06157308e3b22 reads 70 runs at its start and uses them
+    at its end, about 250 values live at once, more than the 192 registers of Turnip's compiler, which then spilled 980 values and reloaded them 1,869 times
+    (28,053 instructions); with each read next to its use, none (16,708 instructions) → the body's instructions"""
+    out, wait = [], []   # wait: (position, the list, the ids it defines), in order
+    def release(need):   # the waiting lists that define an id in need, and those the ids they use need, in their order
+        go = [w for w in wait if w[2] & need]
+        while go:
+            more = set().union(*[{v for y in w[1] for v in y[3:]} for w in go]) - set().union(*[w[2] for w in go])
+            extra = [w for w in wait if w not in go and w[2] & more]
+            if not extra: break
+            go += extra
+        for w in sorted(go, key=lambda w: w[0]):
+            wait.remove(w); out.extend(w[1])
+    for k, it in enumerate(items):
+        if isinstance(it[0], list): wait.append((k, it, {y[2] for y in it})); continue
+        op = it[0] & 0xffff
+        stop = op in _SINK_STOPS or (op == OP_STORE and _store_class(m, defs, it[1]) not in (SC_FUNCTION, SC_OUTPUT, SC_PRIVATE))
+        if stop: release(set().union(*[w[2] for w in wait]) if wait else set())
+        elif wait: release(set(it[1:]))
+        out.append(it)
+    release(set().union(*[w[2] for w in wait]) if wait else set())
+    return out
 
 
 def _cached_load_fn(m, h, n, T):
@@ -2082,3 +2123,85 @@ def defer_mesh_plane_stores(m):
                                                                                 (init, lit_string('mesh_plane_clear')))]
     m.index()
     return {'calls': n, 'words': words, 'bytes': 4 * (words + nmask)}
+
+
+def id_operands(x):
+    """The words of instruction x that are ids it reads (not its result type and result, not its literals), as far as query_dim3 needs: m.uses() also counts literals,
+    which in a module whose ids are small numbers matched loads and variables (a BuiltIn 26 decoration, a Lod mask of 2). From Banana Native #467 (MIT)"""
+    op = x[0] & 0xffff
+    if op <= 17 or 19 <= op <= 52 or 71 <= op <= 77 or op in (330, 331, 332): return ()   # debug, mode setting, types, constants, annotations
+    if op == OP_COMPOSITE_EXTRACT: return x[3:4]
+    if op in (OP_COMPOSITE_INSERT, 79): return x[3:5]   # OpVectorShuffle: then its component literals
+    if op == OP_EXT_INST: return (x[3], *x[5:])
+    if op == OP_LOAD: return x[3:4]
+    if op == OP_STORE: return x[1:3]
+    if op == OP_VARIABLE: return x[4:5]
+    if op == OP_FUNCTION: return x[4:5]
+    if op == 247: return x[1:2]   # OpSelectionMerge
+    if op == 246: return x[1:3]   # OpLoopMerge
+    if op == 250: return x[1:4]   # OpBranchConditional: then its weights
+    if op == 251: return (x[1], x[2], *x[4::2])   # OpSwitch: (literal, label) pairs
+    if op in (87, 88, 91, 92, 95, OP_IMAGE_READ): return (x[3], x[4], *x[6:])   # an image, a coordinate, then a mask and its ids (95: OpImageFetch)
+    if op in (89, 90, 93, 94, 96, 97): return (x[3], x[4], x[5], *x[7:])   # with a Dref or a component
+    if op == OP_IMAGE_WRITE: return (x[1], x[2], x[3], *x[5:])
+    if 349 <= op <= 363 or 364 <= op <= 366: return (x[3], *x[5:])   # OpGroupNonUniform arithmetic: a scope, a group operation literal
+    if op in (OP_LABEL, 249, 253, 254, 255, 252, 224, 225): return x[1:]   # no result type: OpBranch, returns, kills, barriers
+    return x[3:]
+
+
+def types_before_globals(m, made):
+    """Type declarations add_type made (ids in made; it puts them before the first function) move before the first global variable, which may use them"""
+    fn = next(k for k, x in enumerate(m.ins) if x[0] & 0xffff == OP_FUNCTION)
+    gv = next((k for k in range(fn) if m.ins[k][0] & 0xffff == OP_VARIABLE), fn)
+    late = [x for x in m.ins[gv:fn] if x[0] & 0xffff in (OP_TYPE_VECTOR, OP_TYPE_IMAGE, OP_TYPE_SAMPLED_IMAGE, OP_TYPE_POINTER) and x[1] in made]
+    for x in late: m.ins.remove(x)
+    for j, x in enumerate(late): m.ins.insert(gv + j, x)
+
+
+OP_IMAGE, OP_IMAGE_QUERY_SIZE_LOD, OP_IMAGE_QUERY_SIZE = 100, 103, 104
+
+
+def query_dim3(m, vids):
+    """A 2D texture slot (vids: the build's candidates, whose handle word the shader also binds as a 3D image or texture: vk_android_build.py query_3d_slots) read only by
+    size queries whose x and y alone are used becomes 3D. A size query (TXQ) answers what the bound texture is, so the translator, with no type answer, declares the slot 2D;
+    on Vulkan a 3D texture has no view for a 2D slot and the query reads 0. Banana Native #467 (MIT): Orbitals' compute cea444eb38c3c1db sized the 144x128x64 volume it
+    writes through such a slot, and wrote nothing (the level's walls and ground read the empty volume and came out black). A 3D size has x and y where a 2D size has them.
+    → the number of slots retyped"""
+    uses = m.uses(); n = 0; made = set()
+    for vid in vids:
+        if vid not in m.vars: continue
+        ptr, sc = m.vars[vid]; t = m.pointee(ptr)[1]; comb = m.op(t) == OP_TYPE_SAMPLED_IMAGE; img = m.types[t][2] if comb else t
+        if m.op(img) != OP_TYPE_IMAGE: continue
+        st, dim, depth, arr, ms, sampled, fmt = m.types[img][2:9]
+        if dim != 1 or arr or ms: continue
+        loads, images, queries, ok = [], [], [], True
+        for k in uses.get(vid, ()):
+            y = m.ins[k]
+            if vid not in id_operands(y): continue   # (uses() also counts literals and the declaration)
+            if y[0] & 0xffff != OP_LOAD or y[3] != vid: ok = False; break
+            loads.append(y)
+        for src, kids in ((loads, images), (images, None)):   # a load (its OpImage when combined), then the queries on it
+            for s in src if ok else ():
+                for k in uses.get(s[2], ()):
+                    y = m.ins[k]; op = y[0] & 0xffff
+                    if y is s or s[2] not in id_operands(y): continue
+                    if kids is not None and comb and op == OP_IMAGE and y[3] == s[2]: kids.append(y)
+                    elif (kids is None or not comb) and op in (OP_IMAGE_QUERY_SIZE_LOD, OP_IMAGE_QUERY_SIZE) and y[3] == s[2]: queries.append(y)
+                    else: ok = False
+        for q in queries if ok else ():
+            for k in uses.get(q[2], ()):
+                y = m.ins[k]
+                if y is q or q[2] not in id_operands(y): continue
+                if not (y[0] & 0xffff == OP_COMPOSITE_EXTRACT and y[3] == q[2] and len(y) == 5 and y[4] < 2): ok = False
+        if not ok or not queries: continue
+        img3 = m.add_type(OP_TYPE_IMAGE, st, 2, depth, 0, 0, sampled, fmt); t3 = m.add_type(OP_TYPE_SAMPLED_IMAGE, img3) if comb else img3
+        p3 = m.add_type(OP_TYPE_POINTER, SC_UNIFORM_CONSTANT, t3); made |= {img3, t3, p3}
+        for x in m.ins:
+            if x[0] & 0xffff == OP_VARIABLE and x[2] == vid: x[1] = p3
+        m.vars[vid] = (p3, sc)
+        for ld in loads: ld[1] = t3
+        for im in images: im[1] = img3
+        for q in queries: v3 = m.add_type(OP_TYPE_VECTOR, m.types[q[1]][2], 3); made.add(v3); q[1] = v3
+        n += 1; uses = m.uses()
+    if n: types_before_globals(m, made)
+    return n

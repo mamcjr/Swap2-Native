@@ -79,6 +79,8 @@ int dm_game_load(const char *path) {
         // The NPDM's cores (pack_android.py): optional, so that a pack from an earlier packer still starts (hle_thread.c logs that it takes 0x7 then)
         if (!strcmp(c[0], "CORE_MASK") && nc == 2 && num(c[1], &a)) { dm_game.core_mask = a; continue; }
         if (!strcmp(c[0], "IDEAL_CORE") && nc == 2 && num(c[1], &a)) { dm_game.ideal_core = (int)a; continue; }
+        // Mesa's variables for this game (turnip_env; vka_driver.c): optional, so that a pack from an earlier packer still starts (none then)
+        if (!strcmp(c[0], "TURNIP_ENV")) { dm_game.turnip_env = strdup(nc > 1 ? c[1] : ""); continue; }
         unsigned k = 0;
         while (k < NKEYS && strcmp(KEYS[k].name, c[0])) k++;
         if (k == NKEYS) { LOG("[RED] game profile %s:%d: unknown row %s (a newer packer than this host?)", path, lineno, c[0]); bad = 1; continue; }

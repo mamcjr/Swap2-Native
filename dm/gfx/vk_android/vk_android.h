@@ -19,6 +19,9 @@ __attribute__((visibility("default"))) int nxhost_fps(float *out, int n);
 // Frame generation (Lossless Scaling's LSFG, vka_framegen.c): on / off, images per game frame (2..4), a target output rate (0 = the fixed multiplier), the optical flow's
 // resolution in % of the game's (0 = auto: 100 %), taken from the next frame. The status: 0 off, 1 generating, 2 on and not generating, -1 unavailable; buf gets the reason
 __attribute__((visibility("default"))) void nxhost_framegen_set(int on, int multiplier, int target_rate, int flow_pct);
+// The shader set: 1 quality (lsfg-vk's v3.1: more channels, about four times the GPU time and a fifth more working memory: Donkey Kong Bananza at 1080p, flow 50 %, on Turnip 8.5 against 1.9 ms, 28.7 against 24.1 MiB), 0 performance (the default). Without the quality set in the
+// DLL, performance (the status says so). Taken from the next frame (the chain is made again)
+__attribute__((visibility("default"))) void nxhost_framegen_quality(int quality);
 __attribute__((visibility("default"))) int nxhost_framegen_status(char *buf, int n);
 // Where the letterboxed picture sits in the window's free space, never scaled or cropped: x 0 = left, 1 = right; y 0 = top, 1 = bottom (as the user sees it); 0.5 = centred,
 // the default. Taken from the next present; values outside 0..1 are clamped

@@ -278,7 +278,7 @@ int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, VkFormat sfmt, vka_img *dst,
     // The output: dst itself when the whole of it is written and it can be a storage image, else an image of its format copied into the rectangle. An sRGB output (enc:
     // stored as its UNORM twin, and a storage image cannot encode) takes FSR's linear result from an RGBA16F image through the stand-in's encoding copy (vka_dlss_scale)
     VkFormatProperties fp; vk.vkGetPhysicalDeviceFormatProperties(V.pd, dst->f.vk, &fp);
-    if (enc ? !vka_dlss_ready() : !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) { VRED_ONCE("FSR 3.1: output format %d is not a storage format (or no encoding copy for sRGB)", dst->f.vk); return 0; }
+    if (!vka_dlss_ready() || (!enc && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))) { VRED_ONCE("FSR 3.1: output format %d is not a storage format (or no copy pass)", dst->f.vk); return 0; }
     const VkFormat out_fmt = enc ? VK_FORMAT_R16G16B16A16_SFLOAT : dst->f.vk;
     // DM_VK_FSR3_OUT_W / _H: FSR scales to that size, and a linear blit takes it to the game's output rectangle. With the native 4:3 pack the
     // 1920x1080 frame is shown at 1280x960 on a 4:3 handheld's panel: 1280x960 saves 1.1 ms, but the blit and the present resize twice and the panel showed about half the
@@ -290,8 +290,8 @@ int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, VkFormat sfmt, vka_img *dst,
         if (fw >= (int)rw && fh >= (int)rh && (uint32_t)fw <= ow && (uint32_t)fh <= oh && (enc || (fp.optimalTilingFeatures & blit) == blit)) { uw = (uint32_t)fw; uh = (uint32_t)fh; }
     }
     const int scaled = uw != ow || uh != oh;
-    int direct = !enc && !scaled && (dst->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !d->xoffset && !d->yoffset && uw == dst->w && uh == dst->h;
-    if (!direct && !(dst->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return 0;
+    int direct = !enc && !scaled && (dst->usage & VK_IMAGE_USAGE_STORAGE_BIT) && (dst->usage & VK_IMAGE_USAGE_SAMPLED_BIT) && !d->xoffset && !d->yoffset && uw == dst->w && uh == dst->h;
+    if (!(dst->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return 0;
     // The colour through the texture's own view format: an sRGB input arrives linear, as on the console (its raw UNORM values read as linear were too bright)
     VkImageView vcol = vka_view(src, sfmt ? sfmt : src->f.view ? src->f.view : src->f.vk, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1, NULL);
     VkImageView vdep = vka_view(depth, depth->f.vk, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1, NULL);
@@ -393,20 +393,11 @@ int vka_dlss_fsr3(VkCommandBuffer cb, vka_img *src, VkFormat sfmt, vka_img *dst,
       pass(cb, sharpen ? P_ACCS : P_ACC, v, dc(uw, 8), dc(uh, 8), off); }
     if (sharpen) { VkImageView v[] = {exposure, R->up[q].view, vout}; pass(cb, P_RCAS, v, dc(uw, 16), dc(uh, 16), off); }
 #undef MIP
-    if (enc) {
-        vka_barrier(cb);
-        if (!vka_dlss_scale(cb, R->out.view, 0, 0, (int)uw, (int)uh, uw, uh, dst, 0, d->xoffset, d->yoffset, (int)ow, (int)oh, 1)) { F.parity = q; return 0; }
-    } else if (!direct) {
-        VkImageSubresourceLayers l = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        vka_barrier(cb);
-        if (scaled) {
-            VkImageBlit b = {l, {{0, 0, 0}, {(int32_t)uw, (int32_t)uh, 1}}, l, {{d->xoffset, d->yoffset, 0}, {d->xoffset + (int32_t)ow, d->yoffset + (int32_t)oh, 1}}};
-            vk.vkCmdBlitImage(cb, R->out.img, VK_IMAGE_LAYOUT_GENERAL, dst->img, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
-        } else {
-            VkImageCopy region = {l, {0, 0, 0}, l, {d->xoffset, d->yoffset, 0}, {uw, uh, 1}};
-            vk.vkCmdCopyImage(cb, R->out.img, VK_IMAGE_LAYOUT_GENERAL, dst->img, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
-        }
-    }
+    // Copy FSR 3.1's upscaled RGB into dst while preserving the input colour's alpha (sampled bilinearly with the frame's jitter, as GSR2/FSR 1 RCAS does)
+    vka_barrier(cb);
+    if (!vka_dlss_scale_alpha(cb, direct ? vout : R->out.view, 0, 0, (int)uw, (int)uh, uw, uh,
+                              vcol, k.jitter[0], k.jitter[1], (int)rw, (int)rh, rw, rh,
+                              dst, 0, d->xoffset, d->yoffset, (int)ow, (int)oh, enc)) { F.parity = q; return 0; }
     vka_barrier(cb);
     F.parity = q;
     static int noted; if (!noted++) VLOG("DLSS replaced by FSR 3.1: %ux%u -> %ux%u%s, sharpening %s", rw, rh, uw, uh, enc ? " (then sRGB-encoded into the output)" : scaled ? " (then a linear blit to the output)" : "", sharpen ? "on" : "off");

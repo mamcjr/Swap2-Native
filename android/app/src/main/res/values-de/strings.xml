@@ -55,6 +55,8 @@
     <string name="s2_play_prewarm_n">%1$d Pipelines werden vorgewärmt…</string>
     <string name="s2_play_scene">Texturen und erste Szene werden geladen…</string>
     <string name="s2_play_ready">Bereit</string>
+    <string name="s2_play_compiling">Shader werden kompiliert: %1$d von %2$d, noch etwa %3$d s · Tippen zum Überspringen</string>
+    <string name="s2_play_compiling_n">Shader werden kompiliert: %1$d von %2$d · Tippen zum Überspringen</string>
     <string name="s2_game_settings">Spieleinstellungen</string>
     <string name="s2_this_game">NUR DIESES SPIEL</string>
     <string name="s2_game_settings_intro">Änderungen gelten ab dem nächsten Start. „Standard“ folgt den allgemeinen Einstellungen.</string>
@@ -307,7 +309,7 @@
     <string name="s2_resolution_note">Die Größe, in der das Spiel rendert.</string>
     <string name="s2_frame_cap_note">Die maximale Anzahl Bilder pro Sekunde, die dieses Spiel darstellt.</string>
     <string name="s2_frame_cap_own">Dieses Spiel wählt seine Bildrate selbst</string>
-    <string name="s2_game_graphics_hint">FSR-Hochskalierung und Bildgenerierung sind allgemeine Einstellungen (Einstellungen › Leistung) und die des Spielmenüs.</string>
+    <string name="s2_game_graphics_hint">Die Bildgenerierung ist eine allgemeine Einstellung (Einstellungen › Leistung) und eine des Spielmenüs.</string>
     <string name="s2_upscaler">Hochskalierer</string>
     <string name="s2_upscaler_net">Das neuronale Netz des Spiels (NDSR)</string>
     <string name="s2_upscaler_fsr">FSR 1 (schneller)</string>
@@ -726,8 +728,8 @@
     <string name="s2_gfx_on">An</string>
     <string name="s2_gfx_inherit">Globalen Einstellungen / Spielprofil folgen</string>
     <string name="s2_gfx_scaling_note">Skaliert das Bild auf den Bildschirm und ersetzt unterstützte neuronale Hochskalierer. „Nativ“ behält das Netz des Spiels.</string>
-    <string name="s2_gfx_sharp">FSR-Ausgabeschärfe</string>
-    <string name="s2_gfx_sharp_note">Nachschärfen, wenn das fertige Bild auf den Bildschirm vergrößert wird.</string>
+    <string name="s2_gfx_sharp">Schärfe</string>
+    <string name="s2_gfx_sharp_note">Wie stark der Hochskalierer das vergrößerte Bild schärft.</string>
     <string name="s2_gfx_async">Pipelines im Hintergrund</string>
     <string name="s2_gfx_async_note">Gilt ab dem nächsten Start. Kompiliert im Hintergrund und wartet bei Bedarf, damit Effekte erhalten bleiben.</string>
     <string name="s2_gfx_timing">GPU-Timing</string>
@@ -805,4 +807,22 @@
     <string name="s2_warm_play_now">Jetzt spielen</string>
     <string name="s2_warm_stop">Anhalten</string>
     <string name="s2_warm_close">Schließen</string>
+    <string name="s2_sec_image">Bild</string>
+    <string name="s2_sec_frames">Bilder</string>
+    <string name="s2_sec_scene">Szene</string>
+    <string name="s2_up_original">Original (die des Spiels)</string>
+    <string name="s2_up_note">FSR 1 ist am sparsamsten. SGSR 2 und FSR 3.1 rekonstruieren Details aus früheren Bildern in Spielen mit DLSS (SGSR 2 auch in Ocarina of Time); sonst wirken sie wie FSR 1. Wirkt sofort.</string>
+    <string name="s2_up_level">Hochskalierungsstufe</string>
+    <string name="s2_up_quality">Qualität (1080p)</string>
+    <string name="s2_up_balanced">Ausgewogen (720p)</string>
+    <string name="s2_up_performance">Leistung (540p)</string>
+    <string name="s2_up_level_note">Die Auflösung, in der das Spiel vor dem Hochskalieren rendert: niedriger ist schneller. Ab dem nächsten Start.</string>
+    <string name="s2_gfx_foliage">Gras und Pflanzen</string>
+    <string name="s2_gfx_foliage_high">Hoch (wie das Spiel sie zeichnet)</string>
+    <string name="s2_gfx_foliage_medium">Mittel (halbes Gras)</string>
+    <string name="s2_gfx_foliage_low">Niedrig (kein Gras, halbe Pflanzen)</string>
+    <string name="s2_gfx_foliage_none">Keine</string>
+    <string name="s2_gfx_foliage_note">Weniger Gras und Vegetation für mehr Bilder pro Sekunde auf Feldern und in Wäldern. Wirkt sofort.</string>
+    <string name="s2_gfx_effect_volume_fog">Nebel</string>
+    <string name="s2_gfx_effect_note">Aus: Der Effekt wird nicht gezeichnet, für mehr Bilder pro Sekunde. Wirkt sofort.</string>
 </resources>

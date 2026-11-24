@@ -136,12 +136,18 @@ def header(g):
     if rcd not in ('on', 'off'): sys.exit(f'{g.id}: render_cond must be on or off: {rcd}')
     tfu = g.get('tex_flush_upload', 'off')   # textures written by the CPU into a pool and published with nvnMemoryPoolFlushMappedRange are uploaded like packaged ones (hle_nvn.c): on / off
     if tfu not in ('on', 'off'): sys.exit(f'{g.id}: tex_flush_upload must be on or off: {tfu}')
+    stage_copy = g.get('tex_copy_staging', '')
+    sc = re.fullmatch(r'([0-9a-f]{32}):(0x[0-9a-f]+)', stage_copy) if stage_copy else None
+    if stage_copy and (not sc or not 0 < int(sc[2], 16) <= 0x7ffffffc or int(sc[2], 16) % 4):
+        sys.exit(f'{g.id}: tex_copy_staging takes a main build ID and an aligned return address offset: {stage_copy}')
     tdu = g.get('tex_dirty_upload', 'off')   # with tex_flush_upload: a registered texture the CPU writes after init without any flush is uploaded too (dirty pages, hle_nvn.c nvn_ft_written): on / off
     if tdu not in ('on', 'off') or (tdu == 'on' and tfu != 'on'): sys.exit(f'{g.id}: tex_dirty_upload must be on or off, and needs tex_flush_upload on: {tdu}')
     tds = g.get('tex_dyn_slots', 'off')   # shaders whose texture handle the translator could not trace to one slot: slot indices in c2, the bound slots in the fallback arrays (nvn_mtl.m): on / off
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
+    tenv = ' '.join(g.get('turnip_env', '').split())   # Android, a custom (Mesa) driver: Mesa's own variables for this game (vka_driver.c turnip_env; the environment's win): NAME=value ...
+    if any(not re.fullmatch(r'(TU|FD|IR3|MESA)_[A-Z0-9_]+=[A-Za-z0-9_,.:+=-]+', w) for w in tenv.split()) or len(tenv) > 200: sys.exit(f'{g.id}: turnip_env takes NAME=value words of Mesa variables (TU_, FD_, IR3_, MESA_), 200 characters at most: {tenv}')
     mml = g.get('mem_map_limit', 'on')   # Horizon application-pool accounting; explicit off remains supported.
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
     cm, ic = g.get('core_mask', '0x7'), g.get('ideal_core', '0')   # the NPDM's cores (ThreadInfo min..max core; META +0xf): hle_svc.c GetInfo(CoreMask), hle_thread.c ideal core -2; 0x7 / 0 = a Switch 1 application
@@ -229,12 +235,15 @@ def header(g):
          f'#define DM_GAME_OPMODE {int(om == "console")}',
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
          f'#define DM_GAME_TEX_FLUSH_UPLOAD {int(tfu == "on")}',
+         f'#define DM_GAME_TEX_COPY_STAGING_BUILD "{sc[1] if sc else ""}"',
+         f'#define DM_GAME_TEX_COPY_STAGING_PC {sc[2] if sc else 0}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
          f'#define DM_GAME_RENDER_COND {int(rcd == "on")}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
+         f'#define DM_GAME_TURNIP_ENV {q(tenv)}',
          '#define DM_GAME_WINDOW_FN {' + (', '.join(wfn) or '{"", 0, 0, 0, 0}') + '}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
@@ -244,6 +253,9 @@ def header(g):
 
 
 RUNTIME_LISTS = {'MODULES': 'MODULE', 'DISPLAY_VERSIONS': 'DISPLAY_VERSION', 'WINDOW_FN': 'WINDOW_FN', 'RES_LEVELS': 'RES_LEVELS'}
+# Constants the one host for every game does not read yet (dm/host/rt/game_rt.c stops at a row it does not know): tex_copy_staging's (hle_nvn.c keeps it to the hosts built
+# for one game until rt/game_profile.h reads it and the Vulkan replay copies a staged upload's bytes, DM_COPY_SNAPSHOT)
+RUNTIME_NOT_READ = ('TEX_COPY_STAGING_BUILD', 'TEX_COPY_STAGING_PC')
 _Q = r'"((?:[^"\\]|\\.)*)"'   # a C string literal as header() writes it
 
 
@@ -260,6 +272,7 @@ def runtime(g):
         if not m: continue
         name, v = m[1], m[2]
         if name in ('NMOD', 'NWINDOW_FN', 'NRES_LEVELS'): continue
+        if name in RUNTIME_NOT_READ: continue
         if name in RUNTIME_LISTS:
             if name == 'MODULES': rows = [[unq(s)] for s in re.findall(_Q, v)]
             elif name == 'DISPLAY_VERSIONS': rows = [[unq(a), unq(b)] for a, b in re.findall(r'\{' + _Q + ', ' + _Q + r'\}', v)]

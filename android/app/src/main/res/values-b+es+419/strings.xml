@@ -56,6 +56,8 @@
     <string name="s2_play_prewarm_n">Precargando %1$d pipelines…</string>
     <string name="s2_play_scene">Cargando las texturas y la primera escena…</string>
     <string name="s2_play_ready">Listo</string>
+    <string name="s2_play_compiling">Compilando shaders: %1$d de %2$d, faltan unos %3$d s · Toca para omitir</string>
+    <string name="s2_play_compiling_n">Compilando shaders: %1$d de %2$d · Toca para omitir</string>
     <string name="s2_game_settings">Configuración del juego</string>
     <string name="s2_this_game">SOLO ESTE JUEGO</string>
     <string name="s2_game_settings_intro">Los cambios se aplican en el próximo inicio. Predeterminado sigue los ajustes generales.</string>
@@ -311,7 +313,7 @@
     <string name="s2_resolution_note">El tamaño al que renderiza el juego.</string>
     <string name="s2_frame_cap_note">El máximo de fotogramas por segundo que dibuja este juego.</string>
     <string name="s2_frame_cap_own">Este juego elige su propia velocidad de fotogramas</string>
-    <string name="s2_game_graphics_hint">El escalado FSR y la generación de fotogramas son ajustes generales (Configuración › Rendimiento) y del panel del juego.</string>
+    <string name="s2_game_graphics_hint">La generación de fotogramas es un ajuste general (Configuración › Rendimiento) y del panel del juego.</string>
     <string name="s2_upscaler">Escalador</string>
     <string name="s2_upscaler_net">La red neuronal del juego (NDSR)</string>
     <string name="s2_upscaler_fsr">FSR 1 (más rápido)</string>
@@ -731,8 +733,8 @@
     <string name="s2_gfx_on">Activado</string>
     <string name="s2_gfx_inherit">Seguir los ajustes globales / el perfil del juego</string>
     <string name="s2_gfx_scaling_note">Escala la imagen a la pantalla y reemplaza los escaladores neuronales compatibles. Nativo mantiene la red del juego.</string>
-    <string name="s2_gfx_sharp">Nitidez de salida de FSR</string>
-    <string name="s2_gfx_sharp_note">Enfoque cuando la imagen final se amplía a la pantalla.</string>
+    <string name="s2_gfx_sharp">Nitidez</string>
+    <string name="s2_gfx_sharp_note">Cuánto realza el escalador la imagen ampliada.</string>
     <string name="s2_gfx_async">Pipelines en segundo plano</string>
     <string name="s2_gfx_async_note">Se aplica en el próximo inicio. Compila en segundo plano y espera cuando hace falta para conservar los efectos.</string>
     <string name="s2_gfx_timing">Temporización de la GPU</string>
@@ -810,4 +812,22 @@
     <string name="s2_warm_play_now">Jugar ahora</string>
     <string name="s2_warm_stop">Detener</string>
     <string name="s2_warm_close">Cerrar</string>
+    <string name="s2_sec_image">Imagen</string>
+    <string name="s2_sec_frames">Fotogramas</string>
+    <string name="s2_sec_scene">Escena</string>
+    <string name="s2_up_original">Original (el del juego)</string>
+    <string name="s2_up_note">FSR 1 es el más liviano. SGSR 2 y FSR 3.1 reconstruyen el detalle a partir de fotogramas anteriores en los juegos con DLSS (SGSR 2 también en Ocarina of Time); en los demás funcionan como FSR 1. Se aplica al instante.</string>
+    <string name="s2_up_level">Nivel del escalador</string>
+    <string name="s2_up_quality">Calidad (1080p)</string>
+    <string name="s2_up_balanced">Balanceado (720p)</string>
+    <string name="s2_up_performance">Rendimiento (540p)</string>
+    <string name="s2_up_level_note">La resolución a la que el juego renderiza antes del escalador: cuanto menor, más rápido. Desde el próximo inicio.</string>
+    <string name="s2_gfx_foliage">Pasto y plantas</string>
+    <string name="s2_gfx_foliage_high">Alto (como lo dibuja el juego)</string>
+    <string name="s2_gfx_foliage_medium">Medio (la mitad del pasto)</string>
+    <string name="s2_gfx_foliage_low">Bajo (sin pasto, la mitad de las plantas)</string>
+    <string name="s2_gfx_foliage_none">Ninguno</string>
+    <string name="s2_gfx_foliage_note">Menos pasto y vegetación para más fotogramas por segundo en campos y bosques. Se aplica al instante.</string>
+    <string name="s2_gfx_effect_volume_fog">Niebla</string>
+    <string name="s2_gfx_effect_note">Desactivado: el efecto no se dibuja, para más fotogramas por segundo. Se aplica al instante.</string>
 </resources>

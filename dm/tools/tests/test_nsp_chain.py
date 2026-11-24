@@ -79,16 +79,23 @@ class Tables(Base):
         self.ran = []
         cm = mock.patch.object(nsp, 'run', lambda cmd, log, env=None: self.ran.append(Path(cmd[1]).name)); cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
-    def tables(self, c1, cb):   # each a header line's "b-<chain> inputs <digest>" part (or any text), None for a missing table
+    def tables(self, c1, cb, suffix=''):   # each a header line's "b-<chain> inputs <digest>" part (or any text), None for a missing table; suffix: an older table's clock time
         for n, head in (('c1_full.tsv', c1), ('cb_extent.tsv', cb)):
-            if head: (self.tmp / n).write_text(f'# chain {head} 2026-10-23T00:00:00+00:00\n')
+            if head: (self.tmp / n).write_text(f'# chain {head}{suffix}\n')
         return nsp.chain_tables(sys.executable, REPO, self.sh, {}, self.tmp / 'logs', self.g, self.CHAIN)
 
     def current(self): return f'b-{self.CHAIN} inputs {self.INPUTS}'
 
-    def test_current_kept(self):
-        self.assertTrue(self.tables(self.current(), self.current()))
-        self.assertEqual(self.ran, []); self.assertEqual(self.said, [])
+    def test_current_kept(self):   # the header alone (upstream 410f0c9e) or followed by the clock time older tables carry
+        for suffix in ('', ' 2026-10-23T00:00:00+00:00'):
+            with self.subTest(suffix=suffix):
+                self.ran.clear(); self.said.clear()
+                self.assertTrue(self.tables(self.current(), self.current(), suffix=suffix))
+                self.assertEqual(self.ran, []); self.assertEqual(self.said, [])
+
+    def test_longer_inputs_prefix_made_again(self):   # exact match or a space after it: a digest with more characters does not match
+        self.assertTrue(self.tables(self.current() + '0', self.current()))
+        self.assertEqual(self.ran, ['c1_guard.py'])
 
     def test_other_inputs_made_again(self):   # the profile's tables changed and a full build stamped the library again
         self.assertTrue(self.tables(self.current(), f'b-{self.CHAIN} inputs bbbbbbbbbbbb'))
@@ -133,6 +140,56 @@ class TableTools(unittest.TestCase):
                 r = subprocess.run([sys.executable, REPO / 'dm/gfx/tools' / tool, lib, lib.parent / table], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((lib.parent / 'c1_full.tsv').read_text().splitlines()[1:], [key])   # the shader itself is still checked
+
+    def test_unchanged_tables_keep_their_bytes_and_new_ones_carry_no_clock_time(self):   # every full shader build rewrote both with the time in the header (upstream 410f0c9e)
+        lib = Path(tempfile.mkdtemp()) / 'b-0123456789ab'; lib.mkdir(); self.addCleanup(shutil.rmtree, lib.parent)
+        (lib / 'inputs.tsv').write_text('game\tfixture\ninputs\taaaaaaaaaaaa\n')
+        key = '00112233aabbccdd'
+        (lib / f'{key}_b.metal').write_text('fragment float4 main0(constant cb& fp_c1) { int _5 = in.v; return (fp_c1)._m0[_5]; }\n')
+        (lib / f'{key}_b.json').write_text(json.dumps({'bindings': [{'kind': 'cbuf', 'reg': 0, 'msl_name': 'fp_c1'}]}))
+        for tool, table in (('c1_guard.py', 'c1_full.tsv'), ('cb_extent.py', 'cb_extent.tsv')):
+            with self.subTest(tool=tool):
+                path = lib.parent / table
+                def run(tool=tool, path=path):
+                    r = subprocess.run([sys.executable, REPO / 'dm/gfx/tools' / tool, lib, path], capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                run(); made = path.read_bytes()
+                self.assertEqual(made.splitlines()[0], b'# chain b-0123456789ab inputs aaaaaaaaaaaa')
+                os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+                run(); self.assertEqual(path.read_bytes(), made); self.assertEqual(path.stat().st_mtime_ns, 1_000_000_000)   # identical: bytes and mtime untouched
+                older = made.replace(b'aaaaaaaaaaaa\n', b'aaaaaaaaaaaa 2026-11-01T21:36:26+00:00\n', 1)   # an older header with the time: written once more without it
+                path.write_bytes(older); run(); self.assertEqual(path.read_bytes(), made)
+                path.write_bytes(made + b'stale row\n'); run(); self.assertEqual(path.read_bytes(), made)   # other rows: written again
+                path.write_bytes(made.replace(b'aaaaaaaaaaaa', b'bbbbbbbbbbbb', 1)); run(); self.assertEqual(path.read_bytes(), made)   # another library's inputs: written again
+
+
+class XlateInputs(unittest.TestCase):   # the lock's xlate_inputs row: the translator's sources with the vendored Ryujinx (upstream nxnative f856c78d, as a lock row here)
+    def setUp(self):
+        sys.path.insert(0, str(REPO / 'dm/gfx/tools')); self.addCleanup(sys.path.remove, str(REPO / 'dm/gfx/tools'))
+        import dmsh_chain
+        self.chain = dmsh_chain
+
+    def test_lock_names_this_tree(self):   # a Ryujinx source changed without the translator rebuilt and the lock updated
+        lock = dict(l.rstrip('\n').split('\t', 1) for l in open(self.chain.LOCK) if '\t' in l and not l.startswith('#'))
+        self.assertEqual(lock.get('xlate_inputs'), self.chain.xlate_inputs_sha(), 'translator sources changed: rebuild dmsh_xlate, update dmsh_chain.lock, then dmsh_chain.py --header')
+
+    def test_covers_the_vendored_sources(self):
+        files = {os.path.relpath(p, REPO / 'dm').replace(os.sep, '/') for p in self.chain.xlate_source_files()}
+        for f in ('gfx/tools/dmsh_xlate/Program.cs', 'gfx/tools/dmsh_xlate/dmsh_xlate.csproj', 'third_party/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs',
+                  'third_party/ryujinx/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs', 'third_party/ryujinx/Directory.Build.props'):
+            self.assertIn(f, files)
+        with tempfile.TemporaryDirectory(prefix='xlate_sha_') as tmp:
+            dm = Path(tmp) / 'dm'; gfx = dm / 'gfx'
+            (gfx / 'tools/dmsh_xlate').mkdir(parents=True)
+            (gfx / 'tools/dmsh_xlate/Program.cs').write_text('// a\n'); (gfx / 'tools/dmsh_xlate/dmsh_xlate.csproj').write_text('<Project />\n')
+            ryu = dm / 'third_party/ryujinx/src/Ryujinx.Graphics.Shader'; ryu.mkdir(parents=True)
+            spv = ryu / 'SpirvGenerator.cs'; spv.write_text('class SpirvGenerator {}\n')
+            base = self.chain.xlate_inputs_sha(gfx)
+            (dm / 'third_party/ryujinx/README.md').write_text('ignored\n')   # not compiled
+            for d in ('obj', 'bin'): (ryu / d).mkdir(); (ryu / d / 'generated.cs').write_text('ignored\n')   # build outputs
+            self.assertEqual(self.chain.xlate_inputs_sha(gfx), base)
+            spv.write_text('class SpirvGenerator { /* edited */ }\n')
+            self.assertNotEqual(self.chain.xlate_inputs_sha(gfx), base)
 
 
 if __name__ == '__main__':

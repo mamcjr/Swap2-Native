@@ -122,13 +122,12 @@ dm/host/tests/t_audio_device.c	bugprone-assert-side-effect	1
 dm/host/tests/t_audio_spsc.c	clang-analyzer-core.StackAddressEscape	1
 dm/host/tests/t_audio_spsc.c	clang-analyzer-unix.Malloc	4
 dm/host/tests/t_fpslock.c	clang-analyzer-core.NullDereference	1
-dm/host/tests/t_fs.c	bugprone-command-processor	2
 dm/host/tests/t_fs_case.c	clang-analyzer-core.CallAndMessage	2
 dm/host/tests/t_fs_case.c	clang-analyzer-unix.Stream	1
 dm/host/tests/t_hid.c	bugprone-suspicious-memory-comparison	2
 dm/host/tests/t_hid.c	bugprone-unsafe-functions	1
 dm/host/tests/t_hid.c	clang-analyzer-unix.Errno	1
-dm/host/tests/t_movie_vpx.c	clang-analyzer-core.UndefinedBinaryOperatorResult	2
+dm/host/tests/t_movie_vpx.c	clang-analyzer-core.UndefinedBinaryOperatorResult	1
 dm/host/tests/t_nro.c	bugprone-unsafe-functions	1
 dm/host/tests/t_oe.c	bugprone-signal-handler	1
 dm/host/tests/t_preempt.c	clang-analyzer-nullability.NullableDereferenced	1

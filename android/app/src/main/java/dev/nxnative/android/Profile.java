@@ -29,6 +29,9 @@ final class Profile {
     String ndsr = "";    // agl's NDSR networks (build.gradle ndsrOf): the FSR stand-in's input encoding (profile ndsr_input: sqrt or linear) when the shader map has them, else ""
     String fpsHold = "";   // the frame hold (build.gradle fpsHoldOf): the profile's fps_hold row, "on" / "off", or "" (the pack's own); the launcher passes it as DM_FPS_HOLD
     String foliage = "";   // the Ground foliage (build.gradle foliageOf): "<level>=<keys, ','>|…" from foliage_off rows, or "" (not offered)
+    String grass = "";   // the Foliage option's grass programs (build.gradle meshKeysOf): the grass_mesh rows' mesh program keys, '+' between them, or ""
+    String plants = "";   // and its other vegetation: the plant_mesh rows' keys, or "" (the option is offered when either is set)
+    String effects = "";   // the effects Advanced graphics may turn off (build.gradle effectsOf): "<name>:<dispatch|draw>:<keys, ','>|…" from graphics_off rows, or ""
     String release = "";   // the first release date (build.gradle releaseOf): the profile's release row, "YYYY-MM-DD", or "" (none: the library's sort by release date puts it last)
     String scene = "";   // the Scene resolution (build.gradle sceneOf): "<scale>/<expected original scales, ','>[/<label>=<scale>|…]" from scene_scale_palette and scene_preset, or "" (not offered)
 
@@ -169,6 +172,9 @@ final class Profile {
             p.foliage = c.length > 13 ? c[13] : "";
             p.fpsHold = c.length > 14 ? c[14] : "";
             p.release = c.length > 15 && c[15].matches("[0-9]{4}-[0-9]{2}-[0-9]{2}") ? c[15] : "";
+            p.grass = c.length > 16 && c[16].matches("[0-9a-f]{16}(\\+[0-9a-f]{16})*") ? c[16] : "";
+            p.plants = c.length > 17 && c[17].matches("[0-9a-f]{16}(\\+[0-9a-f]{16})*") ? c[17] : "";
+            p.effects = c.length > 18 && c[18].matches(EFFECTS) ? c[18] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);
@@ -221,7 +227,7 @@ final class Profile {
                 }
             } catch (IOException e) { continue; }
             String name = d.getName(), ndsrInput = "linear", scene = "", upscaler = "", fpsHold = "", release = "";
-            List<String> presets = new ArrayList<>(), foliage = new ArrayList<>();
+            List<String> presets = new ArrayList<>(), foliage = new ArrayList<>(), grass = new ArrayList<>(), plants = new ArrayList<>(), effects = new ArrayList<>();
             List<String> builds = new ArrayList<>(), scale = new ArrayList<>();
             boolean window = false;
             for (String[] c : rows) {
@@ -233,6 +239,9 @@ final class Profile {
                 if (c[0].equals("fps_hold") && c.length > 1 && (c[1].equals("on") || c[1].equals("off"))) fpsHold = c[1];
                 if (c[0].equals("foliage_off") && c.length > 2 && c[1].matches("[A-Za-z0-9_]+") && c[2].matches("[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*"))
                     foliage.add(c[1] + "=" + c[2]);
+                if (c[0].equals("grass_mesh") || c[0].equals("plant_mesh"))
+                    for (int i = 1; i < c.length; i++) for (String k : c[i].trim().split("\\s+")) if (k.matches("[0-9a-f]{16}")) (c[0].equals("grass_mesh") ? grass : plants).add(k);
+                if (c[0].equals("graphics_off") && c.length > 3 && (c[1] + ":" + c[2] + ":" + c[3]).matches(EFFECT)) effects.add(c[1] + ":" + c[2] + ":" + c[3]);
                 if (c[0].equals("name") && c.length > 1) name = c[1].replaceAll("[\\t\\n\\\\\"]", " ");
                 else if (c[0].equals("build") && c.length > 3) {
                     java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\d+").matcher(c[1]);
@@ -254,12 +263,18 @@ final class Profile {
             p.scene = scene.isEmpty() || presets.isEmpty() ? scene : scene + "/" + String.join("|", presets);
             p.upscaler = upscaler;
             p.foliage = String.join("|", foliage);
+            p.grass = String.join("+", grass);
+            p.plants = String.join("+", plants);
+            p.effects = String.join("|", effects);
             p.fpsHold = fpsHold;
             p.release = release;
             out.add(p);
         }
         return out;
     }
+
+    /** One effect of Profile.effects, and the whole column */
+    static final String EFFECT = "[a-z0-9_]+:(dispatch|draw):[0-9a-f]{16}(,[0-9a-f]{16})*", EFFECTS = EFFECT + "(\\|" + EFFECT + ")*";
 
     /** This APK's profile of a title ID, null when it has none */
     static Profile of(String titleId) {

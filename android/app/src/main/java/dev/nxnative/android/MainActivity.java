@@ -835,16 +835,26 @@ public final class MainActivity extends Activity {
         overlayRow = new Ui.Setting(this, R.drawable.s2_ic_display, this.getString(R.string.s2_overlay), v -> overlayItems())
                 .toggle(this, Prefs.overlay(this), (b, on) -> { Prefs.overlay(this, on); refreshSettings(); });
         play.addView(overlayRow.view);
+        Runnable again = () -> openSettings("performance");
+        // Image: Upscaler, then its level (Game resolution offered as Quality, Balanced, Performance while an upscaler is chosen) or Game resolution, sharpness, Fit or Stretch
+        Ui.add(p, Ui.section(this, getString(R.string.s2_sec_image)), 24);
+        LinearLayout image = Ui.add(p, Ui.panel(this), 8);
+        View level = GameGraphics.levelRow(this, null, again);
         resRow = new Ui.Setting(this, R.drawable.s2_ic_display, this.getString(R.string.s2_resolution), v -> gameRes()).chevron(this);
-        play.addView(resRow.view);
         if (!Profile.anyResolution()) resRow.view.setVisibility(View.GONE);   // no game of this APK has a window_fn or graphics_scale lever: the default would do nothing
+        GameGraphics.imageRows(this, null, image, level != null ? level : resRow.view, again, false);
+        // Frames: the frame rate cap and frame generation
+        Ui.add(p, Ui.section(this, getString(R.string.s2_sec_frames)), 24);
+        LinearLayout frames = Ui.add(p, Ui.panel(this), 8);
         capRow = new Ui.Setting(this, R.drawable.s2_ic_gauge, this.getString(R.string.s2_frame_cap), v -> fpsCap()).chevron(this);
-        play.addView(capRow.view);
+        frames.addView(capRow.view);
         lsfgRow = new Ui.Setting(this, R.drawable.s2_ic_sun, this.getString(R.string.s2_frame_generation), v -> frameGen()).chevron(this);
-        play.addView(lsfgRow.view);
-        Ui.add(p, Ui.section(this, getString(R.string.s2_cat_graphics)), 24);
-        LinearLayout up = Ui.add(p, Ui.panel(this), 8);
-        GameGraphics.rows(this, null, up, () -> openSettings("performance"), false);
+        frames.addView(lsfgRow.view);
+        // Scene: what the games draw (Mesh geometry, Grass and plants, the effects that can be turned off), then Advanced
+        Ui.add(p, Ui.section(this, getString(R.string.s2_sec_scene)), 24);
+        GameGraphics.sceneRows(this, null, Ui.add(p, Ui.panel(this), 8), again, false);
+        Ui.add(p, Ui.section(this, getString(R.string.s2_advanced)), 24);
+        GameGraphics.advancedRows(this, null, Ui.add(p, Ui.panel(this), 8), again);
         Ui.add(p, Ui.small(this, getString(R.string.s2_defaults_hint)), 8);
     }
 

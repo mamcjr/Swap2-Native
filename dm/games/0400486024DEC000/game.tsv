@@ -31,12 +31,18 @@ zip_store	.zs:.bwav:.webm:.metallib
 # (mem_reserve 0x2d0000000, mem_alias 0x2a0000000) stops the boot at SetHeapSize (OOM: req 0x18ce00000 > cap 0x10000000; 2026-11-06)
 mem_reserve	0x468000000
 mem_alias	0x200000000
+# Upstream nxnative f7ae8a3a (#3103) also moved to an 8 GiB alias region: at 4 GiB the Chamber of Sages transition finds no gap for a 50.03 MiB address region (SDK 22.2.8
+# returns 0x1803) and the game shows a white frame. This layout has had 8 GiB since the restart; mem_map_limit is on by default (dm/games/README.md)
 # Old installed runtime layouts eligible for the build-gated Android metadata migration (reserve, alias).
 android_memory_update	0x380000000 0x120000000
 mem_stack	0x10000000
 app_pool	0x240000000
 # The packed version's NPDM's (pack_android.py takes it from the NPDM; this is the value for update 131072)
 sys_resource	0x3000000
+# Banana Native #524 (Android, devices of 12 GB or less): pools of 64 MiB or more placed in parts and the texture cache at most 1280 MiB; no low_ram_app_pool_mb, as main
+# sizes SetHeapSize as TotalMemorySize - 2.80 GiB and needs the 9216 MiB total for its 6.20 GiB heap. This fork's host has neither key yet (as Hyrule Warriors' profile notes)
+# (upstream, not in this fork) low_ram_place_part_mb	64
+# (upstream, not in this fork) low_ram_img_cache_max_mb	1280
 # The NPDM's cores (ThreadInfo cores 0-5, main thread core 0), as on every Switch 2 application: GetInfo(CoreMask) answers them (pack_android.py takes the NPDM's)
 core_mask	0x3f
 ideal_core	0
@@ -98,3 +104,13 @@ scene_preset	360p	0.3125
 # (the game's note, Open): uncomment when a run shows the layers gone
 # foliage_off	reduced	IsEnableMoss,IsEnableStone
 # foliage_off	lowest	IsEnableMoss,IsEnableStone,IsEnableUndergrowth4,IsEnableUndergrowth8
+# The Advanced graphics Foliage option (dm/games/README.md grass_mesh): the grass's mesh programs, every pass of them (colour, shadow, depth prepass),
+# found on the phone by leaving one Foliage.Product shader family out at a time in Hyrule Field (the game's note, Foliage levels): the tall grass
+# (Foliage.Product BNSH 0x238000) and the short grass (0x216000). The trees' leaves (0x185000, 0x159000, which also draws bushes) are in neither list
+grass_mesh	3fa631a86435d3e8 a203347bb7bdbd03 a667b8bba94befa2 6311cb728285f17d
+grass_mesh	edeefae4c37b0257 3a6340a04bf09797 a934ed1af79131cc bc05374f59a92b2b
+# Advanced graphics (the Android launcher): effects the player may turn off (graphics_off <name> <dispatch | draw> <keys>; dm/games/README.md).
+# volume_fog: agl's volume_fog program (AglShader.sharcb, its 15 variants in the shader map), four compute steps a frame over a 3D froxel grid; the last writes the
+# accumulated optical depth, in-scattered light and shadow, which read as zero mean no fog, so the steps are left out and those images cleared (DM_VK_DISPATCH_OFF).
+# Hyrule Field on Turnip V39, POCO F7 Ultra, 2026-11-22: GPU 37.3 -> 35.2 ms a frame (the game's compute 7.0 -> 4.7 ms), 22.6-23.3 -> 24.2-24.4 fps; the picture clean
+graphics_off	volume_fog	dispatch	856424a0069b04f8,9e6b00b050e30801,6ad776ca0a3d72b4,bcb82bfa39eaca53,739ed28066f58ca3,6b65ea05fc1e816c,109fc917f6f88db5,2503f644249ad387,3044d7555ebdd427,f2e5a4e0899b3013,f01717f643536e86,9ed48d1011f1b48b,2445e600f3887bc2,5b2bb0924ecc403b,b78bb1280606e796

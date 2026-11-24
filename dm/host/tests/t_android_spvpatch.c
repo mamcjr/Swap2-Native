@@ -391,6 +391,28 @@ int main(void) {
         size_t on3 = 0; int ns3 = 0; e[0] = 1;
         CHECK(!vka_spv_shuffle_halves(SPV_SHX_COMP, sizeof SPV_SHX_COMP / 4, &on3, &ns3, e, sizeof e) && !e[0], "shuffles of other lanes: nothing to do");
     }
+    {   // vka_spv_exact_float: every float arithmetic result NoContraction once (the compute form of a mesh program; a depth prepass and its EQUAL colour pass)
+        const uint32_t *src = SPV_PFB_FRAG; size_t sn = sizeof SPV_PFB_FRAG / 4, on = 0; int ns = 0; char e[256];
+        static uint8_t ft[1 << 16]; memset(ft, 0, sizeof ft); int want = 0;   // float types, then the float arithmetic results the pass must decorate
+        for (size_t i = 5; i < sn; i += src[i] >> 16) {
+            uint32_t op = src[i] & 0xffff;
+            if (op == 22 && src[i + 1] < sizeof ft) ft[src[i + 1]] = 1;
+            else if ((op == 23 || op == 24) && src[i + 1] < sizeof ft && src[i + 2] < sizeof ft && ft[src[i + 2]]) ft[src[i + 1]] = 1;
+            else if ((op == 127 || op == 129 || op == 131 || op == 133 || op == 136 || op == 140 || op == 141 || (op >= 142 && op <= 146) || op == 148) && src[i + 1] < sizeof ft && ft[src[i + 1]]) want++;
+        }
+        uint32_t *x = vka_spv_exact_float(src, sn, &on, &ns, e, sizeof e);
+        CHECK(want > 0 && x && ns == want && on == sn + 3 * (size_t)want, "float results decorated: %d of %d (%s)", ns, want, e);
+        if (x) {
+            int dec = 0; for (size_t i = 5; i < on; i += x[i] >> 16) if ((x[i] & 0xffff) == 71 && (x[i] >> 16) == 3 && x[i + 2] == 42) dec++;
+            CHECK(dec >= want, "NoContraction decorations: %d for %d results", dec, want);
+            if (val) CHECK(validate(x, on, "exact float"), "valid SPIR-V");
+            size_t on2 = 0; int ns2 = 0; e[0] = 1;
+            CHECK(!vka_spv_exact_float(x, on, &on2, &ns2, e, sizeof e) && !e[0], "the rewritten module: nothing more to do");
+            free(x);
+        }
+        size_t on3 = 0; int ns3 = 0;
+        CHECK(!vka_spv_exact_float(src, 3, &on3, &ns3, e, sizeof e) && e[0], "not SPIR-V: refused with a reason");
+    }
     printf("t_android_spvpatch: %s%s\n", g_fail ? "FAILED" : "ok", val ? "" : " (no spirv-val: structure only)");
     return g_fail != 0;
 }

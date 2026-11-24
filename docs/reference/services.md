@@ -168,6 +168,22 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/host/tests/t_fs.c` section 8 makes `clonefile` fail with `ENOTSUP` (read-only mount, one front-end notice, committed save unchanged, writable again once cloning works) and deletes save folders holding a symlink to a folder outside the save (the target keeps its files).
 - **Found on:** South Park: The Fractured But Whole 1.05, whose port is [PR #662](https://github.com/seedds/nxnative/pull/662) (not yet in the games table): a development Mac run with its save folder on a Journaled HFS+ external drive.
 
+### Saves that look deleted after an update or a forced restart (Android, open)
+
+- **Symptom:** Android: after an app update every game starts with no save (Forgejo #428, Donkey Kong Bananza and others, v0.3.43), or after the game hung on a load and the phone was forced off, the game no longer sees its save, also after the player copied a backup into `Android/data/<app>/files/saves` by hand (#451, Ocarina of Time). Neither report has a log.
+- **Cause:** open. No path changed between v0.3.42 and v0.3.43 (`AppStorage`, `Users`, `hle_fs.c`, the application ID), and the in-app update keeps the app's storage. Two host and launcher paths could each produce the symptom: (1) a commit cloned the work folder into `<save>.new` and swapped it in without `fsync`, so a power loss or forced restart after the swap could leave files of the right names and sizes with their data never written (zeros or nothing): the game then reads no save; (2) when the save folder was there but the app could not write it (made or replaced outside the app, as in #506), `GameActivity.saveDir` silently played an empty folder of its own (`files/save/<id>`), so the real save looked deleted; its only trace was the log's `save folder … unusable (…), using the app's private folder`. A swap journal left part way (`<save>.pend1` / `.pend2`) also lost its `.new`: the failed commit and the next mount removed it, leaving the save half swapped.
+- **Fix:** `hle_fs.c` fsyncs every file and folder of `.new` before the swap and the save's folder after it (a failed `fsync` refuses the commit); a commit or mount with a journal left keeps `.new` (the commit first runs the recovery and refuses while the journal stays; the mount goes read-only). Ported from Banana Native eden/v0.3.50 (host part only). Banana's launcher also stops the start of a save folder it cannot list or write (`GameFile.saveLocked`, with `test_android_saf.py`); that launcher part is not in this tree. An uninstall (it deletes `Android/data/<app>` unless the player keeps the data) is not ruled out for #428.
+- **Check:** `dm/host/tests/t_fs.c` section 10 (an injected `fsync` failure, a journal left at commit and at mount). To prove a case: the game's log line `[nxlaunch] save: <path> (<how>)` with any note after it, and `ls -la` of the save folder (owners, sizes, `.new`, `.pend1`, `.pend2`).
+- **Found on:** upstream Banana Native's reports (Forgejo #428 and #451, no log): [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) (#428) and [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (#451).
+
+### Repeated save commit failures are logged once per path
+
+- **Symptom:** a save that cannot commit (a leftover `<save>.new` the app may not remove, a full storage) fills the log with the same `[RED] save commit: …` line at every retry.
+- **Cause:** each refused commit logged its failure again.
+- **Fix:** `hle_fs.c` keeps the last failure per `.new` path (`commit_err_log`): the first one is logged in full, the same failure again only at the 10th, 100th, … time (`… still failing (errno=…, N times so far)`), a different one logs the previous count first, and the next successful commit logs how many attempts failed (`commit_err_clear`). Ported from Banana Native eden/v0.3.50 (1d7e201e); the clone failure keeps this tree's storage-full hint and removes its half-made copy at once.
+- **Check:** `dm/host/tests/t_fs.c` section 9 (25 refused commits: one `cannot clear` line, one `still failing`, one `cleared after 25 failed attempts`).
+- **Found on:** upstream Banana Native (PR #506, a save folder the app could not write).
+
 ### New save folders on Android shared storage
 
 - **Symptom:** Android, save on `/sdcard` (`/storage/emulated/0/Switch2/saves/<id>`): the first commit succeeds, then `fs mkdir name …/<id>.work/0 failed errno=95` and the game's saving icon spins forever while play goes on. Only a save that does not yet have the folder (a new game) hits it.
@@ -219,6 +235,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** always close an opened stream, preserve the first write/close/rename error, and rename the temporary file only after both writing and closing succeed. Cleanup leaves the previous sync metadata in place.
 - **Found on:** static analysis reported in [issue #313](https://github.com/seedds/nxnative/issues/313#issuecomment-6543080671); reproduced without game files.
 - **Check:** `t_save_sync_metadata` injects open, write, close and rename failures into the production writer, including simultaneous write/close failures and cleanup changing `errno`. It checks descriptor closure, preservation of existing metadata, diagnostics and a successful replacement. No cloud service or gameplay validation is claimed.
+
+### A mount name used again after Unmount (add-on content, cache storage)
+
+- **Symptom:** a game that mounts several add-ons or cache storages one at a time under one name only ever sees the first one's files: Pokémon Friends shows its add-on content version error (`AocVersion_DLC02.json` not found under `AVCtitle:`), Taiko no Tatsujin: Rhythm Festival cannot read the songs in its second cache storage.
+- **Cause:** on Horizon `Unmount` releases the name and the next mount under it gets the target it names. The host's mount table was permanent and its `Unmount` a no-op, and a mount under a name in use answered success with the old target.
+- **Fix:** add-on content and cache storage mounts are releasable (`hle_fs.c` `mount_releasable` / `mount_impl`): `Unmount` marks the entry released (`host_unmount`), which no name lookup matches (`mnt_is`); the entry and any open image stay, as an open image file names its entry by index, and a later mount of the same target and mode takes the entry back, so cycling through indices does not grow the table. Another target under a releasable name still in use is refused with `PathAlreadyExists`, as on Horizon; save, RomFS and other mounts keep the permanent table and answer a repeat with success. Ported from upstream nxnative `82cad791` (with the add-on part it builds on).
+- **Found on:** upstream: Pokémon Friends (`010008C01E742000`, 1.1.5) and Taiko no Tatsujin: Rhythm Festival (`0100BCA0135A0000`, 7.0.0); no profile in this repository.
 
 ## Add-on content
 
@@ -273,6 +296,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** it waits for the event bound by `hid::BindNpadStyleSetUpdateEvent` before reading.
 - **Fix:** the host now signals it once when it is bound for a connected controller, and again when a player's controller connects or goes away.
 - **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) (SDK 8.2.0).
+
+### A game that takes no full-key controller
+
+- **Symptom:** docked (and for players 2 to 8), the game ignores the controller and the keyboard: it opens the controller applet again and again, or waits at its title.
+- **Cause:** the hid service connects a controller only in a style the game supports (`SetSupportedNpadStyleSet`), and games test the style before anything else. The host showed every whole controller on No1 to No8 as a full-key one, a style these games never asked for: Nintendo Switch Sports Resort's lobby takes Handheld and JoyDual only, so its player check found no player 1 and it opened the controller applet every frame (upstream nxnative); Pokémon: Let's Go takes Handheld, JoyLeft, JoyRight and Palma, and docked it read nothing (upstream nxnative PR #3086).
+- **Fix:** a whole controller is shown in the supported style closest to it (`pad_style` in `hle_hid.c`): full-key when supported, else a JoyDual pair (every button, both sticks, two six-axis sensors, two vibration devices), else one Joy-Con, the right one first since it has the controller's own A / B / X / Y, then the left one; a game with none of these keeps full-key, and the Handheld npad stays Handheld. As one Joy-Con, the other half's buttons count as the ones in the same place on the shown side (`single_joy_fold`: the D-pad as A / B / X / Y on a right Joy-Con, L as R, − as +, and the other way round), and the more deflected stick is that side's stick; the state's attributes name only that half. It has one six-axis sensor (a right Joy-Con's is device 1) and one vibration device, style index 6 or 7, which drives the pad's motor on that side; a full-key handle the game got before still reaches the pair, or the shown side's motor. A change of the supported styles that changes the shown style signals the connected npads' style events and stops the rumble of the old style's motors. Six-axis handles of a set of several styles take the shown style when the set holds it.
+- **Found on:** upstream nxnative: [Nintendo Switch Sports Resort](https://git.eden-emu.dev/moceure/BananaNative/src/tag/eden/v0.3.50/dm/games/04008E001F098000/README.md#motion-controls) (Handheld | JoyDual) and Pokémon: Let's Go, Eevee! (docked keyboard input checked there); neither has a profile here. Ported from Banana Native eden/v0.3.50 (bd929626); not run on Android. Here mounted and `GetVibrationDeviceInfo` still answer only for a channel with a routed output (`vib_targets`).
+- **Check:** `t_hid` (`t_joy_styles`: a JoyDual pair, a right and a left Joy-Con, their buttons, sticks, attributes, sensors and vibration handles, the style events, handheld mode and a game with none of these styles).
 
 ### Six-axis sensors
 
@@ -352,6 +383,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** `hid::GetVibrationDeviceHandles` answered 0 handles until a controller's haptics were routed. Games ask once at startup, before GameController reports the pad, and keep the answer. On Horizon the handles are computed from the npad id and style alone (libnx `_hidGetVibrationDeviceHandles`).
 - **Fix (resolved):** the handles no longer wait for a routed output: with rumble on and an output sink installed (`dm_haptics_enabled`), a connected npad style gets its two handles; `vib_send` checks for an output at each send (`hle_hid.c`). No sink, rumble off or a disconnected npad still get none, and `IsVibrationPermitted` still follows the routed outputs. `DM_RUMBLE_LOG=1` logs the handle requests and, once a second, the values sent, those with no routed output and the peak amplitude. Each input value is counted separately, including mixed batches; a mutex protects the diagnostic totals across game threads. `t_hid` covers cached startup handles delivering a nonzero value after routing, mixed-batch diagnostics and concurrent sends; `t_hid_tsan` checks those sends for data races.
 - **Found on:** [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md) (the Asian release, `010054B01AD92000`), in the log only: the game has no rumble of its own (it sends amplitude 0 throughout), so nothing could be felt before or after. Not yet checked on a game that rumbles.
+
+### JoyDual vibration handles on a whole controller
+
+- **Symptom:** no vibration on a Pro Controller, a phone's paired pad or in handheld mode although `GetVibrationDeviceHandles` returned handles and `DM_RUMBLE_LOG=1` shows nonzero values sent to `0x5` / `0x10005` (or `0x2005` / `0x12005`), each `with no output`.
+- **Cause:** `vib_valid` (`hle_hid.c`) required the handle's style to match the npad's, apart from cached FullKey handles on a Joy-Con style, so JoyDual handles (type 5) were refused on an npad that reports FullKey or Handheld. A game that builds its vibration graph once at boot from JoyDual handles for every npad had every send dropped.
+- **Fix:** `vib_valid` accepts JoyDual handles on an npad reporting FullKey or Handheld, device 0 on the left motor and device 1 on the right; single-Joy-Con exposure is unchanged. Ported from upstream nxnative `37512993`.
+- **Found on:** upstream: Metroid Prime 4: Beyond 1.1.0 (`main+0xaab6f8` requests only `STYLE_JOYDUAL` handles at boot); no profile in this repository.
 
 ### Controller haptic engines without advanced players
 
@@ -593,6 +631,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10, `ListAllUsers`); [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md) (`PushOpenUsers`); [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md) (the friends calls); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (the Nintendo Account request); [Pokémon Sword](../../dm/games/0100ABF008968000/README.md) (SDK 7, `pdm`); [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (SDK 10.4.1: the friend requests); [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md) (SDK 11.4.3: `LoadCachedNintendoAccountInfo`).
 - **Note:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md)'s `account::OpenPreselectedUser` and `account::GetLastOpenedUser` are in [SDK calls that open a system service through sm](#sdk-calls-that-open-a-system-service-through-sm); SDK 6's `OpenPreselectedUser` in [SDK 6's `account::OpenPreselectedUser` returns a Result](#sdk-6s-accountopenpreselecteduser-returns-a-result); SDK 4's `GetBlockedUserList` without a `Uid` in [SDK 4's `friends::GetBlockedUserList` without a `Uid`](#sdk-4s-friendsgetblockeduserlist-without-a-uid); the save thumbnail calls in [Directory, file data cache and save-thumbnail calls](#directory-file-data-cache-and-save-thumbnail-calls).
 
+### The friends notification queue opens offline
+
+- **Symptom:** the game quits by itself at start-up with no `[RED]` line and no crash, through its own `svcExitProcess` (Beach Buggy Racing 2: its logger's fatal level after `Unable to init game.`).
+- **Cause:** the game takes a failed `nn::friends::NotificationQueue::Initialize` as a failed start-up; the host cut it to `RES_FAIL`. On the console the queue is a local object of the friends service, which a console without a connection opens too; it only stays empty.
+- **Fix:** `NotificationQueue::Initialize`, with and without a `Uid`, and `Clear` succeed (`hle_friends.c`); `Pop` finds nothing, `GetSystemEvent` never fires, `Finalize` has nothing to close. Friend lists, online play sessions and invitations still fail. Ported from upstream nxnative `bf8d4ade`.
+- **Found on:** upstream: Beach Buggy Racing 2: Island Adventure (`0100C43012344000`, SDK 10.8.2); no profile in this repository.
+
 ### Mii database answered by the host
 
 - **Symptom:** `[RED] sf: the game connects to service mii:e … mii:u itself`, then an abort.
@@ -681,6 +726,13 @@ Most service calls can be found before they crash, before the first boot or the 
 
 - **Fix:** `oe::GetRegionCode` answers from the language: Japan, the Americas, Europe or Hong Kong / Taiwan / Korea.
 - **Found on:** [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) (SDK 20.5.4; found in `main`'s imports before the first boot).
+
+### Default language from control data
+
+- **Symptom:** a host run without `DM_LANG` crashes a game that does not ship American English (`en-US`): Xenoblade Chronicles 3 2.5 s into boot at `main+0x10141ac` (upstream nxnative PR #3147).
+- **Cause:** `oe::GetDesiredLanguage` and `oe::GetRegionCode` (`hle_oe.c`) fell back to `en-US` whenever `DM_LANG` was unset, ignoring `control.nacp`'s `SupportedLanguageFlag` (`+0x302C`). On Horizon `GetDesiredLanguage` returns a language the title declares.
+- **Fix:** with `DM_LANG` unset or empty, `oe_lang` reads `SupportedLanguageFlag` from `DM_CONTROL_NACP`, else `control.nacp` beside `DM_ROMFS`, and takes the first set language in NACP bit order (`en-US`, `en-GB`, then `ja` through `th`); `en-US` when there is no control data. An explicit `DM_LANG` passes through unchanged. Ported from upstream nxnative `7130d4db`; the Android app sets `DM_LANG` only when the player chose a Game language.
+- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) (upstream; lists `en-GB` and no `en-US`).
 
 ### Shared font address: BFTTF header or bare TTF
 
@@ -822,6 +874,13 @@ Most service calls can be found before they crash, before the first boot or the 
 ### `ro::ProtectRelro` runs natively
 
 - `nn::ro::ProtectRelro` (called from `main`'s DSO init), a new import of SDK 20, needs nothing: it runs natively on the host's no-op `SetMemoryPermission` / `SetMemoryAttribute`. Found on [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (1.9.0, SDK 20.5.22).
+
+### The SDK rejects a module that `svcQueryMemory` finds
+
+- **Symptom:** `Failed to get our const data section!` before `nnMain`: the SDK's `GetRequiredBufferSizeForGetAllModuleInfo` finds the game's code mapping but returns zero.
+- **Cause:** `nn::ro::GetModuleAddressRange` and `LookupModuleSymbol` by base consult the guest rtld's lists. The host runs its own loader, so the SDK's automatic-load list is empty: the native range lookup rejects the game's code address, and the native symbol lookup returns `0xa16` for the game's own `nndetailRoGetRoDataStart` export.
+- **Fix:** both `nn::ro` lookups are answered from the host's loaded modules (`hle_ro.c`; `loader.c` `guest_module_sym`). A module ends at its 4 KiB-aligned MOD0 bss end, as rtld computes it (`guest_size`); the symbol lookup takes the exact module base and searches that module. See also [`svcQueryMemory` walks the whole guest process](memory.md#svcquerymemory-walks-the-whole-guest-process). After upstream nxnative 806fabe1 (MIT, PR #3023).
+- **Found on:** Hitman Absolution upstream ([PR #3023](https://github.com/seedds/nxnative/pull/3023); v131072, SDK 22.2.0). Not seen on a game of this fork yet.
 
 ### Loading NROs with `ro::LoadModule`
 

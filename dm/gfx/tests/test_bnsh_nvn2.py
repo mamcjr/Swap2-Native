@@ -1,5 +1,7 @@
 """BNSH programs of NVN2 (bnsh_shaders), without game data: the task and mesh shaders in stage slots 7 and 8 past the six NVN stages are read, with their stage from the
 control section's stage byte, and words in those slots that are not NVN2 stage records (an NVN program's, or none) are left alone."""
+import contextlib
+import io
 import os
 from pathlib import Path
 import struct
@@ -65,9 +67,12 @@ class Nvn2SlotTests(unittest.TestCase):
         self.assertEqual([st for _, st, _, _ in found], ['vs', 'ps'])
 
     def test_extension_slot_rejects_non_task_mesh_stage(self):
-        with self.assertRaises(SystemExit) as cm:
-            split.bnsh_shaders(bnsh({7: (5, 2)}), 0, 'x')
-        self.assertIn('NVN2 stage slot 7 holds a cs shader', str(cm.exception))
+        """another stage in a task or mesh slot (a ray tracing shader on Welcome Tour) is left out with a [RED] line, and the file's other shaders are kept"""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            found = split.bnsh_shaders(bnsh({4: (0, 1), 7: (5, 2)}), 0, 'x')
+        self.assertEqual([st for _, st, _, _ in found], ['ps'])
+        self.assertIn('NVN2 stage slot 7 holds a shader of stage byte 5 (cs), not a task or mesh shader; left out', out.getvalue())
 
 
 if __name__ == '__main__':

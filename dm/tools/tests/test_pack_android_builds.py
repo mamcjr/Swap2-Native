@@ -90,5 +90,28 @@ class SplitAbsent(unittest.TestCase):
         self.assertIn('lack 1 of the 3', str(e.exception))
 
 
+class SplitForwardsJobs(unittest.TestCase):
+    """pack_android.py split_shaders forwards -J to shader_split.py as J (#482)"""
+
+    def test_j_passed_to_shader_split(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            g = Profile('main', {}); g.id = '0100000000000000'; g.dir = root / 'prof'; g.dir.mkdir()
+            seen = []
+
+            def fake_run(cmd, env=None, **kw):
+                seen.append(env)
+                Path(cmd[4]).mkdir(parents=True, exist_ok=True)
+                Path(cmd[5]).write_text('# map\npackage\tindex\tstage\tdm_ctl_sha16\tsource\na.bin\t0\tvs\tk1\tsrc\n')
+                for f in cmd[6:]: Path(f).write_text('')
+                return type('R', (), {'returncode': 0})()
+
+            old = pa.subprocess.run, pa.shader_python
+            pa.subprocess.run, pa.shader_python = fake_run, lambda *a, **k: 'python'   # pyright: ignore[reportAttributeAccessIssue]  # pa is loaded by path: a ModuleType
+            try: pa.split_shaders(type('A', (), {'shader_python': None, 'J': 1})(), g, root / 'v', root / 'pkg', (root / 'romfs', root / 'exefs'))
+            finally: pa.subprocess.run, pa.shader_python = old   # pyright: ignore[reportAttributeAccessIssue]
+            self.assertEqual(seen[0].get('J'), '1')
+
+
 if __name__ == '__main__':
     unittest.main()

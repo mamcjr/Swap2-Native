@@ -55,6 +55,8 @@
     <string name="s2_play_prewarm_n">%1$d pipelines voorverwarmen…</string>
     <string name="s2_play_scene">Texturen en de eerste scène laden…</string>
     <string name="s2_play_ready">Klaar</string>
+    <string name="s2_play_compiling">Shaders compileren: %1$d van %2$d, nog ongeveer %3$d s · Tik om over te slaan</string>
+    <string name="s2_play_compiling_n">Shaders compileren: %1$d van %2$d · Tik om over te slaan</string>
     <string name="s2_game_settings">Game-instellingen</string>
     <string name="s2_this_game">ALLEEN DEZE GAME</string>
     <string name="s2_game_settings_intro">Wijzigingen gelden bij de volgende start. Standaard volgt de algemene instellingen.</string>
@@ -307,7 +309,7 @@
     <string name="s2_resolution_note">De grootte waarop de game rendert.</string>
     <string name="s2_frame_cap_note">Het maximale aantal frames per seconde dat deze game tekent.</string>
     <string name="s2_frame_cap_own">Deze game kiest zijn eigen framerate</string>
-    <string name="s2_game_graphics_hint">FSR-opschaling en framegeneratie zijn algemene instellingen (Instellingen › Prestaties) en staan in het in-gamepaneel.</string>
+    <string name="s2_game_graphics_hint">Framegeneratie is een algemene instelling (Instellingen › Prestaties) en staat in het in-gamepaneel.</string>
     <string name="s2_upscaler">Upscaler</string>
     <string name="s2_upscaler_net">Het neurale netwerk van de game (NDSR)</string>
     <string name="s2_upscaler_fsr">FSR 1 (sneller)</string>
@@ -726,8 +728,8 @@
     <string name="s2_gfx_on">Aan</string>
     <string name="s2_gfx_inherit">Algemene instellingen / gameprofiel volgen</string>
     <string name="s2_gfx_scaling_note">Schaalt het beeld naar het scherm en vervangt ondersteunde neurale upscalers. Native behoudt het netwerk van de game.</string>
-    <string name="s2_gfx_sharp">FSR-uitvoerscherpte</string>
-    <string name="s2_gfx_sharp_note">Verscherping wanneer het eindbeeld naar het scherm wordt vergroot.</string>
+    <string name="s2_gfx_sharp">Scherpte</string>
+    <string name="s2_gfx_sharp_note">Hoeveel de upscaler het vergrote beeld verscherpt.</string>
     <string name="s2_gfx_async">Pipelines op de achtergrond</string>
     <string name="s2_gfx_async_note">Geldt bij de volgende start. Compileert op de achtergrond en wacht als dat nodig is om effecten te behouden.</string>
     <string name="s2_gfx_timing">GPU-timing</string>
@@ -805,4 +807,22 @@
     <string name="s2_warm_play_now">Nu spelen</string>
     <string name="s2_warm_stop">Stoppen</string>
     <string name="s2_warm_close">Sluiten</string>
+    <string name="s2_sec_image">Beeld</string>
+    <string name="s2_sec_frames">Frames</string>
+    <string name="s2_sec_scene">Scène</string>
+    <string name="s2_up_original">Origineel (die van het spel)</string>
+    <string name="s2_up_note">FSR 1 is het lichtst. SGSR 2 en FSR 3.1 herstellen details uit eerdere frames in games met DLSS (SGSR 2 ook in Ocarina of Time); elders werken ze als FSR 1. Direct toegepast.</string>
+    <string name="s2_up_level">Upscalerniveau</string>
+    <string name="s2_up_quality">Kwaliteit (1080p)</string>
+    <string name="s2_up_balanced">Gebalanceerd (720p)</string>
+    <string name="s2_up_performance">Prestaties (540p)</string>
+    <string name="s2_up_level_note">De resolutie waarin het spel rendert vóór de upscaler: lager is sneller. Vanaf de volgende start.</string>
+    <string name="s2_gfx_foliage">Gras en planten</string>
+    <string name="s2_gfx_foliage_high">Hoog (zoals het spel ze tekent)</string>
+    <string name="s2_gfx_foliage_medium">Gemiddeld (de helft van het gras)</string>
+    <string name="s2_gfx_foliage_low">Laag (geen gras, de helft van de planten)</string>
+    <string name="s2_gfx_foliage_none">Geen</string>
+    <string name="s2_gfx_foliage_note">Minder gras en begroeiing voor meer frames per seconde in velden en bossen. Direct toegepast.</string>
+    <string name="s2_gfx_effect_volume_fog">Mist</string>
+    <string name="s2_gfx_effect_note">Uit: het effect wordt niet getekend, voor meer frames per seconde. Direct toegepast.</string>
 </resources>

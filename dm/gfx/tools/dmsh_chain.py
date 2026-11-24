@@ -9,6 +9,7 @@
 # Usage: dmsh_chain.py                 print V (default options)
 #       dmsh_chain.py --header        rewrite dm/gfx/nvn/dmsh_chain.h (run after changing any file listed above, and commit it with the change)
 #       dmsh_chain.py --inputs        print the digest of the current game profile's inputs (DM_GAME), as b-<V>/inputs.tsv records it
+#       dmsh_chain.py --xlate-inputs-sha   print the digest of the translator's sources with the vendored Ryujinx (the lock's xlate_inputs row)
 #       (checking the tools against dmsh_chain.lock, and rewriting it, is tool_lock.py's: the checks decide no output, so they are outside V and the shaders' cache keys)
 # Environment: XLATE_DEBUG / XLATE_REDUCED (same meaning as in dmsh_build.py, default 1 / 1; non-default options yield a different V, which the host will not load)
 import os, sys, ast, hashlib
@@ -84,6 +85,30 @@ def table_head(lib):   # the header c1_full.tsv / cb_extent.tsv start with: the 
 def xlate_source_sha():   # same convention as dmsh_xlate --source-sha: the embedded Program.cs and csproj concatenated in that order
     return hashlib.sha256(b''.join(open(os.path.join(HERE, 'dmsh_xlate', f), 'rb').read() for f in ('Program.cs', 'dmsh_xlate.csproj'))).hexdigest()[:16]
 
+XLATE_RYU_SUFFIXES = ('.cs', '.csproj', '.glsl', '.props')
+
+def xlate_source_files(gfx_dir=None):
+    """Every in-repo source file compiled into dmsh_xlate: Program.cs, dmsh_xlate.csproj and the compiled inputs under dm/third_party/ryujinx (.cs, .csproj, .glsl, .props;
+    not bin/, obj/ or hidden files), sorted by their path relative to dm/ (upstream nxnative f856c78d)"""
+    gfx = os.path.abspath(gfx_dir or GFX); dm_dir = os.path.dirname(gfx)
+    files = [os.path.join(gfx, 'tools/dmsh_xlate/Program.cs'), os.path.join(gfx, 'tools/dmsh_xlate/dmsh_xlate.csproj')]
+    for root, dirs, names in os.walk(os.path.join(dm_dir, 'third_party/ryujinx')):
+        dirs[:] = sorted(d for d in dirs if d not in ('bin', 'obj') and not d.startswith('.'))
+        files += [os.path.join(root, n) for n in sorted(names) if not n.startswith('.') and n.endswith(XLATE_RYU_SUFFIXES)]
+    rel = lambda p: os.path.relpath(p, dm_dir).replace(os.sep, '/')
+    return sorted(files, key=rel)
+
+def xlate_inputs_sha(gfx_dir=None):
+    """The digest of xlate_source_files: the lock's xlate_inputs row (tool_lock.py writes it with the translator's fingerprints). The embedded --source-sha covers
+    Program.cs and the csproj alone, and the dll fingerprints are those of whatever was built, so an edit under dm/third_party/ryujinx without a rebuild passed both;
+    with this row such an edit no longer matches the lock (tool_lock.py check_tools), and as the lock is one of FILES it moves V. Upstream nxnative f856c78d stamps the same
+    digest into its translator; here the translator keeps its embedded source and the lock carries the tree's digest"""
+    gfx = os.path.abspath(gfx_dir or GFX); dm_dir = os.path.dirname(gfx)
+    h = hashlib.sha256()
+    for p in xlate_source_files(gfx):
+        with open(p, 'rb') as f: h.update(os.path.relpath(p, dm_dir).replace(os.sep, '/').encode() + b'\0' + f.read() + b'\0')
+    return h.hexdigest()[:16]
+
 def header_text(v):
     return (f'// Generated file (dm/gfx/tools/dmsh_chain.py --header): the B shader library translation chain version this source tree expects (default options), one for every game;\n'
             f'// the host loads only <library dir>/b-<V>/. Run dmsh_chain.py --header after changing the chain\'s tools and commit this file with the change\n'
@@ -95,5 +120,6 @@ if __name__ == '__main__':
         open(HEADER, 'w').write(header_text(version()))
         print(version())
     elif a == ['--inputs']: print(inputs(load_game()))
+    elif a == ['--xlate-inputs-sha']: print(xlate_inputs_sha())
     elif not a: print(version())
     else: sys.exit(__doc__ if __doc__ else 'usage: see the file header')

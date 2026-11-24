@@ -6,8 +6,9 @@
 
 // Ported to C for Banana Native from Eden's src/video_core/frame_gen/lossless_dll.cpp and lsfg_translate.cpp: the user's own Lossless.dll (Lossless Scaling) is a PE image
 // whose RCDATA resources hold the frame generation shaders as SPIR-V. The performance set's modules (255, 256, 280..302) are taken from their native-FP16 twins
-// (resource ID + 49) and their bindings renumbered in (set, binding) order, as the descriptor set layouts of lsfg_chain.c expect. Unlike Eden there is no translated-module
-// cache: reading and renumbering the image takes a few milliseconds. Nothing of the DLL is ever part of this repository or the APK
+// (resource ID + 49) and their bindings renumbered in (set, binding) order, as the descriptor set layouts of lsfg_chain.c expect; so are the quality set's (257..279, lsfg-vk's
+// v3.1) where the DLL has all of them (it is optional: the performance set alone loads). Unlike Eden there is no translated-module cache: reading and renumbering the image
+// takes a few milliseconds. Nothing of the DLL is ever part of this repository or the APK
 #include "lsfg.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,11 +40,12 @@ typedef struct { uint32_t va, vsize, raw, rsize; } section_t;
 static int rd16(const img_t *im, size_t off, uint16_t *v) { if (off > im->n || im->n - off < 2) return 0; memcpy(v, im->p + off, 2); return 1; }
 static int rd32(const img_t *im, size_t off, uint32_t *v) { if (off > im->n || im->n - off < 4) return 0; memcpy(v, im->p + off, 4); return 1; }
 
-static const uint32_t *ids_all(int *n) {
+static const uint32_t *ids_all(int *n) {   // the performance set
     static uint32_t ids[LSFG_NMODULES]; static int k;
     if (!k) { ids[k++] = LSFG_SH_MIPMAPS; ids[k++] = LSFG_SH_GENERATE; for (uint32_t id = 280; id <= 302; id++) ids[k++] = id; }
     *n = k; return ids;
 }
+enum { QUALITY_FIRST = 280 - LSFG_QUALITY_DELTA, QUALITY_LAST = 302 - LSFG_QUALITY_DELTA };   // the quality set's own modules (257..279)
 
 static size_t rva_to_off(const section_t *s, int ns, uint32_t rva, int *ok) {
     for (int i = 0; i < ns; i++) {
@@ -57,6 +59,11 @@ static size_t rva_to_off(const section_t *s, int ns, uint32_t rva, int *ok) {
 
 // The RCDATA leaves by name ID: found[id] = the first language's data
 typedef struct { uint32_t id; const uint8_t *p; size_t n; } res_t;
+static int is_spirv(const uint8_t *p, size_t n) { uint32_t m; if (n < 20 || n % 4) return 0; memcpy(&m, p, 4); return m == SPIRV_MAGIC; }
+static const res_t *res_find(const res_t *res, int nres, uint32_t id) {   // module id's native-FP16 twin
+    for (int j = 0; j < nres; j++) if (res[j].id == id + LSFG_NATIVE_FP16_OFFSET && is_spirv(res[j].p, res[j].n)) return &res[j];
+    return NULL;
+}
 static int res_dir(const img_t *im, size_t dir, uint32_t (*ent)[2], int max) {
     uint16_t nn, ni; if (!rd16(im, dir + RESOURCE_NAMED_COUNT_OFFSET, &nn) || !rd16(im, dir + RESOURCE_ID_COUNT_OFFSET, &ni)) return -1;
     int t = nn + ni; if (t > max) t = max;
@@ -86,7 +93,6 @@ static int collect_rcdata(const img_t *im, const section_t *sec, int ns, size_t 
     return k;
 }
 
-static int is_spirv(const uint8_t *p, size_t n) { uint32_t m; if (n < 20 || n % 4) return 0; memcpy(&m, p, 4); return m == SPIRV_MAGIC; }
 
 // The bindings in (set, binding) order become 0, 1, 2, ...: each pass's set layout is the list of its descriptors in that order (lsfg_chain.c)
 typedef struct { uint32_t set, binding; size_t lit; } slot_t;
@@ -143,11 +149,19 @@ static int parse(const img_t *im, res_t *res, int *nres) {
     *nres = collect_rcdata(im, sec, ns, base, res, 4096);
     if (*nres < 0) return LSFG_MISSING_SHADERS;
     int nid; const uint32_t *ids = ids_all(&nid);
-    for (int i = 0; i < nid; i++) {
-        int hit = 0;
-        for (int j = 0; j < *nres && !hit; j++) if (res[j].id == ids[i] + LSFG_NATIVE_FP16_OFFSET && is_spirv(res[j].p, res[j].n)) hit = 1;
-        if (!hit) return LSFG_MISSING_SHADERS;
-    }
+    for (int i = 0; i < nid; i++) if (!res_find(res, *nres, ids[i])) return LSFG_MISSING_SHADERS;
+    return LSFG_OK;
+}
+static int has_quality(const res_t *res, int nres) {
+    for (uint32_t id = QUALITY_FIRST; id <= QUALITY_LAST; id++) if (!res_find(res, nres, id)) return 0;
+    return 1;
+}
+static int take(lsfg_modules *out, const res_t *hit, uint32_t id) {   // a copy of the module with its bindings renumbered
+    uint32_t *w = hit ? malloc(hit->n) : NULL;
+    if (!w || out->n >= LSFG_NMODULES_ALL) { free(w); return LSFG_TRANSLATION_FAILED; }
+    memcpy(w, hit->p, hit->n);
+    renumber(w, hit->n / 4);
+    out->m[out->n++] = (lsfg_module){id, (uint32_t)(hit->n / 4), w};
     return LSFG_OK;
 }
 
@@ -160,14 +174,10 @@ int lsfg_dll_load(const char *path, lsfg_modules *out) {
     r = parse(&im, res, &nres);
     if (!r) {
         int nid; const uint32_t *ids = ids_all(&nid);
-        for (int i = 0; i < nid && !r; i++) {
-            const res_t *hit = NULL;
-            for (int j = 0; j < nres && !hit; j++) if (res[j].id == ids[i] + LSFG_NATIVE_FP16_OFFSET) hit = &res[j];
-            uint32_t *w = hit ? malloc(hit->n) : NULL;
-            if (!w) { r = LSFG_TRANSLATION_FAILED; break; }
-            memcpy(w, hit->p, hit->n);
-            renumber(w, hit->n / 4);
-            out->m[out->n++] = (lsfg_module){ids[i], (uint32_t)(hit->n / 4), w};
+        for (int i = 0; i < nid && !r; i++) r = take(out, res_find(res, nres, ids[i]), ids[i]);
+        if (!r && has_quality(res, nres)) {
+            for (uint32_t id = QUALITY_FIRST; id <= QUALITY_LAST && !r; id++) r = take(out, res_find(res, nres, id), id);
+            out->quality = !r;
         }
     }
     free(b);

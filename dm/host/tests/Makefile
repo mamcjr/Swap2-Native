@@ -72,6 +72,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_android_place
 	$(B)/t_android_psogate
 	$(B)/t_android_deadly
+	$(B)/t_android_hostmem
 	$(B)/t_android_gbar
 	$(B)/t_android_ubq
 	$(B)/t_android_rcix
@@ -80,6 +81,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_android_dlss
 	$(B)/t_android_tsr_cam
 	$(B)/t_android_shmcap
+	$(B)/t_android_quad_ind
 	$(B)/t_lse_unaligned
 	$(B)/t_audio_instream
 run: $(B)/t_nro
@@ -368,7 +370,7 @@ run: $(B)/t_audio_instream
 $(B)/t_audio_instream: t_audio_instream.c ../audio_instream.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_audio_instream.c
 # The Android host's pure parts (dm/host/android): resampler, channel map, SPS size, MediaCodec picture layouts; gamepad / touch / sensor mapping
-run: $(B)/t_android_av $(B)/t_android_input $(B)/t_android_shlib $(B)/t_android_spvpatch $(B)/t_android_imgmem $(B)/t_android_zshare $(B)/t_android_bcdec $(B)/t_android_placedkill $(B)/t_android_place
+run: $(B)/t_android_av $(B)/t_android_input $(B)/t_android_shlib $(B)/t_android_spvpatch $(B)/t_android_imgmem $(B)/t_android_zshare $(B)/t_android_bcdec $(B)/t_android_placedkill $(B)/t_android_place $(B)/t_android_hostmem
 $(B)/t_android_av: t_android_av.c ../android/av_android.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_av.c
 $(B)/t_android_input: t_android_input.c ../android/input_map.c ../android/input_map.h ../motion_fusion.h ../dm_input.h | $(B)
@@ -385,6 +387,9 @@ $(B)/t_android_imgmem: t_android_imgmem.c $(VKA)/vka_extents.h | $(B)
 # Zero-shared image memory's bookkeeping (vka_zshare.h; vka_imgmem.c vka_imem_bind_zero, vka_tex.c img_own)
 $(B)/t_android_zshare: t_android_zshare.c $(VKA)/vka_zshare.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_zshare.c
+# The driver host memory and Vulkan object counts of the memory maps diagnostics (vka_hostmem.h, Banana Native eden/v0.3.50; vka_hostmem.c)
+$(B)/t_android_hostmem: t_android_hostmem.c $(VKA)/vka_hostmem.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_hostmem.c
 # BC blocks decoded on the CPU for a GPU without BC textures (vka_bcdec.h over dm/third_party/bcdec): the decoded formats and the texel layout
 # Fixed maps in the guest block merge with their neighbours again (plat_guestmap.h; hle_svc.c guest_release, vka_mem.c sw_mmap_fixed). Linux only (the kernel's merge rules,
 # counted in /proc/self/maps): make guestmap
@@ -456,6 +461,10 @@ $(B)/t_android_tstick: t_android_tstick.c $(VKA)/vka_tstick.h | $(B)
 $(B)/t_android_driverpath: t_android_driverpath.c $(VKA)/vka_driverpath.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_driverpath.c
 # A Qualcomm GPU's real compute shared memory: at most 32 KiB whatever the driver advertises (vka_shmcap.h; vka_dev.c)
+run: $(B)/t_android_quad_ind
+# Non-indexed indirect QUADS -> VkDrawIndexedIndirectCommand: the compute module's header, the shared index pattern and the host reference (Banana Native v0.3.51, 3ce1aadf)
+$(B)/t_android_quad_ind: t_android_quad_ind.c $(VKA)/vka_quad_indirect_spv.h | $(B)
+	$(CLANG) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -I$(VKA) -o $@ t_android_quad_ind.c
 run: $(B)/t_android_shmcap
 $(B)/t_android_shmcap: t_android_shmcap.c $(VKA)/vka_shmcap.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_shmcap.c

@@ -132,6 +132,12 @@ t_capture: t_capture.c ../nvn/nvn_capture.c ../nvn/nvn_capture.h ../nvn/nvn_obj.
 .PHONY: check_t_capture
 check_t_capture: t_capture
 	./t_capture
+# The depth bounds resolver (nvn_dbnd.h) the Vulkan replay takes: off, bounds to test, bounds no stored depth meets (Banana Native v0.3.51, 94009e1d)
+t_depth_bounds: t_depth_bounds.c ../nvn/nvn_dbnd.h
+	clang $(CFLAGS) -o $@ t_depth_bounds.c
+.PHONY: check_t_depth_bounds
+check_t_depth_bounds: t_depth_bounds
+	./t_depth_bounds
 # On the GPU: two synthetic frames through the capture hooks, the second one captured, then replayed by nvn_replay (same digest, twice)
 t_capture_live: t_capture_live.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_capture_live.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

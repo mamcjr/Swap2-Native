@@ -6,7 +6,7 @@
 #        tool_lock.py --update-lock   rewrite the lock file from the actual tools (run after changing Ryujinx / spirv-cross / Xcode, then dmsh_chain.py --header; both are committed)
 import os, sys, hashlib, subprocess, shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from dmsh_chain import LOCK, XLATE_DIR, SPIRV_CROSS, xlate_source_sha
+from dmsh_chain import LOCK, XLATE_DIR, SPIRV_CROSS, xlate_source_sha, xlate_inputs_sha
 
 def sha16(p): return hashlib.sha256(open(p, 'rb').read()).hexdigest()[:16]
 
@@ -15,6 +15,7 @@ def tools_now():
     t = {}
     for dll in ('dmsh_xlate.dll', 'Ryujinx.Graphics.Shader.dll', 'Ryujinx.Common.dll'): t[dll] = sha16(os.path.join(XLATE_DIR, dll))
     t['xlate_source'] = xlate_embedded()
+    t['xlate_inputs'] = xlate_inputs_sha()   # the in-repo sources with the vendored Ryujinx, as at the last --update-lock: an edit there without a rebuild is caught (dmsh_chain.py)
     sc = shutil.which(SPIRV_CROSS)
     t['spirv-cross'] = sha16(sc) if sc else 'missing'
     for sdk in ('macosx', 'iphoneos'):

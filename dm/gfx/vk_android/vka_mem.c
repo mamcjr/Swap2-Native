@@ -770,6 +770,24 @@ uint64_t vka_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *
     if (g) { n = g->hi - addr; if (n > len) n = len; *buf = g->buf; *off = addr - g->lo; }
     return n;
 }
+// A GPU address the game binds as a buffer (Banana Native v0.3.52 #588): a placed segment's, or one in an NVN sparse (virtual) pool, which no segment holds: its address
+// runs through the pool's page table to the physical pool's bytes (hle_nvn.c nvn_sparse_run: the physical address of addr and how many bytes from it are one contiguous
+// physical run, a hole or another run ending it, since one VkBuffer cannot span both), which are placed and bound instead. Weak: a host without the page-table lookup
+// (or the replay tools) resolves placed segments only, as vka_addr_run
+uint64_t nvn_sparse_run(uint64_t addr, uint64_t len, uint64_t *physical) __attribute__((weak));
+uint64_t vka_gpu_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) {
+    uint64_t run = vka_addr_run(addr, len, buf, off);
+    if (run || !len || !nvn_sparse_run || !VKA_ENV("DM_VK_SPARSE_RUN", 1)) return run;
+    uint64_t physical = 0, mapped = nvn_sparse_run(addr, len, &physical);
+    if (!mapped) return 0;
+    mtl_pool_need((const void *)(uintptr_t)physical, mapped, "a buffer in an NVN virtual pool");
+    run = vka_addr_run(physical, mapped, buf, off);
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1)) VLOG("virtual pool buffer %#llx resolves to %#llx (%llu of %llu bytes placed)",
+                                           (unsigned long long)addr, (unsigned long long)physical, (unsigned long long)run, (unsigned long long)mapped);
+    return run;
+}
+int vka_gpu_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off) { return len != 0 && vka_gpu_addr_run(addr, len, buf, off) == len; }
 
 // ---------- Texel buffer views ----------
 // A buffer texture (NVN_TEXTURE_TARGET_BUFFER) bound to a uniform or storage texel buffer binding (vka_draw.c stage_writes) is a VkBufferView over the placed segment that
@@ -792,10 +810,16 @@ VkBufferView vka_buf_view(uint64_t addr, uint64_t bytes, VkFormat f, uint32_t te
     if (!texel || !bytes) { snprintf(why, nwhy, "no elements"); return VK_NULL_HANDLE; }
     uint64_t run = vka_addr_run(addr, bytes, &b, &off);
     if (!run) { snprintf(why, nwhy, "its storage at %#llx is not in placed guest memory", (unsigned long long)addr); return VK_NULL_HANDLE; }
-    // The offset rule of Vulkan 1.3 (texel buffer alignment): a multiple of the alignment in bytes, or of one texel when the device takes single-texel alignment
-    VkDeviceSize al = V.tb_align[storage] ? V.tb_align[storage] : 256; if (V.tb_single[storage] && texel < al && !(texel & (texel - 1))) al = texel;
-    if (off % al) { snprintf(why, nwhy, "its storage at %#llx lies at offset %#llx of its segment, not a multiple of the device's %llu-byte %s texel buffer alignment", (unsigned long long)addr,
-                             (unsigned long long)off, (unsigned long long)al, storage ? "storage" : "uniform"); return VK_NULL_HANDLE; }
+    // The offset rule of Vulkan 1.3 (texel buffer alignment): a multiple of the alignment in bytes, or of one texel when the device takes single-texel alignment, a texel
+    // of a 3-component format counting as one component (VUID-VkBufferViewCreateInfo-buffer-02750 / 02751). The segments carry both texel buffer usages (seg_buffer), so
+    // both kinds' rules hold for every view, whichever kind it is bound as (Banana Native v0.3.52 #608: Orbitals' buffer textures at offsets the game picks at run time)
+    uint32_t tsz = texel % 3 == 0 ? texel / 3 : texel; VkDeviceSize al = 1;
+    for (int k = 0; k < 2; k++) {
+        VkDeviceSize ak = V.tb_align[k] ? V.tb_align[k] : 256; if (V.tb_single[k] && tsz < ak && !(tsz & (tsz - 1))) ak = tsz;
+        if (ak > al) al = ak;
+    }
+    if (off % al) { snprintf(why, nwhy, "its storage at %#llx lies at offset %#llx of its segment, not a multiple of the device's %llu-byte texel buffer alignment", (unsigned long long)addr,
+                             (unsigned long long)off, (unsigned long long)al); return VK_NULL_HANDLE; }
     uint64_t n = run / texel; if (V.tb_max && n > V.tb_max) n = V.tb_max;
     if (!n) { snprintf(why, nwhy, "less than one texel of it is placed"); return VK_NULL_HANDLE; }
     VkDeviceSize rg = n * texel; if (range) *range = rg;
@@ -1252,6 +1276,7 @@ static void maps_tick(int *line_due) {
         VLOG("memory maps: %ld of %d (vm.max_map_count, %d %%): placed memory %ld in %d segments (%d split, %ld pieces more than one each), guest block anonymous %ld, outside the guest block %ld (%ld of them kgsl); dirty tracking by %s%zu KiB; read in %.1f ms (DM_VK_MAPS)",
              m.total, mx, pct, m.placed, nseg, npieced, inseg, m.guest - m.placed, m.total - m.guest, m.out_kgsl,
              nvn_dirty_block_bytes() ? "blocks of " : "pages of ", nvn_dirty_block_bytes() ? nvn_dirty_block_bytes() >> 10 : (size_t)getpagesize() >> 10, scan_ms);
+        void vka_hostmem_log(void); vka_hostmem_log();   // the live Vulkan objects and the heap beside the maps (vka_hostmem.c): who holds the scudo blocks and kgsl maps
         last_line_ns = now; last_step = step; *line_due = 0;
     }
     maps_hist_log(&m, pct, step, hist_pct, now);

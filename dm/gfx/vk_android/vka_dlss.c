@@ -1,5 +1,5 @@
 // NVN2's DLSS (OP_DLSS) on Vulkan: the network has no Vulkan counterpart, so the replay writes the evaluation's output texture with an upscaler of its own
-// (vka_exec.c dlss_eval picks it, DM_VK_DLSS, live). Ported from Banana Native (MIT; eden/v0.3.45 9c98a63b, file last changed in 86d75790 / 849d2fb3), adapted: the
+// (vka_exec.c dlss_eval picks it, DM_VK_DLSS, live). Ported from Banana Native (MIT; eden/v0.3.45 9c98a63b, file last changed in 86d75790 / 849d2fb3; the colour's alpha kept from eden/v0.3.50 fda07551 / 04471281), adapted: the
 // declarations and the tune table in vka_dlss.h, a GSR2 entry from views for agl's NDSR slot (vka_dlss_gsr2_views, vka_ndsr.c), the draws' bound-state memo forgotten
 // after the stand-in's own binds (vka_dyn_invalidate):
 //   2 = FSR 1: the input colour tonemapped (c / (1 + max(c)), the colour is the scene's linear HDR) into a render-size work image, AMD's EASU to the output size,
@@ -10,10 +10,13 @@
 //       from more history (steadier) to less ghosting; DM_VK_GSR2_TUNE (0..7) forces a row; DM_VK_GSR2_VREJ / _VLO / _VK / _SFCAP / _MVNEAR / _BOXMOTW / _BSMOV override fields.
 // The colour is read through the input texture's own view format (sfmt; vka_exec.c dlss_eval takes it from the texture, as an image may be shared by a texture and
 // its sRGB twin), so an sRGB input arrives linear; RCAS sRGB-encodes for an sRGB output (enc), which the replay stores as its UNORM twin.
-// Both end in a 1:1 blit of an RGBA16F work image into the output texture. DM_VK_DLSS_SHARP (0..100, default 15) is RCAS's strength; DM_VK_DLSS_JX / _JY and
+// Both end in a 1:1 blit of an RGBA16F work image into the output texture, whose alpha RCAS takes from the input colour (bilinear, where the output pixel lies in the
+// input rectangle): NVN2's DLSS keeps the colour's alpha and games composite by it; the upscalers themselves keep colour only.
+// DM_VK_DLSS_SHARP (0..100, default 15) is RCAS's strength; DM_VK_DLSS_JX / _JY and
 // DM_VK_GSR2_MV are the jitter's and the motion vectors' signs. Every switch is read at every evaluation; DM_VK_GPUPROF lists the passes.
 // 0 = not done (no push descriptors, a pipeline or work image failed, no depth or motion for GSR2, the output format cannot be blitted): the caller's bilinear blit
 #if defined(__ANDROID__)
+#include <stddef.h>
 #include "vka_dlss.h"
 #include "vka_dlss_fsr.h"
 #include "gsr2/vka_gsr2_spv.h"
@@ -130,16 +133,25 @@ static int blit_dst_ok(vka_img *d) {
 // The scaling copy (fsr/dlss_copy.comp): the rectangle sx, sy, iw x ih of the colour view in (an image of tw x th) scaled bilinearly to ow x oh, sRGB-encoded when enc,
 // through the RGBA16F work image r into d's rectangle dx, dy (level dl). For an input and an output texture that differ in sRGB, where a blit would move the encoded
 // values as they are (vka_exec.c dlss_eval), and for FSR 3.1's linear result into an sRGB output (vka_fsr3.c). 0 = not done
-int vka_dlss_scale(VkCommandBuffer cb, VkImageView in, int sx, int sy, int iw, int ih, uint32_t tw, uint32_t th, vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh, int enc) {
+int vka_dlss_scale_alpha(VkCommandBuffer cb, VkImageView in, int sx, int sy, int iw, int ih, uint32_t tw, uint32_t th,
+                         VkImageView alpha_in, float jx, float jy, int aw, int ah, uint32_t atw, uint32_t ath,
+                         vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh, int enc) {
     if (!in || !dl_ready() || d->f.kind || !blit_dst_ok(d) || !wimg_get(cb, &D.r, ow, oh)) return 0;
     vka_barrier(cb);
-    struct { float base[2], scale[2], rcp[2]; int32_t size[2], enc; int32_t pad[23]; } pc = {{(float)sx, (float)sy}, {(float)iw / ow, (float)ih / oh}, {1.0f / tw, 1.0f / th}, {ow, oh}, enc, {0}};
+    // enc_pad: the shader's vec2 abase starts on an 8-byte boundary (offset 40), not right after enc (36); without it every alpha constant read one float late
+    struct { float base[2], scale[2], rcp[2]; int32_t size[2], enc, enc_pad; float abase[2], ascale[2], arcp[2]; int32_t pad[16]; } pc = {
+        {(float)sx, (float)sy}, {(float)iw / ow, (float)ih / oh}, {1.0f / tw, 1.0f / th}, {ow, oh}, enc, 0,
+        {jx, jy}, {(float)aw / ow, (float)ah / oh}, {1.0f / atw, 1.0f / ath}, {0}};
     _Static_assert(sizeof pc == 128, "push constants");
-    { VkImageView v[4] = {in}; VkSampler sm[4] = {D.ls}; dpass(cb, P_COPY, v, sm, D.r.view, VK_NULL_HANDLE, &pc, ow, oh); }
+    _Static_assert(offsetof(__typeof__(pc), abase) == 40, "dlss_copy.comp's push constant block (vec2 abase at offset 40)");
+    { VkImageView v[4] = {in, alpha_in}; VkSampler sm[4] = {D.ls, D.ls}; dpass(cb, P_COPY, v, sm, D.r.view, VK_NULL_HANDLE, &pc, ow, oh); }
     VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {ow, oh, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, dl, 0, 1}, {{dx, dy, 0}, {dx + ow, dy + oh, 1}}};
     vk.vkCmdBlitImage(cb, D.r.img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_NEAREST);
     vka_barrier(cb);
     return 1;
+}
+int vka_dlss_scale(VkCommandBuffer cb, VkImageView in, int sx, int sy, int iw, int ih, uint32_t tw, uint32_t th, vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh, int enc) {
+    return vka_dlss_scale_alpha(cb, in, sx, sy, iw, ih, tw, th, in, (float)sx, (float)sy, iw, ih, tw, th, d, dl, dx, dy, ow, oh, enc);
 }
 int vka_dlss_ready(void) { return dl_ready(); }
 
@@ -187,10 +199,16 @@ static int gsr2_core(VkCommandBuffer cb, VkImageView cv, VkImageView dv, VkImage
     D.hc = cur;
     return 1;
 }
-// RCAS on the scene colour (tonemapped), the tonemap undone, sRGB-encoded for an sRGB output, then the blit into d's rectangle
-static void finish(VkCommandBuffer cb, float sharp, int enc, vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh) {
-    struct { uint32_t con0[4]; int32_t size[2], itm, enc; int32_t pad[24]; } pr = {{fbits(sharp), 0, 0, 0}, {ow, oh}, 1, enc, {0}};
-    { VkImageView in[4] = {D.e.view}; VkSampler sm[4] = {D.ns}; dpass(cb, P_RCAS, in, sm, D.r.view, VK_NULL_HANDLE, &pr, ow, oh); }
+// RCAS on the scene colour (tonemapped), the tonemap undone, sRGB-encoded for an sRGB output, then the blit into d's rectangle. The alpha is the input colour's (av, an
+// image of tw x th), read bilinearly where the output pixel lies in the input rectangle (ax, ay: its origin plus the jitter, as EASU and GSR2 read the colour; iw x ih):
+// NVN2's DLSS keeps the colour's alpha, and a game may composite its output by it (Fast Fusion's main menu: the 3D layer drawn over the menu with SRC_ALPHA blending);
+// the upscalers keep colour only
+static void finish(VkCommandBuffer cb, float sharp, int enc, VkImageView av, float ax, float ay, int iw, int ih, uint32_t tw, uint32_t th,
+                   vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh) {
+    struct { uint32_t con0[4]; int32_t size[2], itm, enc; float abase[2], ascale[2], arcp[2]; int32_t pad[18]; } pr = {{fbits(sharp), 0, 0, 0}, {ow, oh}, 1, enc,
+        {ax, ay}, {(float)iw / ow, (float)ih / oh}, {1.0f / tw, 1.0f / th}, {0}};
+    _Static_assert(sizeof pr == 128, "push constants");
+    { VkImageView in[4] = {D.e.view, av}; VkSampler sm[4] = {D.ns, D.ls}; dpass(cb, P_RCAS, in, sm, D.r.view, VK_NULL_HANDLE, &pr, ow, oh); }
     VkImageBlit bl = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {ow, oh, 1}}, {VK_IMAGE_ASPECT_COLOR_BIT, dl, 0, 1}, {{dx, dy, 0}, {dx + ow, dy + oh, 1}}};
     vk.vkCmdBlitImage(cb, D.r.img, VK_IMAGE_LAYOUT_GENERAL, d->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_NEAREST);
     vka_barrier(cb);
@@ -202,7 +220,7 @@ int vka_dlss_gsr2_views(VkCommandBuffer cb, int user, VkImageView cv, VkImageVie
     const float one[2] = {1, 1};
     float sharp = sharpness();
     if (!gsr2_core(cb, cv, dv, mv, 0, 0, iw, ih, ow, oh, one, 0, 0, 1, 1, sharp, reset, user)) return 0;
-    finish(cb, sharp, enc, d, dl, dx, dy, ow, oh);
+    finish(cb, sharp, enc, cv, 0, 0, iw, ih, (uint32_t)iw, (uint32_t)ih, d, dl, dx, dy, ow, oh);   // (the alpha of cv: vka_ndsr.c's colour image is iw x ih)
     D.lmode = 3; D.luser = user; D.n++;
     return 1;
 }
@@ -248,7 +266,10 @@ int vka_dlss_run(VkCommandBuffer cb, const p_dlss *o, int mode, vka_img *s, uint
         { VkImageView in[4] = {D.t.view}; VkSampler sm[4] = {D.ls}; dpass(cb, P_EASU, in, sm, D.e.view, VK_NULL_HANDLE, pe, ow, oh); }
         how = "FSR 1 EASU + RCAS";
     }
-    finish(cb, sharp, enc, d, dl, dx, dy, ow, oh);
+    {   // the alpha from the input colour's level sl
+        uint32_t tw = s->w >> sl ? s->w >> sl : 1, th = s->h >> sl ? s->h >> sl : 1;
+        finish(cb, sharp, enc, cv, sx + jx, sy + jy, iw, ih, tw, th, d, dl, dx, dy, ow, oh);
+    }
     D.lmode = mode; D.luser = 0; D.n++;
     if (D.n == 1 || (!(D.n & (D.n - 1)) && D.n <= 4096) || D.n % 18000 == 0)
         VLOG("DLSS stand-in (%s): %dx%d → %dx%d, reset %u, jitter %.3f %.3f (%llu evaluations)", how, iw, ih, ow, oh, o->reset, o->jitter[0], o->jitter[1], (unsigned long long)D.n);

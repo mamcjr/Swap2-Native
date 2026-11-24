@@ -5,7 +5,8 @@
 typedef struct {
     int target, format, flags, samples;   // NVNtextureTarget / NVNformat / NVNtextureFlags / sample count (0 or 1 = single-sampled)
     uint32_t width, height, depth, levels, stride;
-    int pkg_block_h;                      // Packaged byte 0 (low nibble log2 block height, high nibble log2 block depth) + 1; 0 = use the automatic algorithm
+    uint16_t pkg_block_h;                 // Packaged byte 0 (low nibble log2 block height, high nibble log2 block depth) + 1; 0 = use the automatic algorithm
+    uint16_t gob_order;                   // the order inside a GOB, from the owning device (nvn_deswizzle.h nvn_gob_order): 0 = the process default (nvn_gob_switch2), 1 = Tegra X1, 2 = Switch 2
 } nvn_texdesc;
 
 typedef struct {

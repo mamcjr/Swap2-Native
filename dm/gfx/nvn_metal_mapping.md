@@ -49,9 +49,9 @@ Two conventions that run through the whole table:
 | SignalEvent | The event's value is written, which happens after the GPU completes | — |
 | SetTexturePool / SetSamplerPool | Recorded into the command stream, noting the descriptor pool currently in use | — |
 
-The following are empty implementations (`g_nops` in `hle_nvn.c`); calling them neither reports red nor has any effect:
+The following are empty implementations (`g_nops` in `hle_nvn.c`); calling them neither reports red nor has any effect (`SetDepthBounds` is recorded, `OP_DEPTH_BOUNDS`, and applied by the Vulkan replay only):
 
-`SetPatchSize`, `MultiDrawArraysIndirectCount`, `MultiDrawElementsIndirectCount`, `SetDepthBounds`, `DownsampleTextureView`, `WaitSync`, `SetShaderScratchMemory`, `PushDebugGroupDynamic`, `PopDebugGroup`, `InsertDebugMarkerDynamic`, `WaitEvent`, and `nvnWindowFinalize`.
+`SetPatchSize`, `MultiDrawArraysIndirectCount`, `MultiDrawElementsIndirectCount`, `DownsampleTextureView`, `WaitSync`, `SetShaderScratchMemory`, `PushDebugGroupDynamic`, `PopDebugGroup`, `InsertDebugMarkerDynamic`, `WaitEvent`, and `nvnWindowFinalize`.
 
 ## 3. Shader bindings
 

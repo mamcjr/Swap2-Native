@@ -112,7 +112,8 @@ int main(void) {
     while (got2 < 6 && now_ns() - t0 < 10000000000ull) {
         uint64_t ms = (now_ns() - t0) / 1000000;
         if (!susp && ms >= 150) { dm_audio_suspend(1); susp = 1; }
-        if (susp && !resumed && ms >= 350) { dm_audio_suspend(0); resumed = 1; }
+        // Stopping the AudioUnit can take past the resume deadline while buffers finish.
+        if (susp && !resumed && (now_ns() - t0) / 1000000 >= 350) { dm_audio_suspend(0); resumed = 1; }
         gbuf *r = h_au_Released(out2);
         if (!r) { usleep(1000); continue; }
         order_ok &= r == &b2[got2]; got2++;

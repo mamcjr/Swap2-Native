@@ -172,21 +172,24 @@ final class GameSettings {
         });
     }
 
-    /** Graphics: resolution (where the profile has a lever for it), frame rate cap (unless the game paces itself), Upscaler and Scene resolution (where they apply) */
+    /**
+     * Graphics, in the general settings' sections: the game's language; Image (Upscaler, its level or Game resolution where the profile has a lever for it, sharpness,
+     * Scene resolution where it applies, Fit or Stretch); Frames (the frame rate cap); Scene (Mesh geometry, Grass and plants, the effects that can be turned off,
+     * Ground foliage, the profile's mods); Advanced
+     */
     private static void graphics(MainActivity a, Game g, LinearLayout p, Runnable again) {
         String id = g.titleId;
-        LinearLayout box = Ui.add(p, Ui.panel(a), 16);
         Profile prof = Profile.of(id);
-        if (prof != null && prof.hasResolution())   // only where it does something: a profile with window_fn or graphics_scale rows
-            box.addView(new Ui.Setting(a, R.drawable.s2_ic_display, a.getString(R.string.s2_game_resolution), v -> resolution(a, g, again)).value(a.getString(R.string.s2_resolution_note))
-                    .override(a, Prefs.ownWindow(a, id), Prefs.windowName(a, Prefs.gameWindow(a, id), true)).chevron(a).view);
-        // Every game has a cap: where the host finds no limiter it paces the presents (hle_fpslock.c dm_fps_lock_paced), so Prefs.ownRate, which an older host's run may have
-        // stored, no longer hides the row
-        box.addView(new Ui.Setting(a, R.drawable.s2_ic_gauge, a.getString(R.string.s2_frame_cap), v -> cap(a, g, again)).value(a.getString(R.string.s2_frame_cap_note))
-                .override(a, Prefs.ownFpsCap(a, id), MainActivity.capLabel(Prefs.fpsCap(a, id))).chevron(a).view);
-        box.addView(new Ui.Setting(a, R.drawable.s2_ic_chip, a.getString(R.string.s2_game_lang), v -> gameLang(a, g, again))
+        LinearLayout top = Ui.add(p, Ui.panel(a), 16);
+        top.addView(new Ui.Setting(a, R.drawable.s2_ic_chip, a.getString(R.string.s2_game_lang), v -> gameLang(a, g, again))
                 .value(gameLangLabel(a, Prefs.gameLang(a, id)) + " · " + a.getString(R.string.s2_game_lang_note)).chevron(a).view);
-        GameGraphics.rows(a, id, box, again, false);
+        Ui.add(p, Ui.section(a, a.getString(R.string.s2_sec_image)), 24);
+        LinearLayout box = Ui.add(p, Ui.panel(a), 8);
+        android.view.View level = GameGraphics.levelRow(a, id, again), res = null;
+        if (level == null && prof != null && prof.hasResolution())   // only where it does something: a profile with window_fn or graphics_scale rows
+            res = new Ui.Setting(a, R.drawable.s2_ic_display, a.getString(R.string.s2_game_resolution), v -> resolution(a, g, again)).value(a.getString(R.string.s2_resolution_note))
+                    .override(a, Prefs.ownWindow(a, id), Prefs.windowName(a, Prefs.gameWindow(a, id), true)).chevron(a).view;
+        GameGraphics.imageRows(a, id, box, level != null ? level : res, again, false);
         if (prof != null && prof.hasScene()) {   // only where the profile names the palette's scale (scene_scale_palette; SceneOverlay)
             String sc = Prefs.sceneScale(a, id, prof);
             String cur = sc == null ? a.getString(R.string.s2_scene_game) : Prefs.sceneLabel(prof, sc);
@@ -195,13 +198,24 @@ final class GameSettings {
             box.addView(row.chevron(a).view);
             if (sc != null) sceneCheck(a, g, prof, sc, row);
         }
+        // Every game has a cap: where the host finds no limiter it paces the presents (hle_fpslock.c dm_fps_lock_paced), so Prefs.ownRate, which an older host's run may have
+        // stored, no longer hides the row
+        Ui.add(p, Ui.section(a, a.getString(R.string.s2_sec_frames)), 24);
+        LinearLayout frames = Ui.add(p, Ui.panel(a), 8);
+        frames.addView(new Ui.Setting(a, R.drawable.s2_ic_gauge, a.getString(R.string.s2_frame_cap), v -> cap(a, g, again)).value(a.getString(R.string.s2_frame_cap_note))
+                .override(a, Prefs.ownFpsCap(a, id), MainActivity.capLabel(Prefs.fpsCap(a, id))).chevron(a).view);
+        Ui.add(p, Ui.small(a, a.getString(R.string.s2_game_graphics_hint)), 8);
+        Ui.add(p, Ui.section(a, a.getString(R.string.s2_sec_scene)), 24);
+        LinearLayout scene = Ui.add(p, Ui.panel(a), 8);
+        GameGraphics.sceneRows(a, id, scene, again, false);
         if (prof != null && prof.hasFoliage()) {   // only where the profile names the layers (foliage_off; FoliageOverlay)
             String lv = Prefs.foliage(a, id, prof);
-            box.addView(new Ui.Setting(a, R.drawable.s2_ic_image, a.getString(R.string.s2_foliage), v -> foliage(a, g, again))
+            scene.addView(new Ui.Setting(a, R.drawable.s2_ic_image, a.getString(R.string.s2_foliage), v -> foliage(a, g, again))
                     .value(foliageLabel(a, lv) + " · " + a.getString(R.string.s2_foliage_note)).chevron(a).view);
         }
-        builtinMods(a, g, box);
-        Ui.add(p, Ui.small(a, a.getString(R.string.s2_game_graphics_hint)), 8);
+        builtinMods(a, g, scene);
+        Ui.add(p, Ui.section(a, a.getString(R.string.s2_advanced)), 24);
+        GameGraphics.advancedRows(a, id, Ui.add(p, Ui.panel(a), 8), again);
     }
 
     /** The APK's assets as BuiltinMods reads them (assets/mods/&lt;title ID&gt;/&lt;folder&gt;/…, build.gradle nxProfileMods) */

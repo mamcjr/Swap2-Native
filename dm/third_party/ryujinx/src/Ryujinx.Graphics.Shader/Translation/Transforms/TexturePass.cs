@@ -303,7 +303,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             // lowered here; other hosts (Apple: SPIRV-Cross passes the run-time Offset to MSL) keep it. Constant offsets stay ConstOffset (areAllOffsetsConstant
             // below). A fetch is exact (the offset is added in texel space, before the bounds check, as on the hardware); a sample takes offset / size of the level
             // its LOD selects (InsertTextureLod), which is open where the sampler moves or blends levels (docs/reference/shaders.md, register texel offsets)
-            bool hasInvalidOffset = needsOffsetsEmulation || ((hasOffset || hasOffsets) && !gpuAccessor.QueryHostSupportsNonConstantTextureOffset()) ||
+            bool supportsRuntimeOffset = hasOffsets
+                ? gpuAccessor.QueryHostSupportsNonConstantTextureGatherOffsets()
+                : gpuAccessor.QueryHostSupportsNonConstantTextureOffset();
+            bool hasInvalidOffset = needsOffsetsEmulation || ((hasOffset || hasOffsets) && !supportsRuntimeOffset) ||
                 (hasOffset && !isGather && gpuAccessor.QueryHostNonConstantOffsetGatherOnly());
 
             bool isBindless = (texOp.Flags & TextureFlags.Bindless) != 0;
@@ -441,8 +444,20 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
 
             LinkedListNode<INode> oldNode = node;
 
-            if (isGather && !isShadow && hasOffsets)
+            if (isGather && hasOffsets)
             {
+                // The SPIR-V generator replaces NaN coordinates with zero before applying native offsets.
+                // Do the same before moving the offset into the coordinate.
+                for (int index = 0; index < coordsCount; index++)
+                {
+                    Operand source = sources[coordsIndex + index];
+                    Operand isNan = Local();
+                    Operand safeCoord = Local();
+                    node.List.AddBefore(node, new Operation(Instruction.IsNan, isNan, source));
+                    node.List.AddBefore(node, new Operation(Instruction.ConditionalSelect, safeCoord, isNan, ConstF(0), source));
+                    sources[coordsIndex + index] = safeCoord;
+                }
+
                 Operand[] newSources = new Operand[sources.Length];
 
                 sources.CopyTo(newSources, 0);

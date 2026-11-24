@@ -31,10 +31,11 @@
     X(vkCreateCommandPool) X(vkAllocateCommandBuffers) X(vkResetCommandBuffer) X(vkBeginCommandBuffer) X(vkEndCommandBuffer) \
     X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue) X(vkSignalSemaphore) \
     X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences) \
+    X(vkCreateEvent) X(vkDestroyEvent) X(vkSetEvent) X(vkCmdWaitEvents) \
     X(vkCmdPipelineBarrier) X(vkCmdCopyBuffer) X(vkCmdUpdateBuffer) X(vkCmdFillBuffer) X(vkCmdCopyBufferToImage) X(vkCmdCopyImageToBuffer) \
     X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkCmdResolveImage) X(vkCmdClearColorImage) X(vkCmdClearDepthStencilImage) X(vkCmdClearAttachments) \
     X(vkCmdBeginRendering) X(vkCmdEndRendering) \
-    X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) \
+    X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) \
     X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) \
     X(vkGetRefreshCycleDurationGOOGLE) X(vkGetPastPresentationTimingGOOGLE) \
     X(vkCreateShaderModule) X(vkDestroyShaderModule) X(vkCreatePipelineLayout) X(vkDestroyPipelineLayout) X(vkDestroyPipeline) X(vkCreatePipelineCache) X(vkGetPipelineCacheData) \
@@ -42,10 +43,11 @@
     X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers2) X(vkCmdBindIndexBuffer) \
     X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndirect) X(vkCmdDrawIndexedIndirect) X(vkCmdDrawIndirectCount) X(vkCmdDrawIndexedIndirectCount) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDispatchBase) \
     X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetPrimitiveTopology) \
-    X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) \
+    X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthBoundsTestEnable) X(vkCmdSetDepthBounds) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) \
     X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilWriteMask) X(vkCmdSetStencilReference) X(vkCmdSetDepthBias) X(vkCmdSetDepthBiasEnable) \
     X(vkCmdSetRasterizerDiscardEnable) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetBlendConstants) X(vkCmdSetLineWidth) \
-    X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) X(vkCmdDrawMeshTasksIndirectEXT)
+    X(vkCmdPushDescriptorSetKHR) X(vkCmdSetVertexInputEXT) X(vkCmdPushConstants) X(vkCmdDrawMeshTasksEXT) X(vkCmdDrawMeshTasksIndirectEXT) \
+    X(vkCmdBeginQuery) X(vkCmdEndQuery)   /* (vkCmdDrawIndirectCount and vkCmdDrawIndexedIndirectCount are listed above) */
 #define VKA_DECL(f) PFN_##f f;
 typedef struct { PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr; VKA_GLOBAL_FNS(VKA_DECL) VKA_INSTANCE_FNS(VKA_DECL) VKA_DEVICE_FNS(VKA_DECL) } vka_fns;
 extern vka_fns vk;   // a missing optional entry point is NULL
@@ -65,6 +67,11 @@ static inline double vka_env_c(vka_envc *c, const char *key, double def) {
 }
 #define VKA_ENVF(key, def) ({ static vka_envc c_; vka_env_c(&c_, key, def); })
 #define VKA_ENV(key, def) ((int)VKA_ENVF(key, def))
+// The reset of the replay's own command buffers (submission parts, upload batches): DM_VK_CB_RELEASE=1 (live, off by default; an experiment) hands their memory back to the
+// driver at each reset (VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT), and vka_draw.c then keeps one descriptor pool a submission slot. Without it a command buffer and a
+// slot's pools keep the most a submission ever took (an area load's), as Vulkan allows: the A/B for docs/reference/memory.md "Heap blocks and driver maps that grow at each
+// area change (Android)", whose owner is not proven
+static inline VkCommandBufferResetFlags vka_cb_reset_flags(void) { return VKA_ENV("DM_VK_CB_RELEASE", 0) ? VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT : 0; }
 int vka_env_str(const char *key, char *out, size_t n);   // a string switch as live control sees it (1 = set); not cached: for switches read rarely
 void vka_floor_span(uint64_t frame, uint64_t ns);   // vka_exec.c: a submission of frame ended ns after the frame began (the adaptive floor)
 void vka_floor_stats(char *b, size_t n);
@@ -85,6 +92,7 @@ typedef struct {
     // instance-rate divisors, logic operations, dual-source blending, geometry and tessellation stages, depth clamp, fill mode lines, wide lines
     int indirect_count;
     int push_desc, vin_dyn, null_desc, ext_storage, idx8, divisor, logic_op, dual_src, geom, tess, depth_clamp, fill_lines, depth_bias_clamp, multi_vp, a2c;
+    int depth_bounds;   // depthBounds: NVN's depth bounds test (nvnCommandBufferSetDepthBounds, vka_draw.c); without it the bounds are ignored, as before (Banana Native v0.3.51, 94009e1d)
     int minmax;   // samplerFilterMinmax (Vulkan 1.2): NVN's min / max sampler reduction (vka_tex.c sampler_of; Banana Native 02d081a2)
     int vstores, fstores;   // vertexPipelineStoresAndAtomics, fragmentStoresAndAtomics: texture-use feedback of the pool (vka_tex.c "Texture pool reads") writes from those stages
     // NVN2 task and mesh programs (VK_EXT_mesh_shader: mesh = meshShader, task = taskShader too; DM_VK_MESH=0 leaves it off): their shaders are refused without it (vka_shader.c refusal)
@@ -129,7 +137,22 @@ void vka_pcache_path(char *out, size_t n);   // the pipeline cache file of this 
 int vka_ok(void);
 uint32_t vka_mem_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid);
 VkResult vka_submit(VkCommandBuffer cb, uint64_t signal, uint32_t nwait, const VkSemaphore *wait, const uint64_t *wait_vals, const VkPipelineStageFlags *stages, VkSemaphore bin_signal);
-VkResult vka_submit_fence(VkCommandBuffer cb, uint64_t signal, VkFence fence);   // (vka_exec.c: an unsignalled commit's own fence)
+VkResult vka_submit_fence(VkCommandBuffer cb, uint64_t signal, VkFence fence, uint64_t gate);   // (vka_exec.c: an unsignalled commit's own fence; gate: the gate value it waits for, 0 = none)
+// Gates (vka_dev.c; upstream Banana Native): the GPU waits for an event word the CPU sets (vka_qsched.h "Waits for the CPU"). vka_gate_add: a gate on word w (the NVN predicate
+// mode / value) for the submission of fence, returns the gate semaphore value the replay's next submission waits for (0: none made, park instead); park_ns: its time (0: none).
+// vka_gate_poll: open the gates that hold now (in order; any thread: nvnEventSignal calls it). vka_gate_cpu_wait: a CPU thread is about to wait for fence: the gates
+// before it open (the GPU would wait for that thread). vka_gate_banned: w's gate ran out of time (park it instead). *ev: the gate's host event (VK_NULL_HANDLE: none), set
+// when the gate opens; the gated work waits for it with the host's writes in its scope (vka_exec.c vka_rp_gate), destroyed once fence is done
+VkSemaphore vka_gate_sem(void);
+uint64_t vka_gate_add(volatile uint32_t *w, uint32_t mode, uint32_t value, uint64_t fence, uint64_t park_ns, VkEvent *ev);
+void vka_gate_poll(void);
+void vka_gate_cpu_wait(uint64_t fence);
+int vka_gate_banned(const volatile uint32_t *w);
+void vka_gate_host_stall(int on);   // 1 / 0 around the host's own long work on the present path (the game's thread waits behind it): the gates' time stands still
+void vka_gate_stats(uint64_t *n_word, uint64_t *n_cpu, uint64_t *n_time, uint64_t *wait_ns);   // cumulative: opened by their word, by a CPU wait, by their time; time armed
+int vka_gate_pending(void); int vka_gate_drain(uint64_t timeout_ns);   // gates not yet opened; wait until none is (the present on a driver that holds submissions back behind a gate: vka_dev.c)
+void vka_rp_gate(uint64_t g, VkEvent ev);   // vka_exec.c: the submission being replayed is gated at a wait (its next submission to the queue waits for gate value g, its work after the wait for ev)
+uint64_t vka_worker_cpu_blocked(void);      // vka_worker.c: the highest fence CPU threads block on now (0: none)
 
 // The fence ledger: fence n is "done" once the GPU passed it and its CPU-side effects (events, counters) have run
 uint64_t vka_fence_next(void);                      // reserve the next fence value (submit thread)
@@ -154,7 +177,17 @@ void vka_fence_post(uint64_t fence, void *ops, int n, void (*run)(void *ops, int
 uint64_t vka_done(void);
 void vka_fence_cpu(uint64_t fence, void *ops, int n, void (*run)(void *ops, int n));   // no GPU behind it (no device, a failed submit): the effects run now and fence is done
 int vka_wait_done(uint64_t fence, uint64_t timeout_ns);
-void vka_worker_cpu_wait(uint64_t fence);   // vka_worker.c: a CPU thread is about to block on fence (parked queues that hold it back are released)
+int vka_worker_cpu_wait(uint64_t fence);    // vka_worker.c: a CPU thread is about to block on fence (parked queues that hold it back are released once the worker is stuck)
+void vka_worker_cpu_wait_end(int was);      // vka_worker.c: that wait is over (was: vka_worker_cpu_wait's result)
+// The GPU-wait trace (vka_worker.c, DM_VK_QS_TRACE): the last events of the queue scheduler and the submissions, printed when a GPU hang is declared (from upstream Banana Native)
+enum { QT_SUB = 1, QT_PARK, QT_PASS, QT_RELEASE, QT_GATE, QT_FORCE, QT_SIGNAL, QT_COMMIT, QT_PART, QT_LAND, QT_PRESENT, QT_CPU_WAIT, QT_SUBMIT_ERR, QT_SLOT, QT_GATE_OPEN, QT_GATE_SUB };
+void vka_qtrace(int kind, uint64_t q, uint64_t fence, uint64_t x, uint32_t a, uint32_t b, uint32_t c, uint32_t d, const volatile void *w);
+int vka_qtrace_on(void);
+void vka_qtrace_dump(void);
+// GPU breadcrumbs (vka_exec.c, DM_VK_CRUMBS): the GPU writes a number into host memory at each point; after a lost device the last number written says how far it got
+enum { CR_PART_BEGIN = 1, CR_PART_END, CR_DISPATCH, CR_PASS_END, CR_GATE };   // (CR_GATE: past a gate's wait, level 1)
+void vka_crumb(VkCommandBuffer cb, int kind, uint64_t key);
+int vka_crumbs_level(void);
 void vka_after(uint64_t fence, void (*fn)(void *), void *arg);   // deferred destruction: fn(arg) once fence is done
 
 // Host-visible scratch memory for one submission (uploads, deswizzled texels, readbacks); valid until the submission's fence
@@ -209,6 +242,8 @@ uint64_t vks_bytes_nolock(void);
 int vka_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off, VkDeviceAddress *bda);   // 1 = [addr, addr + len) lies in one placed segment
 int vka_mem_release(uintptr_t lo, uintptr_t hi);    // the host gives [lo, hi) back: segments there are given back first; 0 = the host releases the range itself
 uint64_t vka_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // bytes from addr (at most len) in the segment that holds addr, 0 = none
+uint64_t vka_gpu_addr_run(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // the same, and an address in an NVN sparse pool through its page table (vka_mem.c)
+int vka_gpu_addr(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *off);   // 1 = [addr, addr + len) is one run of vka_gpu_addr_run
 // A texel buffer view of the placed guest bytes at addr (at most bytes, whole texels of texel bytes) in format f, storage or uniform: kept per segment buffer, offset,
 // range and format, destroyed with the segment's buffer; *range the bytes it covers. NULL with why (a sentence) when it cannot be made
 VkBufferView vka_buf_view(uint64_t addr, uint64_t bytes, VkFormat f, uint32_t texel, int storage, int atomic, uint64_t *range, char *why, size_t nwhy);
@@ -358,6 +393,9 @@ void vka_gp_sub_begin(VkCommandBuffer cb, uint64_t frame);
 void vka_gp_commit(VkCommandBuffer cb, uint64_t fence);
 void vka_gp_sub_frame(uint64_t f);
 void vka_img_barrier(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to);
+// The DLSS stand-in's scaling copy with its alpha from another view (vka_dlss.c; its other entry points are in vka_dlss.h): alpha_in's rectangle jx, jy, aw x ah (an
+// atw x ath image) gives the output's alpha, so FSR 3.1's RGB keeps the DLSS input colour's alpha (vka_fsr3.c); vka_dlss_scale passes the colour view itself
+int vka_dlss_scale_alpha(VkCommandBuffer cb, VkImageView in, int sx, int sy, int iw, int ih, uint32_t tw, uint32_t th, VkImageView alpha_in, float jx, float jy, int aw, int ah, uint32_t atw, uint32_t ath, vka_img *d, uint32_t dl, int dx, int dy, int ow, int oh, int enc);
 // The control line "screenshot" (vka_ctl.c): the present copies the window texture's crop into its command buffer, then hands the texels to the PNG writer once that submission is done
 void vka_ctl_shot_record(VkCommandBuffer cb, vka_img *im, int cx, int cy, int cw, int ch);
 void vka_ctl_shot_done(VkFence fence);
@@ -368,6 +406,7 @@ void vka_tex_feedback(vka_img *const *ims, const uint32_t *levels, int n);   // 
 int vka_tex_id_in_pass(int id);   // texture ID id's image is an attachment of the open pass (vka_tex_feedback's set), may share memory with one, or is not known
 int vka_tex_id_buffer(int id, uint64_t *addr, uint64_t *bytes, VkFormat *fmt, uint32_t *texel);   // a buffer texture's storage, bytes and texel buffer format; 0 = not a buffer texture (or no format)
 int vka_tex_id_target(int id);                      // the NVN target texture ID id stands for (its view's), -1 = not registered
+int vka_tex_id_can_cube(int id);                    // 1 when texture ID id's image (or registration) can form a Vulkan cube / cube-array view
 int vka_tex_id_pending(int id);                     // texture ID id is registered and its image is not made yet (its first use records commands)
 VkImageView vka_tex_id_view_rec(int id, VkCommandBuffer cb, uint8_t dim, int storage, VkImageLayout *layout);   // the same on the recording thread, through a memo (DM_VK_TEX_MEMO)
 int vka_tex_id_pending_rec(int id, uint8_t dim);
@@ -452,9 +491,10 @@ typedef struct {
     vka_bstate b;
     const prog_t *bst[VKA_NSTAGE], *cprog;   // the program bound per graphics stage (NVN stage bits; [5] unused, [6] / [7] NVN2's task and mesh bits), the compute program
     blend_st blend[8]; color_st color; chmask_st chmask; ms_st ms; poly_st poly; ds_st ds;
-    va_st attr[16]; int nattr; vs_st stream[16]; int nstream; NVNbufferRange vbuf[16];
+    va_st attr[32]; int nattr; vs_st stream[16]; int nstream; NVNbufferRange vbuf[16];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp, depth_clamp; uint8_t vp_sw[16][4];
+    p_depth_bounds dbnd;               // SetDepthBounds as the game passed it (resolved at the draw: nvn_dbnd.h)
     float blend_color[4], alpha_ref;
     p_prim_restart restart; int rast_discard, tf_on;
     int inited;
@@ -500,6 +540,11 @@ void vka_dispatch(vka_dstate *d, const p_dispatch *dp);
 void vka_mdx_batch(const uint64_t *inds, int n);
 int vka_mdx_has(uint64_t ind);
 void vka_mdx_inval(void);
+// Non-indexed indirect QUADS draws (vka_draw.c "Indirect quad draws"): their records converted on compute into VkDrawIndexedIndirectCommand copies over a shared index buffer
+void vka_qdx_batch(const uint64_t *inds, int n);
+int vka_qdx_has(uint64_t ind);
+void vka_qdx_inval(void);
+int vka_qdx_on(void);   // DM_VK_QUAD_IND (live, 1): 0 = such draws skipped, as before
 // Whether the game is a Switch 2 one (NVN2: its compute reads the group counts at c0 + DMSH_C0_DISPATCH_NVN2): dm_sdk_ounce() unless set (the replayer sets it from the capture)
 int vka_nvn2(void);
 void vka_set_nvn2(int on);
@@ -551,5 +596,6 @@ void vka_fps_fg(int state, int mult);
 // to present before it (gen, at most VKA_FG_MAX, the present takes its own references), how long each image of this frame should stay (hold, seconds; 0 = the game's period)
 // and the output period for the window's frame rate (0 = frame generation off). Present thread only
 enum { VKA_FG_MAX = 3 };
-int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence, vka_img **gen, double *hold, double *out_period);
+int vka_fg_frame(uint64_t serial, const int *crop, double period, uint64_t fence, int format, vka_img **gen, double *hold, double *out_period);
+void vka_present_picture_size(int cw, int ch, int *pw, int *ph);   // vka_present.c: the size in swapchain pixels a crop is shown at, 0 x 0 without a swapchain (present thread)
 uint64_t vka_refresh_ns(void);   // vka_present.c: the panel's refresh period in ns from display timing, 0 when not known (present thread)

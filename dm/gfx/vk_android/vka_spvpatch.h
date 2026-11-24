@@ -56,3 +56,21 @@ uint32_t *vka_spv_shuffle_xor(const uint32_t *w, size_t nw, size_t *out_nw, int 
 // (vka_spvpatch.c): the same value on a 64-lane subgroup without ir3's loop of rotates. A malloc'd copy (*out_nw words, *sites shuffles rewritten); NULL with err empty when
 // no shuffle has that form, NULL with the reason in err when the module cannot be rewritten
 uint32_t *vka_spv_shuffle_halves(const uint32_t *w, size_t nw, size_t *out_nw, int *sites, char *err, size_t errn);
+// Every float arithmetic result of the module decorated NoContraction (vka_spvpatch.c): the compute form of a task / mesh program, so two programs that compute the
+// same positions get the same bits (a depth prepass and its EQUAL colour pass). A malloc'd copy (*out_nw words, *sites results); NULL with err empty when nothing to
+// decorate, NULL with the reason in err when the module cannot be read
+uint32_t *vka_spv_exact_float(const uint32_t *w, size_t nw, size_t *out_nw, int *sites, char *err, size_t errn);
+
+// From Banana Native v0.3.52-preview (#590, #618, #613):
+// preserve the rounding of arithmetic feeding a translated FragDepth store. NULL if no decorations are needed.
+uint32_t *vka_spv_precise_depth(const uint32_t *words, size_t count, size_t *out_count);
+// NonUniform on a module's dynamically indexed sampled-image arrays outside the texture pool (set pool_set bindings pool_tex / pool_smp), for the game profile's
+// nonuniform_texture_arrays (vka_spvpatch.c vka_spv_nonuniform): only decorations, capabilities and the extension added. A malloc'd copy (*out_nw words), NULL with
+// err empty when there is nothing to add, NULL with the reason in err when refused (c->refused). c: sites taken, decorations / capabilities / extension added, dynamic
+// chains into the pool and into other arrays left alone
+typedef struct { int sites, decorated, caps, ext, pool, skipped, refused; } vka_nu_count;
+uint32_t *vka_spv_nonuniform(const uint32_t *w, size_t nw, uint32_t pool_set, uint32_t pool_tex, uint32_t pool_smp, size_t *out_nw, vka_nu_count *c, char *err, size_t errn);
+// A module whose only 64-bit integers make physical-storage-buffer pointers from two 32-bit words, rewritten without them for a device that has no shaderInt64 (SPIR-V 1.5:
+// OpBitcast from the vector to the pointer). NULL with *changed 0: nothing to do or not this case (the module as it is)
+uint32_t *vka_spv_no_int64(const uint32_t *w, size_t nw, size_t *out_nw, int *changed, char *err, size_t errn);
+int vka_spv_declares_int64(const uint32_t *w, size_t nw);   // 1 = the module declares the Int64 capability

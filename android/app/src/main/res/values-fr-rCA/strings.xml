@@ -56,6 +56,8 @@
     <string name="s2_play_prewarm_n">Préchauffage de %1$d pipelines…</string>
     <string name="s2_play_scene">Chargement des textures et de la première scène…</string>
     <string name="s2_play_ready">Prêt</string>
+    <string name="s2_play_compiling">Compilation des nuanceurs : %1$d sur %2$d, environ %3$d s restantes · Touchez pour passer</string>
+    <string name="s2_play_compiling_n">Compilation des nuanceurs : %1$d sur %2$d · Touchez pour passer</string>
     <string name="s2_game_settings">Paramètres du jeu</string>
     <string name="s2_this_game">CE JEU UNIQUEMENT</string>
     <string name="s2_game_settings_intro">Les changements s\'appliquent au prochain lancement. Par défaut suit les paramètres généraux.</string>
@@ -311,7 +313,7 @@
     <string name="s2_resolution_note">La taille à laquelle le jeu effectue le rendu.</string>
     <string name="s2_frame_cap_note">Le nombre maximal d\'images par seconde que ce jeu affiche.</string>
     <string name="s2_frame_cap_own">Ce jeu choisit sa propre fréquence d\'images</string>
-    <string name="s2_game_graphics_hint">La mise à l\'échelle FSR et la génération d\'images sont des paramètres généraux (Paramètres › Performances) et ceux du panneau en jeu.</string>
+    <string name="s2_game_graphics_hint">La génération d\'images est un paramètre général (Paramètres › Performances) et celui du panneau en jeu.</string>
     <string name="s2_upscaler">Mise à l\'échelle</string>
     <string name="s2_upscaler_net">Le réseau neuronal du jeu (NDSR)</string>
     <string name="s2_upscaler_fsr">FSR 1 (plus rapide)</string>
@@ -731,8 +733,8 @@
     <string name="s2_gfx_on">Activé</string>
     <string name="s2_gfx_inherit">Suivre les paramètres globaux / le profil du jeu</string>
     <string name="s2_gfx_scaling_note">Met l\'image à l\'échelle de l\'écran et remplace les upscalers neuronaux pris en charge. Natif conserve le réseau du jeu.</string>
-    <string name="s2_gfx_sharp">Netteté de sortie FSR</string>
-    <string name="s2_gfx_sharp_note">Accentuation quand l\'image finale est agrandie à la taille de l\'écran.</string>
+    <string name="s2_gfx_sharp">Netteté</string>
+    <string name="s2_gfx_sharp_note">L\'accentuation de l\'image agrandie par la mise à l\'échelle.</string>
     <string name="s2_gfx_async">Pipelines en arrière-plan</string>
     <string name="s2_gfx_async_note">S\'applique au prochain lancement. Compile en arrière-plan et attend si nécessaire pour préserver les effets.</string>
     <string name="s2_gfx_timing">Minutage GPU</string>
@@ -810,4 +812,22 @@
     <string name="s2_warm_play_now">Jouer maintenant</string>
     <string name="s2_warm_stop">Arrêter</string>
     <string name="s2_warm_close">Fermer</string>
+    <string name="s2_sec_image">Image</string>
+    <string name="s2_sec_frames">Images par seconde</string>
+    <string name="s2_sec_scene">Scène</string>
+    <string name="s2_up_original">Originale (celle du jeu)</string>
+    <string name="s2_up_note">FSR 1 est le plus léger. SGSR 2 et FSR 3.1 reconstruisent les détails à partir des images précédentes dans les jeux avec DLSS (SGSR 2 aussi dans Ocarina of Time) ; ailleurs, ils agissent comme FSR 1. S’applique aussitôt.</string>
+    <string name="s2_up_level">Niveau de mise à l\'échelle</string>
+    <string name="s2_up_quality">Qualité (1080p)</string>
+    <string name="s2_up_balanced">Équilibré (720p)</string>
+    <string name="s2_up_performance">Performances (540p)</string>
+    <string name="s2_up_level_note">La résolution de rendu du jeu avant la mise à l\'échelle : plus basse, plus rapide. Au prochain lancement.</string>
+    <string name="s2_gfx_foliage">Herbe et plantes</string>
+    <string name="s2_gfx_foliage_high">Élevé (comme le jeu les dessine)</string>
+    <string name="s2_gfx_foliage_medium">Moyen (la moitié de l\'herbe)</string>
+    <string name="s2_gfx_foliage_low">Faible (sans herbe, la moitié des plantes)</string>
+    <string name="s2_gfx_foliage_none">Aucun</string>
+    <string name="s2_gfx_foliage_note">Moins d\'herbe et de végétation pour plus d\'images par seconde dans les champs et les forêts. S’applique aussitôt.</string>
+    <string name="s2_gfx_effect_volume_fog">Brouillard</string>
+    <string name="s2_gfx_effect_note">Désactivé : l\'effet n\'est pas dessiné, pour plus d\'images par seconde. S’applique aussitôt.</string>
 </resources>

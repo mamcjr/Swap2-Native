@@ -12,10 +12,13 @@ layout(set=0,binding=385,std430) readonly buffer Payload { uint payload[]; };
 layout(set=0,binding=386,std430) buffer Offsets { uint offsets[]; };
 layout(set=0,binding=387,std430) buffer Info { uint info[]; };
 layout(set=0,binding=388,std430) readonly buffer Source { uint source[]; };
-layout(push_constant) uniform Control { uint phase; uint batch_base; } control;
+// keep (vka_mesh.inc foliage_action, DM_VK_FOLIAGE): the draw keeps the first ceil(count / keep) of its tasks (or, without a task shader, of its mesh groups); 1 = all.
+// A program's passes (its depth prepass and its colour pass) read the same count, so they keep the same ones.
+layout(push_constant) uniform Control { uint phase; uint batch_base; uint keep; } control;
 void begin() {
     uint count=source[0], first=source[1];
     info[17]=(count > 65535u || (count!=0u && first > 0xffffffffu-(count-1u))) ? 1u : 0u;
+    if (control.keep > 1u) count=(count+control.keep-1u)/control.keep;
     info[10]=info[17]==0u ? count : 0u;
     info[19]=first;
     info[0]=info[10]; info[1]=1u; info[2]=1u;

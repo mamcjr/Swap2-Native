@@ -95,6 +95,7 @@ Current, 2026-11-17 (POCO F7 Ultra, Adreno 830 target):
 
 ## Found on this game
 
+- [Absent vertex attributes lose W](../../../docs/reference/rendering.md#absent-vertex-attributes-lose-w): the Slosher's airborne ink invisible on the Mac (upstream nxnative #3181); the Vulkan replay's fix is not yet run in the game on Android.
 - [Compressed textures as render targets through an uncompressed shadow](../../../docs/reference/rendering.md#compressed-textures-as-render-targets-through-an-uncompressed-shadow): the player's arms and legs missing on Android until the shadow was ported.
 - [No stand-in shared font on Android](../../../docs/reference/services.md#no-stand-in-shared-font-on-android): the crash at 1.2 s at boot in Swap2-Native; the menus at 60 fps with the launcher's Noto Sans stand-in.
 - [Shared fonts depend on the phone's fonts (one Roboto for six types)](https://git.eden-emu.dev/moceure/BananaNative/src/tag/eden/v0.3.42/docs/reference/services.md#shared-fonts-depend-on-the-phones-fonts-one-roboto-for-six-types): issue #223; the APK's Noto Sans is now `standard.ttf`, per-type order in the host. Phone check open.

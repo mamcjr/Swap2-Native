@@ -190,3 +190,4 @@ During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff): contended native decoder waits must release a handoff.
 - [oe calls answered without an applet proxy](../../../docs/reference/services.md#oe-calls-answered-without-an-applet-proxy): enabling album-image notifications dereferenced the absent SelfController.
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area) and [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
+- [Default language from control data](../../../docs/reference/services.md#default-language-from-control-data): lists British English without American English; upstream host runs without `DM_LANG` crashed 2.5 s into boot at `main+0x10141ac` (upstream PR #3147).

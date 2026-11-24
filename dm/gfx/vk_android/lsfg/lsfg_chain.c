@@ -9,46 +9,58 @@
 // level, history of 3 frames), beta (5 stages); per generated frame: gamma at each level and delta at the 3 finest, then generate into the output image. The images,
 // descriptor sets and pass order are Eden's. Differences: every chain image is put in GENERAL layout once when the chain is made, so the barriers between passes are
 // global memory barriers (Eden's per-image barriers keep the layout GENERAL as well); the pipelines of one pass are made once and shared by the levels that run it; the
-// outputs are the frame generation's own images (vka_framegen.c) instead of the swapchain frames, and their descriptor sets are written when the chain is made
+// outputs are the frame generation's own images (vka_framegen.c) instead of the swapchain frames, and their descriptor sets are written when the chain is made.
+// The generated frames of one game frame are made together (lsfg_chain_generate): each has its own gamma and delta images (Eden's chain shares one set and runs the
+// generations one after another), and the passes run as a wavefront: every pass whose inputs are written goes behind the same barrier (wave_*)
 #if defined(__ANDROID__)
 #include "../vka.h"
 #include "lsfg.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define LSFG_FORMAT VK_FORMAT_R8G8B8A8_UNORM
 #define LSFG_FLOW_FORMAT VK_FORMAT_R8_UNORM
 #define LSFG_MOTION_FORMAT VK_FORMAT_R16G16B16A16_SFLOAT
 enum { HIST = 3, MIPS = 7, ALPHA_STAGES = 4, BETA_STAGES = 5, BETA_OUTPUTS = 6, GAMMA_STAGES = 5, DELTA_STAGES = 10, DELTA_N = 3, FIRST_DELTA_LEVEL = 4,
-       MAX_IMAGES = 192, MAX_UBO = 48, DESCRIPTORS_PER_TYPE = 4096, FIXED_SETS = 64, SETS_PER_SLOT = 112 };
+       MAX_IMAGES = 512, MAX_UBO = 48, DESCRIPTORS_PER_TYPE = 8192, FIXED_SETS = 64, SETS_PER_SLOT = 112 };
+// The quality set (lsfg-vk's v3.1, IDs 257..279) against the performance set (v3.1p, 280..302; mipmaps 255 and generate 256 are shared): the same passes and pass order
+// with more channels. Alpha and delta's last four stages carry W images where performance carries 1, alpha's quarter-size images 2W, beta's first pass reads 3 x 2W, and
+// gamma's and delta's middle stages NT where performance has 2 (each pass's set layout checked against the modules' own bindings in the DLL)
+enum { PROBE_MIP = 2 };   // lsfg_chain_probe: the flow input at a quarter of its size (240x135 for 1080p at 50 %)
+#define W(c) ((c)->q ? 2 : 1)
+#define NT(c) ((c)->q ? 4 : 2)
+#define NT1(c) ((c)->q ? 4 : 3)   // gamma's and delta's t1 images (the first stage writes 3)
+static uint32_t sh_id(int q, uint32_t perf_id) { return q && perf_id > LSFG_SH_GENERATE ? perf_id - LSFG_QUALITY_DELTA : perf_id; }
 
-typedef struct { VkImage img; VkDeviceMemory mem; VkImageView view; VkExtent2D ext; VkFormat fmt; } limg;
+typedef struct { VkImage img; vka_imem m; VkImageView view; VkExtent2D ext; VkFormat fmt; } limg;   // m: in the replay's image blocks (vka_imgmem.c)
 typedef struct { VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkPipeline pipe; } lpass;
 typedef struct { struct { float ts; int fi, fis; } key; VkDeviceSize off; } lubo;
 
 struct lsfg_chain {
-    int bad;
+    int bad, q; size_t gens;   // q: the quality shader set; gens: the generated frames a game frame can have (1..LSFG_MAX_GENERATIONS), each with its own gamma and delta images
     VkDescriptorPool pool; VkCommandPool cpool;
     VkSampler samp, samp_border, samp_edge;
     VkBuffer ubuf; VkDeviceMemory umem; uint8_t *umap; VkDeviceSize ustride; lubo ubo[MAX_UBO]; int nubo;
-    limg imgs[MAX_IMAGES]; int nimg;
+    limg imgs[MAX_IMAGES]; int nimg; VkDeviceSize bytes;   // bytes: the images' memory (their requirements)
     limg *frames[2];
     // mipmaps
     lpass mip_pass; VkDescriptorSet mip_sets[2]; VkExtent2D flow_ext; limg *mip[MIPS];
     // alpha
     lpass alpha_pass[ALPHA_STAGES];
-    struct { limg *input, *t1, *t2, *t3[2], *out[HIST][2]; VkDescriptorSet sets[ALPHA_STAGES - 1], last[HIST]; } alpha[MIPS];
+    struct { limg *input, *t1[2], *t2[2], *t3[4], *out[HIST][4]; VkDescriptorSet sets[ALPHA_STAGES - 1], last[HIST]; } alpha[MIPS];
     // beta
     lpass beta_pass[BETA_STAGES];
     VkDescriptorSet beta_first[HIST], beta_sets[BETA_STAGES - 1]; limg *beta_t1[2], *beta_t2[2], *beta_out[BETA_OUTPUTS];
     // gamma
     lpass gamma_pass[GAMMA_STAGES];
-    struct { limg *t1[3], *t2[2], *out; struct { VkDescriptorSet first[HIST], sets[GAMMA_STAGES - 1]; } g[LSFG_GENERATION_SLOTS]; } gamma[MIPS];
+    struct { struct { limg *t1[4], *t2[4], *out; } c[LSFG_MAX_GENERATIONS]; struct { VkDescriptorSet first[HIST], sets[GAMMA_STAGES - 1]; } g[LSFG_GENERATION_SLOTS]; } gamma[MIPS];
     // delta
     lpass delta_pass[DELTA_STAGES];
-    struct { limg *t1[3], *t2[2], *out1, *out2; struct { VkDescriptorSet first[HIST], sixth[HIST], sets[DELTA_STAGES - 2]; } g[LSFG_GENERATION_SLOTS]; } delta[DELTA_N];
-    // generate
-    lpass gen_pass; VkDescriptorSet gen_sets[LSFG_GENERATION_SLOTS][LSFG_MAX_GENERATIONS][2]; VkExtent2D out_ext;
+    struct { struct { limg *t1[4], *t2[4], *out1, *out2; } c[LSFG_MAX_GENERATIONS]; struct { VkDescriptorSet first[HIST], sixth[HIST], sets[DELTA_STAGES - 2]; } g[LSFG_GENERATION_SLOTS]; } delta[DELTA_N];
+    // generate (a slot writes the output of its generation)
+    lpass gen_pass; VkDescriptorSet gen_sets[LSFG_GENERATION_SLOTS][2]; VkExtent2D out_ext;
 };
 
 // Entry points the replay's table (vka.h) does not carry
@@ -65,11 +77,11 @@ static int lk_load(void) {
     return state > 0;
 }
 
+// A slot is one (generations, generation) pair: generation gen of count generated frames between two game frames
 static size_t gen_slot(size_t count, size_t gen) { return (count - 1) * count / 2 + gen; }
-static float slot_timestamp(size_t slot) {
-    size_t count = 1; while (gen_slot(count + 1, 0) <= slot) count++;
-    return (float)(slot - gen_slot(count, 0) + 1) / (float)(count + 1);
-}
+static size_t slot_count(size_t slot) { size_t count = 1; while (gen_slot(count + 1, 0) <= slot) count++; return count; }
+static size_t slot_gen(size_t slot) { return slot - gen_slot(slot_count(slot), 0); }
+static float slot_timestamp(size_t slot) { return (float)(slot_gen(slot) + 1) / (float)(slot_count(slot) + 1); }
 static uint32_t groups(uint32_t size, uint32_t shift) { return (size + (1u << shift) - 1) >> shift; }
 
 // ---------- Resources ----------
@@ -82,11 +94,13 @@ static limg *img_new(lsfg_chain *c, VkExtent2D ext, VkFormat fmt) {
         .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
     VkResult r = vk.vkCreateImage(V.dev, &ci, NULL, &im->img);
+    // In the replay's image blocks (vka_imem_bind: under 4 MiB in shared 64 MiB blocks, larger ones their own allocation): a chain holds 150 to 440 images, each with
+    // an allocation of its own before, against the device's maxMemoryAllocationCount, and each made the chain's build slower
     VkMemoryRequirements mr = {0}; if (!r) vk.vkGetImageMemoryRequirements(V.dev, im->img, &mr);
-    VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)};
-    if (!r && ai.memoryTypeIndex == UINT32_MAX) r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    if (!r) r = vk.vkAllocateMemory(V.dev, &ai, NULL, &im->mem);
-    if (!r) r = vk.vkBindImageMemory(V.dev, im->img, im->mem, 0);
+    uint32_t type = r ? UINT32_MAX : vka_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    if (!r && type == UINT32_MAX) r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    if (!r) r = vka_imem_bind(im->img, type, &mr, &im->m);
+    if (!r) c->bytes += mr.size;
     VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = im->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
     if (!r) r = vk.vkCreateImageView(V.dev, &vi, NULL, &im->view);
     if (r) { VRED("lsfg: image %ux%u format %d: %d", im->ext.width, im->ext.height, fmt, r); c->bad = 1; return NULL; }
@@ -116,8 +130,12 @@ static VkDeviceSize ubo_get(lsfg_chain *c, float flow_scale, float ts, int fi, i
 
 // A pass: the compute pipeline of shader id with its set layout, one descriptor per binding in the order of types (the bindings lsfg_dll.c renumbered)
 typedef struct { int n; VkDescriptorType t; } lbind;
-static void pass_new(lsfg_chain *c, lpass *p, const lsfg_modules *mods, uint32_t id, const lbind *b, int nb) {
-    if (c->bad) return;
+#define S_UBO VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+#define S_SMP VK_DESCRIPTOR_TYPE_SAMPLER
+#define S_TEX VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+#define S_STO VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+static void pass_new(int *bad, VkPipelineCache pc, lpass *p, const lsfg_modules *mods, uint32_t id, const lbind *b, int nb) {
+    if (*bad) return;
     VkDescriptorSetLayoutBinding bs[32]; uint32_t n = 0;
     for (int i = 0; i < nb; i++) for (int j = 0; j < b[i].n && n < 32; j++, n++) bs[n] = (VkDescriptorSetLayoutBinding){n, b[i].t, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
     VkDescriptorSetLayoutCreateInfo dl = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = n, .pBindings = bs};
@@ -130,9 +148,98 @@ static void pass_new(lsfg_chain *c, lpass *p, const lsfg_modules *mods, uint32_t
     if (!r) r = m ? vk.vkCreateShaderModule(V.dev, &mi, NULL, &sm) : VK_ERROR_INITIALIZATION_FAILED;
     VkComputePipelineCreateInfo pi = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main"}, .layout = p->pl};
-    if (!r) r = vk.vkCreateComputePipelines(V.dev, VK_NULL_HANDLE, 1, &pi, NULL, &p->pipe);
+    if (!r) r = vk.vkCreateComputePipelines(V.dev, pc, 1, &pi, NULL, &p->pipe);
     if (sm) vk.vkDestroyShaderModule(V.dev, sm, NULL);
-    if (r) { VRED("lsfg: pipeline of shader %u: %d", id, r); c->bad = 1; }
+    if (r) { VRED("lsfg: pipeline of shader %u: %d", id, r); *bad = 1; }
+}
+static void pass_free(lpass *p) {
+    if (p->pipe) lk.vkDestroyPipeline(V.dev, p->pipe, NULL);
+    if (p->pl) lk.vkDestroyPipelineLayout(V.dev, p->pl, NULL);
+    if (p->dsl) lk.vkDestroyDescriptorSetLayout(V.dev, p->dsl, NULL);
+    memset(p, 0, sizeof *p);
+}
+
+// ---------- The passes: made once per shader set for the run and kept across chains (they depend on the DLL's modules and the set only, not on the size, flow or
+// generations a chain is made for), so making a chain again for another size, flow, multiplier or set does not make 25 to 48 compute pipelines again. Their
+// pipeline cache is a file of its own beside the game's (DM_TEMP or HOME, lsfg-<driver>.vkpc: the game's cache file is stamped with its shader library), so the
+// first chain of a run takes the pipelines the driver compiled in an earlier one. DM_LSFG_PCACHE=0 (restart): no file
+typedef struct { int state; lpass mip, gen, alpha[ALPHA_STAGES], beta[BETA_STAGES], gamma[GAMMA_STAGES], delta[DELTA_STAGES]; } lpasses;   // state 0 not made, 1 made, -1 failed
+static lpasses g_ps[2];   // performance, quality
+static VkPipelineCache g_pc; static char g_pc_path[1024]; static int g_pc_state;
+static void pcache_open(void) {
+    if (g_pc_state) return;
+    g_pc_state = 1;
+    const char *t = getenv("DM_TEMP"), *home = getenv("HOME"), *dir = t && *t ? t : home, *tag = vka_driver_tag();
+    if (VKA_ENV("DM_LSFG_PCACHE", 1) && dir && *dir) snprintf(g_pc_path, sizeof g_pc_path, "%s/lsfg-%s.vkpc", dir, tag && *tag ? tag : "system");
+    void *data = NULL; size_t n = 0;
+    FILE *f = g_pc_path[0] ? fopen(g_pc_path, "rb") : NULL;
+    if (f) {
+        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+        if (sz > 32 && sz < (64l << 20) && (data = malloc((size_t)sz)) && fread(data, 1, (size_t)sz, f) == (size_t)sz) n = (size_t)sz;
+        fclose(f);
+        uint32_t hl, ver, vendor, devid;   // the header names the device: another driver's cache is not handed over (as vka_pso.c)
+        if (n) { memcpy(&hl, data, 4); memcpy(&ver, (uint8_t *)data + 4, 4); memcpy(&vendor, (uint8_t *)data + 8, 4); memcpy(&devid, (uint8_t *)data + 12, 4);
+                 if (hl < 32 || ver != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || vendor != V.props.vendorID || devid != V.props.deviceID || memcmp((uint8_t *)data + 16, V.props.pipelineCacheUUID, VK_UUID_SIZE)) n = 0; }
+    }
+    VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = n, .pInitialData = n ? data : NULL};
+    VkResult r = vk.vkCreatePipelineCache(V.dev, &ci, NULL, &g_pc);
+    if (r && n) { ci.initialDataSize = 0; ci.pInitialData = NULL; n = 0; r = vk.vkCreatePipelineCache(V.dev, &ci, NULL, &g_pc); }
+    if (r) g_pc = VK_NULL_HANDLE;
+    VLOG("lsfg: pipeline cache %s: %zu bytes read%s", g_pc_path[0] ? g_pc_path : "(not kept)", n, r ? " (no cache: vkCreatePipelineCache failed)" : "");
+    free(data);
+}
+static void pcache_save(void) {
+    size_t n = 0; void *d = NULL;
+    if (!g_pc || !g_pc_path[0] || vk.vkGetPipelineCacheData(V.dev, g_pc, &n, NULL) || !n || !(d = malloc(n))) return;
+    char tmp[1100]; snprintf(tmp, sizeof tmp, "%s.tmp", g_pc_path);
+    FILE *f = vk.vkGetPipelineCacheData(V.dev, g_pc, &n, d) ? NULL : fopen(tmp, "wb");
+    int ok = f && fwrite(d, 1, n, f) == n;
+    if (f && fclose(f)) ok = 0;
+    if (ok && !rename(tmp, g_pc_path)) VLOG("lsfg: pipeline cache %s: %zu bytes written", g_pc_path, n); else unlink(tmp);
+    free(d);
+}
+static const lpasses *passes_get(const lsfg_modules *mods, int q) {
+    lpasses *P = &g_ps[q != 0];
+    if (P->state) return P->state > 0 ? P : NULL;
+    pcache_open();
+    int bad = 0; uint64_t t0 = now_ns();
+    const int w1 = q ? 2 : 1, w2 = 2 * w1, nt = q ? 4 : 2;   // as W, NT above
+#define PS(p, id, ...) do { const lbind b_[] = {__VA_ARGS__}; pass_new(&bad, g_pc, p, mods, sh_id(q, id), b_, (int)(sizeof b_ / sizeof b_[0])); } while (0)
+    PS(&P->mip, LSFG_SH_MIPMAPS, {1, S_UBO}, {1, S_SMP}, {1, S_TEX}, {MIPS, S_STO});
+    PS(&P->alpha[0], 290, {1, S_SMP}, {1, S_TEX}, {w1, S_STO});
+    PS(&P->alpha[1], 291, {1, S_SMP}, {w1, S_TEX}, {w1, S_STO});
+    PS(&P->alpha[2], 292, {1, S_SMP}, {w1, S_TEX}, {w2, S_STO});
+    PS(&P->alpha[3], 293, {1, S_SMP}, {w2, S_TEX}, {w2, S_STO});
+    PS(&P->beta[0], 298, {1, S_SMP}, {3 * w2, S_TEX}, {2, S_STO});
+    for (int i = 1; i < BETA_STAGES - 1; i++) PS(&P->beta[i], 298 + (uint32_t)i, {1, S_SMP}, {2, S_TEX}, {2, S_STO});
+    PS(&P->beta[4], 302, {1, S_UBO}, {1, S_SMP}, {2, S_TEX}, {6, S_STO});
+    PS(&P->gamma[0], 280, {1, S_UBO}, {2, S_SMP}, {2 * w2 + 1, S_TEX}, {3, S_STO});
+    PS(&P->gamma[1], 282, {1, S_SMP}, {3, S_TEX}, {nt, S_STO});
+    PS(&P->gamma[2], 283, {1, S_SMP}, {nt, S_TEX}, {nt, S_STO});
+    PS(&P->gamma[3], 284, {1, S_SMP}, {nt, S_TEX}, {nt, S_STO});
+    PS(&P->gamma[4], 285, {1, S_UBO}, {2, S_SMP}, {nt + 2, S_TEX}, {1, S_STO});
+    PS(&P->delta[0], 280, {1, S_UBO}, {2, S_SMP}, {2 * w2 + 1, S_TEX}, {3, S_STO});
+    PS(&P->delta[1], 286, {1, S_SMP}, {3, S_TEX}, {nt, S_STO});
+    PS(&P->delta[2], 287, {1, S_SMP}, {nt, S_TEX}, {nt, S_STO});
+    PS(&P->delta[3], 288, {1, S_SMP}, {nt, S_TEX}, {nt, S_STO});
+    PS(&P->delta[4], 289, {1, S_UBO}, {2, S_SMP}, {nt + 2, S_TEX}, {1, S_STO});
+    PS(&P->delta[5], 281, {1, S_UBO}, {2, S_SMP}, {2 * w2 + 2, S_TEX}, {w1, S_STO});
+    for (int i = 6; i < DELTA_STAGES - 1; i++) PS(&P->delta[i], 294 + (uint32_t)(i - 6), {1, S_SMP}, {w1, S_TEX}, {w1, S_STO});
+    PS(&P->delta[9], 297, {1, S_UBO}, {2, S_SMP}, {w1 + 1, S_TEX}, {1, S_STO});
+    PS(&P->gen, LSFG_SH_GENERATE, {1, S_UBO}, {2, S_SMP}, {5, S_TEX}, {1, S_STO});
+#undef PS
+    if (bad) {
+        pass_free(&P->mip); pass_free(&P->gen);
+        for (int i = 0; i < ALPHA_STAGES; i++) pass_free(&P->alpha[i]);
+        for (int i = 0; i < BETA_STAGES; i++) pass_free(&P->beta[i]);
+        for (int i = 0; i < GAMMA_STAGES; i++) pass_free(&P->gamma[i]);
+        for (int i = 0; i < DELTA_STAGES; i++) pass_free(&P->delta[i]);
+        P->state = -1; return NULL;
+    }
+    P->state = 1;
+    VLOG("lsfg: %s pipelines made in %.1f ms", q ? "quality" : "performance", (now_ns() - t0) / 1e6);
+    pcache_save();
+    return P;
 }
 static VkDescriptorSet set_new(lsfg_chain *c, const lpass *p) {
     if (c->bad) return VK_NULL_HANDLE;
@@ -180,19 +287,22 @@ static void run(VkCommandBuffer cb, const lpass *p, VkDescriptorSet s, uint32_t 
     vk.vkCmdDispatch(cb, gx, gy, 1);
 }
 
-#define S_UBO VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-#define S_SMP VK_DESCRIPTOR_TYPE_SAMPLER
-#define S_TEX VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
-#define S_STO VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-#define PASS(p, id, ...) do { const lbind b_[] = {__VA_ARGS__}; pass_new(c, p, mods, id, b_, (int)(sizeof b_ / sizeof b_[0])); } while (0)
 
 static VkExtent2D halve(VkExtent2D e) { return (VkExtent2D){(e.width + 1) >> 1, (e.height + 1) >> 1}; }
 
 // ---------- The chain ----------
-lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_scale, VkImage outs[LSFG_MAX_GENERATIONS], VkImageView out_views[LSFG_MAX_GENERATIONS]) {
+lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_scale, size_t gens, int quality, VkImage outs[LSFG_MAX_GENERATIONS], VkImageView out_views[LSFG_MAX_GENERATIONS]) {
     if (!lk_load()) return NULL;
+    if (quality && !mods->quality) { VRED("lsfg: the quality shader set is not in this Lossless.dll"); return NULL; }
     lsfg_chain *c = calloc(1, sizeof *c);
     if (!c) return NULL;
+    c->gens = gens < 1 ? 1 : gens > LSFG_MAX_GENERATIONS ? LSFG_MAX_GENERATIONS : gens;
+    c->q = quality != 0;
+    const lpasses *P = passes_get(mods, c->q);   // the run's pipelines of the set (handles copied: lsfg_chain_free leaves them)
+    if (!P) { free(c); return NULL; }
+    c->mip_pass = P->mip; c->gen_pass = P->gen;
+    memcpy(c->alpha_pass, P->alpha, sizeof c->alpha_pass); memcpy(c->beta_pass, P->beta, sizeof c->beta_pass);
+    memcpy(c->gamma_pass, P->gamma, sizeof c->gamma_pass); memcpy(c->delta_pass, P->delta, sizeof c->delta_pass);
     lwriter w;
     // Descriptor pool, samplers, uniform buffer
     VkDescriptorPoolSize ps[4] = {{S_UBO, DESCRIPTORS_PER_TYPE}, {S_SMP, DESCRIPTORS_PER_TYPE}, {S_TEX, DESCRIPTORS_PER_TYPE}, {S_STO, DESCRIPTORS_PER_TYPE}};
@@ -217,7 +327,6 @@ lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_
     for (int i = 0; i < 2; i++) c->frames[i] = img_new(c, ext, LSFG_FORMAT);
 
     // Mipmaps (LsfgMipmaps)
-    PASS(&c->mip_pass, LSFG_SH_MIPMAPS, {1, S_UBO}, {1, S_SMP}, {1, S_TEX}, {MIPS, S_STO});
     c->flow_ext = (VkExtent2D){(uint32_t)(ext.width * flow_scale), (uint32_t)(ext.height * flow_scale)};
     if (!c->flow_ext.width) c->flow_ext.width = 1;
     if (!c->flow_ext.height) c->flow_ext.height = 1;
@@ -228,31 +337,25 @@ lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_
     }
 
     // Alpha (LsfgAlphaPasses, LsfgAlpha per level)
-    PASS(&c->alpha_pass[0], 290, {1, S_SMP}, {1, S_TEX}, {1, S_STO});
-    PASS(&c->alpha_pass[1], 291, {1, S_SMP}, {1, S_TEX}, {1, S_STO});
-    PASS(&c->alpha_pass[2], 292, {1, S_SMP}, {1, S_TEX}, {2, S_STO});
-    PASS(&c->alpha_pass[3], 293, {1, S_SMP}, {2, S_TEX}, {2, S_STO});
+    const int w1 = W(c), w2 = 2 * W(c), nt = NT(c), nt1 = NT1(c);
     for (int l = 0; l < MIPS && !c->bad; l++) {
         __typeof__(c->alpha[0]) *a = &c->alpha[l];
         a->input = c->mip[l];
         VkExtent2D half = halve(a->input->ext), quarter = halve(half);
-        a->t1 = img_new(c, half, LSFG_FORMAT); a->t2 = img_new(c, half, LSFG_FORMAT);
-        for (int i = 0; i < 2; i++) { a->t3[i] = img_new(c, quarter, LSFG_FORMAT); for (int j = 0; j < HIST; j++) a->out[j][i] = img_new(c, quarter, LSFG_FORMAT); }
+        for (int i = 0; i < w1; i++) { a->t1[i] = img_new(c, half, LSFG_FORMAT); a->t2[i] = img_new(c, half, LSFG_FORMAT); }
+        for (int i = 0; i < w2; i++) { a->t3[i] = img_new(c, quarter, LSFG_FORMAT); for (int j = 0; j < HIST; j++) a->out[j][i] = img_new(c, quarter, LSFG_FORMAT); }
         for (int s = 0; s < ALPHA_STAGES - 1; s++) a->sets[s] = set_new(c, &c->alpha_pass[s]);
         for (int h = 0; h < HIST; h++) a->last[h] = set_new(c, &c->alpha_pass[3]);
         if (c->bad) break;
-        w_begin(&w, c, a->sets[0]); w_samp(&w, c->samp); w_tex(&w, a->input); w_store(&w, a->t1); w_end(&w);
-        w_begin(&w, c, a->sets[1]); w_samp(&w, c->samp); w_tex(&w, a->t1); w_store(&w, a->t2); w_end(&w);
-        w_begin(&w, c, a->sets[2]); w_samp(&w, c->samp); w_tex(&w, a->t2); w_stores(&w, a->t3, 2); w_end(&w);
-        for (int h = 0; h < HIST; h++) { w_begin(&w, c, a->last[h]); w_samp(&w, c->samp); w_texs(&w, a->t3, 2); w_stores(&w, a->out[h], 2); w_end(&w); }
+        w_begin(&w, c, a->sets[0]); w_samp(&w, c->samp); w_tex(&w, a->input); w_stores(&w, a->t1, w1); w_end(&w);
+        w_begin(&w, c, a->sets[1]); w_samp(&w, c->samp); w_texs(&w, a->t1, w1); w_stores(&w, a->t2, w1); w_end(&w);
+        w_begin(&w, c, a->sets[2]); w_samp(&w, c->samp); w_texs(&w, a->t2, w1); w_stores(&w, a->t3, w2); w_end(&w);
+        for (int h = 0; h < HIST; h++) { w_begin(&w, c, a->last[h]); w_samp(&w, c->samp); w_texs(&w, a->t3, w2); w_stores(&w, a->out[h], w2); w_end(&w); }
     }
 
     // Beta (LsfgBeta, on alpha level 0's outputs)
-    PASS(&c->beta_pass[0], 298, {1, S_SMP}, {6, S_TEX}, {2, S_STO});
-    for (int i = 1; i < BETA_STAGES - 1; i++) PASS(&c->beta_pass[i], 298 + (uint32_t)i, {1, S_SMP}, {2, S_TEX}, {2, S_STO});
-    PASS(&c->beta_pass[4], 302, {1, S_UBO}, {1, S_SMP}, {2, S_TEX}, {6, S_STO});
     if (!c->bad) {
-        limg *(*in)[2] = c->alpha[0].out;
+        limg *(*in)[4] = c->alpha[0].out;
         VkExtent2D e = in[0][0]->ext;
         for (int i = 0; i < 2; i++) { c->beta_t1[i] = img_new(c, e, LSFG_FORMAT); c->beta_t2[i] = img_new(c, e, LSFG_FORMAT); }
         for (int i = 0; i < BETA_OUTPUTS; i++) c->beta_out[i] = img_new(c, (VkExtent2D){e.width >> i, e.height >> i}, LSFG_FLOW_FORMAT);
@@ -260,7 +363,7 @@ lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_
         for (int s = 0; s < BETA_STAGES - 1; s++) c->beta_sets[s] = set_new(c, &c->beta_pass[s + 1]);
         for (int h = 0; h < HIST && !c->bad; h++) {
             w_begin(&w, c, c->beta_first[h]); w_samp(&w, c->samp_border);
-            w_texs(&w, in[(h + 1) % HIST], 2); w_texs(&w, in[(h + 2) % HIST], 2); w_texs(&w, in[h % HIST], 2); w_stores(&w, c->beta_t1, 2); w_end(&w);
+            w_texs(&w, in[(h + 1) % HIST], w2); w_texs(&w, in[(h + 2) % HIST], w2); w_texs(&w, in[h % HIST], w2); w_stores(&w, c->beta_t1, 2); w_end(&w);
         }
         if (!c->bad) {
             w_begin(&w, c, c->beta_sets[0]); w_samp(&w, c->samp); w_texs(&w, c->beta_t1, 2); w_stores(&w, c->beta_t2, 2); w_end(&w);
@@ -270,54 +373,52 @@ lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_
         }
     }
 
-    // Gamma (LsfgGamma, coarsest level first) and delta (LsfgDelta, the three finest)
-    PASS(&c->gamma_pass[0], 280, {1, S_UBO}, {2, S_SMP}, {5, S_TEX}, {3, S_STO});
-    PASS(&c->gamma_pass[1], 282, {1, S_SMP}, {3, S_TEX}, {2, S_STO});
-    PASS(&c->gamma_pass[2], 283, {1, S_SMP}, {2, S_TEX}, {2, S_STO});
-    PASS(&c->gamma_pass[3], 284, {1, S_SMP}, {2, S_TEX}, {2, S_STO});
-    PASS(&c->gamma_pass[4], 285, {1, S_UBO}, {2, S_SMP}, {4, S_TEX}, {1, S_STO});
-    PASS(&c->delta_pass[0], 280, {1, S_UBO}, {2, S_SMP}, {5, S_TEX}, {3, S_STO});
-    PASS(&c->delta_pass[1], 286, {1, S_SMP}, {3, S_TEX}, {2, S_STO});
-    PASS(&c->delta_pass[2], 287, {1, S_SMP}, {2, S_TEX}, {2, S_STO});
-    PASS(&c->delta_pass[3], 288, {1, S_SMP}, {2, S_TEX}, {2, S_STO});
-    PASS(&c->delta_pass[4], 289, {1, S_UBO}, {2, S_SMP}, {4, S_TEX}, {1, S_STO});
-    PASS(&c->delta_pass[5], 281, {1, S_UBO}, {2, S_SMP}, {6, S_TEX}, {1, S_STO});
-    for (int i = 6; i < DELTA_STAGES - 1; i++) PASS(&c->delta_pass[i], 294 + (uint32_t)(i - 6), {1, S_SMP}, {1, S_TEX}, {1, S_STO});
-    PASS(&c->delta_pass[9], 297, {1, S_UBO}, {2, S_SMP}, {2, S_TEX}, {1, S_STO});
+    // Gamma (LsfgGamma, coarsest level first) and delta (LsfgDelta, the three finest).
+    // Each generation of a game frame has its own gamma and delta images (c[gen]), so the generations run side by side (lsfg_chain_generate); a slot's sets use those of
+    // its generation. Slots with more generations than the chain has room for get no sets (never asked for)
     for (int i = 0; i < MIPS && !c->bad; i++) {
         int level = MIPS - 1 - i;
-        limg *(*in)[2] = c->alpha[level].out;
+        limg *(*in)[4] = c->alpha[level].out;
         limg *flow = c->beta_out[level < BETA_OUTPUTS - 1 ? level : BETA_OUTPUTS - 1];
-        limg *prev = i == 0 ? NULL : c->gamma[i - 1].out;
         __typeof__(c->gamma[0]) *g = &c->gamma[i];
         VkExtent2D e = in[0][0]->ext;
-        for (int k = 0; k < 3; k++) g->t1[k] = img_new(c, e, LSFG_FORMAT);
-        for (int k = 0; k < 2; k++) g->t2[k] = img_new(c, e, LSFG_FORMAT);
-        g->out = img_new(c, e, LSFG_MOTION_FORMAT);
+        for (size_t q = 0; q < c->gens; q++) {
+            for (int k = 0; k < nt1; k++) g->c[q].t1[k] = img_new(c, e, LSFG_FORMAT);
+            for (int k = 0; k < nt; k++) g->c[q].t2[k] = img_new(c, e, LSFG_FORMAT);
+            g->c[q].out = img_new(c, e, LSFG_MOTION_FORMAT);
+        }
         for (int s = 0; s < LSFG_GENERATION_SLOTS && !c->bad; s++) {
+            if (slot_count((size_t)s) > c->gens) continue;
+            size_t q = slot_gen((size_t)s);
+            limg *prev = i == 0 ? NULL : c->gamma[i - 1].c[q].out, **t1 = g->c[q].t1, **t2 = g->c[q].t2;
             VkDeviceSize ub = ubo_get(c, flow_scale, slot_timestamp((size_t)s), prev == NULL, 0);
             for (int h = 0; h < HIST; h++) g->g[s].first[h] = set_new(c, &c->gamma_pass[0]);
             for (int k = 0; k < GAMMA_STAGES - 1; k++) g->g[s].sets[k] = set_new(c, &c->gamma_pass[k + 1]);
             if (c->bad) break;
             for (int h = 0; h < HIST; h++) {
                 w_begin(&w, c, g->g[s].first[h]); w_ubo(&w, ub); w_samp(&w, c->samp_border); w_samp(&w, c->samp_edge);
-                w_texs(&w, in[(h + 2) % HIST], 2); w_texs(&w, in[h % HIST], 2); w_tex(&w, prev); w_stores(&w, g->t1, 3); w_end(&w);
+                w_texs(&w, in[(h + 2) % HIST], w2); w_texs(&w, in[h % HIST], w2); w_tex(&w, prev); w_stores(&w, t1, 3); w_end(&w);
             }
-            w_begin(&w, c, g->g[s].sets[0]); w_samp(&w, c->samp); w_texs(&w, g->t1, 3); w_stores(&w, g->t2, 2); w_end(&w);
-            w_begin(&w, c, g->g[s].sets[1]); w_samp(&w, c->samp); w_texs(&w, g->t2, 2); w_store(&w, g->t1[0]); w_store(&w, g->t1[1]); w_end(&w);
-            w_begin(&w, c, g->g[s].sets[2]); w_samp(&w, c->samp); w_tex(&w, g->t1[0]); w_tex(&w, g->t1[1]); w_stores(&w, g->t2, 2); w_end(&w);
-            w_begin(&w, c, g->g[s].sets[3]); w_ubo(&w, ub); w_samp(&w, c->samp); w_samp(&w, c->samp_edge); w_texs(&w, g->t2, 2); w_tex(&w, prev); w_tex(&w, flow); w_store(&w, g->out); w_end(&w);
+            w_begin(&w, c, g->g[s].sets[0]); w_samp(&w, c->samp); w_texs(&w, t1, 3); w_stores(&w, t2, nt); w_end(&w);
+            w_begin(&w, c, g->g[s].sets[1]); w_samp(&w, c->samp); w_texs(&w, t2, nt); w_stores(&w, t1, nt); w_end(&w);
+            w_begin(&w, c, g->g[s].sets[2]); w_samp(&w, c->samp); w_texs(&w, t1, nt); w_stores(&w, t2, nt); w_end(&w);
+            w_begin(&w, c, g->g[s].sets[3]); w_ubo(&w, ub); w_samp(&w, c->samp); w_samp(&w, c->samp_edge); w_texs(&w, t2, nt); w_tex(&w, prev); w_tex(&w, flow); w_store(&w, g->c[q].out); w_end(&w);
         }
         if (i < FIRST_DELTA_LEVEL || c->bad) continue;
         int di = i - FIRST_DELTA_LEVEL;
         __typeof__(c->delta[0]) *d = &c->delta[di];
-        limg *pg = i == FIRST_DELTA_LEVEL ? NULL : c->gamma[i - 1].out;
-        limg *p1 = i == FIRST_DELTA_LEVEL ? NULL : c->delta[di - 1].out1, *p2 = i == FIRST_DELTA_LEVEL ? NULL : c->delta[di - 1].out2;
         limg *dflow = c->beta_out[level];
-        for (int k = 0; k < 3; k++) d->t1[k] = img_new(c, e, LSFG_FORMAT);
-        for (int k = 0; k < 2; k++) d->t2[k] = img_new(c, e, LSFG_FORMAT);
-        d->out1 = img_new(c, e, LSFG_MOTION_FORMAT); d->out2 = img_new(c, e, LSFG_MOTION_FORMAT);
+        for (size_t q = 0; q < c->gens; q++) {
+            for (int k = 0; k < nt1; k++) d->c[q].t1[k] = img_new(c, e, LSFG_FORMAT);
+            for (int k = 0; k < nt; k++) d->c[q].t2[k] = img_new(c, e, LSFG_FORMAT);
+            d->c[q].out1 = img_new(c, e, LSFG_MOTION_FORMAT); d->c[q].out2 = img_new(c, e, LSFG_MOTION_FORMAT);
+        }
         for (int s = 0; s < LSFG_GENERATION_SLOTS && !c->bad; s++) {
+            if (slot_count((size_t)s) > c->gens) continue;
+            size_t q = slot_gen((size_t)s);
+            limg *pg = i == FIRST_DELTA_LEVEL ? NULL : c->gamma[i - 1].c[q].out;
+            limg *p1 = i == FIRST_DELTA_LEVEL ? NULL : c->delta[di - 1].c[q].out1, *p2 = i == FIRST_DELTA_LEVEL ? NULL : c->delta[di - 1].c[q].out2;
+            limg **t1 = d->c[q].t1, **t2 = d->c[q].t2;
             VkDeviceSize ub = ubo_get(c, flow_scale, slot_timestamp((size_t)s), 0, pg == NULL);
             for (int h = 0; h < HIST; h++) { d->g[s].first[h] = set_new(c, &c->delta_pass[0]); d->g[s].sixth[h] = set_new(c, &c->delta_pass[5]); }
             for (int k = 0; k < 4; k++) d->g[s].sets[k] = set_new(c, &c->delta_pass[k + 1]);
@@ -325,36 +426,39 @@ lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_
             if (c->bad) break;
             for (int h = 0; h < HIST; h++) {
                 w_begin(&w, c, d->g[s].first[h]); w_ubo(&w, ub); w_samp(&w, c->samp_border); w_samp(&w, c->samp_edge);
-                w_texs(&w, in[(h + 2) % HIST], 2); w_texs(&w, in[h % HIST], 2); w_tex(&w, pg); w_stores(&w, d->t1, 3); w_end(&w);
+                w_texs(&w, in[(h + 2) % HIST], w2); w_texs(&w, in[h % HIST], w2); w_tex(&w, pg); w_stores(&w, t1, 3); w_end(&w);
                 w_begin(&w, c, d->g[s].sixth[h]); w_ubo(&w, ub); w_samp(&w, c->samp_border); w_samp(&w, c->samp_edge);
-                w_texs(&w, in[(h + 2) % HIST], 2); w_texs(&w, in[h % HIST], 2); w_tex(&w, pg); w_tex(&w, p1); w_store(&w, d->t2[0]); w_end(&w);
+                w_texs(&w, in[(h + 2) % HIST], w2); w_texs(&w, in[h % HIST], w2); w_tex(&w, pg); w_tex(&w, p1); w_stores(&w, t2, w1); w_end(&w);
             }
-            w_begin(&w, c, d->g[s].sets[0]); w_samp(&w, c->samp); w_texs(&w, d->t1, 3); w_stores(&w, d->t2, 2); w_end(&w);
-            w_begin(&w, c, d->g[s].sets[1]); w_samp(&w, c->samp); w_texs(&w, d->t2, 2); w_store(&w, d->t1[0]); w_store(&w, d->t1[1]); w_end(&w);
-            w_begin(&w, c, d->g[s].sets[2]); w_samp(&w, c->samp); w_tex(&w, d->t1[0]); w_tex(&w, d->t1[1]); w_stores(&w, d->t2, 2); w_end(&w);
-            w_begin(&w, c, d->g[s].sets[3]); w_ubo(&w, ub); w_samp(&w, c->samp); w_samp(&w, c->samp_edge); w_texs(&w, d->t2, 2); w_tex(&w, pg); w_tex(&w, dflow); w_store(&w, d->out1); w_end(&w);
-            w_begin(&w, c, d->g[s].sets[4]); w_samp(&w, c->samp); w_tex(&w, d->t2[0]); w_store(&w, d->t1[0]); w_end(&w);
-            w_begin(&w, c, d->g[s].sets[5]); w_samp(&w, c->samp); w_tex(&w, d->t1[0]); w_store(&w, d->t2[0]); w_end(&w);
-            w_begin(&w, c, d->g[s].sets[6]); w_samp(&w, c->samp); w_tex(&w, d->t2[0]); w_store(&w, d->t1[0]); w_end(&w);
-            w_begin(&w, c, d->g[s].sets[7]); w_ubo(&w, ub); w_samp(&w, c->samp); w_samp(&w, c->samp_edge); w_tex(&w, d->t1[0]); w_tex(&w, p2); w_store(&w, d->out2); w_end(&w);
+            w_begin(&w, c, d->g[s].sets[0]); w_samp(&w, c->samp); w_texs(&w, t1, 3); w_stores(&w, t2, nt); w_end(&w);
+            w_begin(&w, c, d->g[s].sets[1]); w_samp(&w, c->samp); w_texs(&w, t2, nt); w_stores(&w, t1, nt); w_end(&w);
+            w_begin(&w, c, d->g[s].sets[2]); w_samp(&w, c->samp); w_texs(&w, t1, nt); w_stores(&w, t2, nt); w_end(&w);
+            w_begin(&w, c, d->g[s].sets[3]); w_ubo(&w, ub); w_samp(&w, c->samp); w_samp(&w, c->samp_edge); w_texs(&w, t2, nt); w_tex(&w, pg); w_tex(&w, dflow); w_store(&w, d->c[q].out1); w_end(&w);
+            w_begin(&w, c, d->g[s].sets[4]); w_samp(&w, c->samp); w_texs(&w, t2, w1); w_stores(&w, t1, w1); w_end(&w);
+            w_begin(&w, c, d->g[s].sets[5]); w_samp(&w, c->samp); w_texs(&w, t1, w1); w_stores(&w, t2, w1); w_end(&w);
+            w_begin(&w, c, d->g[s].sets[6]); w_samp(&w, c->samp); w_texs(&w, t2, w1); w_stores(&w, t1, w1); w_end(&w);
+            w_begin(&w, c, d->g[s].sets[7]); w_ubo(&w, ub); w_samp(&w, c->samp); w_samp(&w, c->samp_edge); w_texs(&w, t1, w1); w_tex(&w, p2); w_store(&w, d->c[q].out2); w_end(&w);
         }
     }
 
-    // Generate (LsfgGenerate): for each slot and output, two sets (which input is the previous frame)
-    PASS(&c->gen_pass, LSFG_SH_GENERATE, {1, S_UBO}, {2, S_SMP}, {5, S_TEX}, {1, S_STO});
+    // Generate (LsfgGenerate): for each slot, two sets (which input is the previous frame), writing the output of the slot's generation
     c->out_ext = ext;
     for (int s = 0; s < LSFG_GENERATION_SLOTS && !c->bad; s++) {
+        if (slot_count((size_t)s) > c->gens) continue;
+        size_t q = slot_gen((size_t)s);
         VkDeviceSize ub = ubo_get(c, flow_scale, slot_timestamp((size_t)s), 0, 0);
-        for (int t = 0; t < LSFG_MAX_GENERATIONS; t++) for (int k = 0; k < 2 && !c->bad; k++) {
-            c->gen_sets[s][t][k] = set_new(c, &c->gen_pass);
+        for (int k = 0; k < 2 && !c->bad; k++) {
+            c->gen_sets[s][k] = set_new(c, &c->gen_pass);
             if (c->bad) break;
-            w_begin(&w, c, c->gen_sets[s][t][k]); w_ubo(&w, ub); w_samp(&w, c->samp); w_samp(&w, c->samp_edge);
-            w_tex(&w, c->frames[1 - k]); w_tex(&w, c->frames[k]); w_tex(&w, c->gamma[MIPS - 1].out); w_tex(&w, c->delta[DELTA_N - 1].out1); w_tex(&w, c->delta[DELTA_N - 1].out2);
-            w_view(&w, out_views[t]); w_end(&w);
+            w_begin(&w, c, c->gen_sets[s][k]); w_ubo(&w, ub); w_samp(&w, c->samp); w_samp(&w, c->samp_edge);
+            w_tex(&w, c->frames[1 - k]); w_tex(&w, c->frames[k]); w_tex(&w, c->gamma[MIPS - 1].c[q].out); w_tex(&w, c->delta[DELTA_N - 1].c[q].out1); w_tex(&w, c->delta[DELTA_N - 1].c[q].out2);
+            w_view(&w, out_views[q]); w_end(&w);
         }
     }
 
-    // Every image in GENERAL layout, once (the outputs too)
+    // Every image in GENERAL layout, once (the outputs the chain writes too). Not waited for: the frame generation's submissions go to the same queue after it, which runs
+    // them in order (the command buffer is freed with the chain, after the teardown's wait for the queue). It waited for the whole queue to go idle before, a second
+    // wait at every rebuild on top of the teardown's
     if (!c->bad) {
         VkCommandPoolCreateInfo cpi = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = V.qf};
         VkCommandBuffer cb = VK_NULL_HANDLE;
@@ -366,35 +470,25 @@ lsfg_chain *lsfg_chain_new(const lsfg_modules *mods, VkExtent2D ext, float flow_
         if (!r) r = vk.vkBeginCommandBuffer(cb, &cbi);
         if (!r) {
             for (int i = 0; i < c->nimg; i++) vka_img_barrier(cb, c->imgs[i].img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-            for (int t = 0; t < LSFG_MAX_GENERATIONS; t++) vka_img_barrier(cb, outs[t], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+            for (size_t t = 0; t < c->gens; t++) if (outs[t]) vka_img_barrier(cb, outs[t], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
             r = vk.vkEndCommandBuffer(cb);
         }
         VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
-        if (!r) { pthread_mutex_lock(&V.qmu); r = vk.vkQueueSubmit(V.q, 1, &si, VK_NULL_HANDLE); if (!r) r = vk.vkQueueWaitIdle(V.q); pthread_mutex_unlock(&V.qmu); }
+        if (!r) { pthread_mutex_lock(&V.qmu); r = vk.vkQueueSubmit(V.q, 1, &si, VK_NULL_HANDLE); pthread_mutex_unlock(&V.qmu); }
         if (r) { VRED("lsfg: layout setup: %d", r); c->bad = 1; }
     }
-    if (c->bad) { lsfg_chain_free(c); return NULL; }
-    VLOG("lsfg: chain %ux%u, flow %ux%u (scale %.2f): %d images, %d constant blocks", ext.width, ext.height, c->flow_ext.width, c->flow_ext.height, flow_scale, c->nimg, c->nubo);
+    if (c->bad) { if (c->cpool) vka_queue_idle(); lsfg_chain_free(c); return NULL; }   // (a submitted setup done before its command buffer goes)
+    VLOG("lsfg: chain %ux%u, flow %ux%u (scale %.2f), %s shaders, up to %zu generated frames: %d images (%.1f MiB), %d constant blocks", ext.width, ext.height,
+         c->flow_ext.width, c->flow_ext.height, flow_scale, c->q ? "quality" : "performance", c->gens, c->nimg, c->bytes / 1048576.0, c->nubo);
     return c;
 }
 
-static void pass_free(lpass *p) {
-    if (p->pipe) lk.vkDestroyPipeline(V.dev, p->pipe, NULL);
-    if (p->pl) lk.vkDestroyPipelineLayout(V.dev, p->pl, NULL);
-    if (p->dsl) lk.vkDestroyDescriptorSetLayout(V.dev, p->dsl, NULL);
-}
-void lsfg_chain_free(lsfg_chain *c) {
+void lsfg_chain_free(lsfg_chain *c) {   // the pipelines stay (passes_get)
     if (!c) return;
     for (int i = 0; i < c->nimg; i++) {
         if (c->imgs[i].view) vk.vkDestroyImageView(V.dev, c->imgs[i].view, NULL);
-        if (c->imgs[i].img) vk.vkDestroyImage(V.dev, c->imgs[i].img, NULL);
-        if (c->imgs[i].mem) vk.vkFreeMemory(V.dev, c->imgs[i].mem, NULL);
+        if (c->imgs[i].img) { vk.vkDestroyImage(V.dev, c->imgs[i].img, NULL); vka_imem_free(&c->imgs[i].m); }
     }
-    pass_free(&c->mip_pass); pass_free(&c->gen_pass);
-    for (int i = 0; i < ALPHA_STAGES; i++) pass_free(&c->alpha_pass[i]);
-    for (int i = 0; i < BETA_STAGES; i++) pass_free(&c->beta_pass[i]);
-    for (int i = 0; i < GAMMA_STAGES; i++) pass_free(&c->gamma_pass[i]);
-    for (int i = 0; i < DELTA_STAGES; i++) pass_free(&c->delta_pass[i]);
     if (c->pool) lk.vkDestroyDescriptorPool(V.dev, c->pool, NULL);
     if (c->cpool) lk.vkDestroyCommandPool(V.dev, c->cpool, NULL);
     if (c->samp) vk.vkDestroySampler(V.dev, c->samp, NULL);
@@ -406,6 +500,14 @@ void lsfg_chain_free(lsfg_chain *c) {
 }
 
 VkImage lsfg_chain_input(lsfg_chain *c, uint64_t count) { return c->frames[count % 2]->img; }
+VkImage lsfg_chain_probe(lsfg_chain *c, VkExtent2D *ext) { const limg *m = c->mip[PROBE_MIP]; *ext = m->ext; return m->img; }
+int lsfg_chain_debug_images(lsfg_chain *c, lsfg_dbg_img *out, int max) {
+    const limg *l[7] = {c->frames[0], c->frames[1], c->mip[0], c->gamma[0].c[0].out, c->gamma[MIPS - 1].c[0].out, c->delta[DELTA_N - 1].c[0].out1, c->delta[DELTA_N - 1].c[0].out2};
+    static const char *nm[7] = {"in0", "in1", "flow_mip0", "gamma_coarse", "gamma_fine", "delta_out1", "delta_out2"};
+    int n = 0;
+    for (int i = 0; i < 7 && n < max; i++) if (l[i]) out[n++] = (lsfg_dbg_img){l[i]->img, l[i]->ext, l[i]->fmt, nm[i]};
+    return n;
+}
 
 // LsfgChain::DispatchShared: mipmaps of the new frame, the 4 alpha stages at every level, beta
 void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count) {
@@ -416,7 +518,7 @@ void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count) {
         cbar(cb);
         vk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, c->alpha_pass[s].pipe);
         for (int l = 0; l < MIPS; l++) {
-            VkExtent2D e = s < 2 ? c->alpha[l].t1->ext : c->alpha[l].t3[0]->ext;
+            VkExtent2D e = s < 2 ? c->alpha[l].t1[0]->ext : c->alpha[l].t3[0]->ext;
             VkDescriptorSet set = s < ALPHA_STAGES - 1 ? c->alpha[l].sets[s] : c->alpha[l].last[count % HIST];
             vk.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, c->alpha_pass[s].pl, 0, 1, &set, 0, NULL);
             vk.vkCmdDispatch(cb, groups(e.width, 3), groups(e.height, 3), 1);
@@ -428,22 +530,60 @@ void lsfg_chain_shared(lsfg_chain *c, VkCommandBuffer cb, uint64_t count) {
     cbar(cb); run(cb, &c->beta_pass[4], c->beta_sets[3], groups(e.width, 5), groups(e.height, 5));
 }
 
-// LsfgChain::DispatchGeneration: gamma at each level (delta at the finest three) for the generation's slot, then generate into its output
-void lsfg_chain_generate(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, size_t gen) {
-    size_t slot = gen_slot(ngen, gen); int h = (int)(count % HIST);
-    for (int i = 0; i < MIPS; i++) {
-        __typeof__(c->gamma[0]) *g = &c->gamma[i];
-        VkExtent2D e = g->t1[0]->ext; uint32_t gx = groups(e.width, 3), gy = groups(e.height, 3);
-        cbar(cb); run(cb, &c->gamma_pass[0], g->g[slot].first[h], gx, gy);
-        for (int k = 1; k < GAMMA_STAGES; k++) { cbar(cb); run(cb, &c->gamma_pass[k], g->g[slot].sets[k - 1], gx, gy); }
-        if (i < FIRST_DELTA_LEVEL) continue;
-        __typeof__(c->delta[0]) *d = &c->delta[i - FIRST_DELTA_LEVEL];
-        cbar(cb); run(cb, &c->delta_pass[0], d->g[slot].first[h], gx, gy);
-        for (int k = 1; k <= 4; k++) { cbar(cb); run(cb, &c->delta_pass[k], d->g[slot].sets[k - 1], gx, gy); }
-        cbar(cb); run(cb, &c->delta_pass[5], d->g[slot].sixth[h], gx, gy);
-        for (int k = 6; k < DELTA_STAGES; k++) { cbar(cb); run(cb, &c->delta_pass[k], d->g[slot].sets[k - 2], gx, gy); }
+// One stage of a generation's gamma at gamma level i (0 the coarsest), of its delta at delta level i (FIRST_DELTA_LEVEL..MIPS-1), and its generate pass
+static void gamma_run(lsfg_chain *c, VkCommandBuffer cb, int i, int k, size_t slot, int h) {
+    __typeof__(c->gamma[0]) *g = &c->gamma[i];
+    VkExtent2D e = g->c[0].t1[0]->ext;
+    run(cb, &c->gamma_pass[k], k == 0 ? g->g[slot].first[h] : g->g[slot].sets[k - 1], groups(e.width, 3), groups(e.height, 3));
+}
+static void delta_run(lsfg_chain *c, VkCommandBuffer cb, int i, int k, size_t slot, int h) {
+    __typeof__(c->delta[0]) *d = &c->delta[i - FIRST_DELTA_LEVEL];
+    VkExtent2D e = c->gamma[i].c[0].t1[0]->ext;
+    VkDescriptorSet s = k == 0 ? d->g[slot].first[h] : k <= 4 ? d->g[slot].sets[k - 1] : k == 5 ? d->g[slot].sixth[h] : d->g[slot].sets[k - 2];
+    run(cb, &c->delta_pass[k], s, groups(e.width, 3), groups(e.height, 3));
+}
+static void gen_run(lsfg_chain *c, VkCommandBuffer cb, size_t slot, uint64_t count) {
+    run(cb, &c->gen_pass, c->gen_sets[slot][count % 2], groups(c->out_ext.width, 4), groups(c->out_ext.height, 4));
+}
+
+// The wavefront: the step (barrier interval) at which each stage runs. Gamma is one chain, level after level: stage k of level i at GAMMA_STAGES * i + k. Delta at level
+// i reads its own images, gamma level i - 1's output (stages 0, 4, 5) and delta level i - 1's out1 (stage 5) and out2 (stage 9): it starts once gamma level i - 1 is
+// done (step GAMMA_STAGES * i), and its finest-but-two level, which reads neither, at step 0, beside the coarse gamma levels. Within a step no stage reads what another
+// writes (each lane, gamma or a delta level, has its own images, and every generation its own), so one barrier between steps orders them all. Generate reads gamma's
+// and delta's finest outputs: the step after both. 41 steps for any number of generations, against 66 barriers for each generation in Eden's order
+static int wave_delta_start(int i) { return i == FIRST_DELTA_LEVEL ? 0 : GAMMA_STAGES * i; }
+static int wave_gen_step(void) {
+    int g = GAMMA_STAGES * MIPS, d = wave_delta_start(MIPS - 1) + DELTA_STAGES;
+    return g > d ? g : d;
+}
+
+// LsfgChain::DispatchGeneration for generations 0..ngen-1 between game frames count - 1 and count, into outs[0..ngen-1]
+void lsfg_chain_generate(lsfg_chain *c, VkCommandBuffer cb, uint64_t count, size_t ngen, int serial) {
+    if (ngen > c->gens) ngen = c->gens;
+    int h = (int)(count % HIST);
+    if (serial) {   // Eden's order: one generation after another, a barrier before every pass
+        for (size_t gen = 0; gen < ngen; gen++) {
+            size_t slot = gen_slot(ngen, gen);
+            for (int i = 0; i < MIPS; i++) {
+                for (int k = 0; k < GAMMA_STAGES; k++) { cbar(cb); gamma_run(c, cb, i, k, slot, h); }
+                if (i >= FIRST_DELTA_LEVEL) for (int k = 0; k < DELTA_STAGES; k++) { cbar(cb); delta_run(c, cb, i, k, slot, h); }
+            }
+            cbar(cb); gen_run(c, cb, slot, count);
+        }
+        return;
     }
-    cbar(cb);
-    run(cb, &c->gen_pass, c->gen_sets[slot][gen][count % 2], groups(c->out_ext.width, 4), groups(c->out_ext.height, 4));
+    int last = wave_gen_step();
+    for (int step = 0; step <= last; step++) {
+        cbar(cb);
+        for (int i = 0; i < MIPS; i++) {
+            int k = step - GAMMA_STAGES * i;
+            if (k >= 0 && k < GAMMA_STAGES) for (size_t gen = 0; gen < ngen; gen++) gamma_run(c, cb, i, k, gen_slot(ngen, gen), h);
+        }
+        for (int i = FIRST_DELTA_LEVEL; i < MIPS; i++) {
+            int k = step - wave_delta_start(i);
+            if (k >= 0 && k < DELTA_STAGES) for (size_t gen = 0; gen < ngen; gen++) delta_run(c, cb, i, k, gen_slot(ngen, gen), h);
+        }
+        if (step == last) for (size_t gen = 0; gen < ngen; gen++) gen_run(c, cb, gen_slot(ngen, gen), count);
+    }
 }
 #endif

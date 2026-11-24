@@ -713,6 +713,8 @@ static int storage_mode(const tex_t *t, const uint8_t *c, const vka_fmt *f, int 
         if (any && k < 4) VLOG("texture serial %llu %ux%ux%u format %#x pool flags %#x: written by the CPU before its first use, a sample (NVN2): uploaded from its storage, re-uploaded when it changes (%llu so far, %llu more with empty storage)",
                                (unsigned long long)t->serial, d->width, d->height, d->depth, d->format, pf, (unsigned long long)k + 1, (unsigned long long)g_nvn2_first[1]);
     }
+    else if (DM_GAME_TEX_DIRTY_UPLOAD && sampled && !(d->flags & (NVN_TEXTURE_FLAGS_IMAGE | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_SPARSE))
+             && !(pf & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL))) want = ST_TRACK;
     else if (!(d->flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && t->pool && ((pf & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED)) || nvn_flushed(t->mem, t->L.size))
              && mem_any_mapped(c, t)) want = ST_FILL;
     // No later CPU writes to follow: a pool the CPU cannot access, a virtual pool (its pages are not the storage's), storage outside every tracked pool, or tracking off
@@ -2667,6 +2669,23 @@ void vka_samp_id_desc(int id, char *b, size_t n) {
     else { samp_par p = g_sreg[id]; snprintf(b, n, "sampler ID %d: filter %d/%d wrap %d/%d/%d compare mode %d func %d reduction %d lod %g..%g bias %g", id, p.minf, p.magf, p.ws, p.wt, p.wr,
                                              p.cmp_mode, p.cmp_func, p.reduction, p.lod_min, p.lod_max, p.lod_bias); }
     pthread_mutex_unlock(&g_tmu);
+}
+// 1 when texture ID id's image (or registration) can form a Vulkan cube / cube-array view (square, 6+ layers a multiple of 6, 1 sample, view layers >= 6); 0 otherwise
+int vka_tex_id_can_cube(int id) {
+    pthread_mutex_lock(&g_tmu);
+    int ok = 1;
+    if (id > 0 && id < g_ntreg && g_treg[id].t.serial) {
+        const treg_ent *e = &g_treg[id]; smap_ent *m = map_get(e->t.serial); const vka_img *im = m ? m->im : NULL;
+        uint32_t w = im ? im->w : e->t.d.width, h = im ? im->h : e->t.d.height;
+        uint32_t layers = im ? im->layers : (e->t.d.target == NVN_TEXTURE_TARGET_CUBEMAP ? 6 : e->t.d.target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY || e->t.d.target == NVN_TEXTURE_TARGET_2D_ARRAY ? e->t.d.depth : 1);
+        uint32_t samples = im ? im->samples : e->t.d.samples;
+        uint32_t a0 = e->has_v && e->v.set_layers ? e->v.min_layer : 0;
+        uint32_t na = e->has_v && e->v.set_layers && e->v.nlayers ? e->v.nlayers : (layers > a0 ? layers - a0 : 0);
+        if (im && im->d.target == NVN_TEXTURE_TARGET_3D) na = 1;
+        ok = w == h && layers >= 6 && !(layers % 6) && samples <= 1 && na >= 6;
+    }
+    pthread_mutex_unlock(&g_tmu);
+    return ok;
 }
 // Texture ID id as a buffer texture (NVN_TEXTURE_TARGET_BUFFER, which has no image: vka_buf_view binds its storage in place): its guest address, its bytes (elements times
 // the texel) and the format a texel buffer view of it takes (its view's format when the registration names one; an 8-bit sRGB format as its UNORM twin, the raw bytes).

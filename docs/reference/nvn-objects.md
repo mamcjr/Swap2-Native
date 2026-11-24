@@ -245,6 +245,44 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md). Found with a check that reports a bind record holding more than 32 handles (`[RED] bind record … overwritten after recording`), then `DM_PROBE_WATCH` on that word.
 - **Note:** any other command a game patches this way needs the same: find the readers of the `GetCommandMemoryUsed` slot first.
 
+### A bind of more than 32 handles
+
+- **Symptom:** `[RED] bind handle count 49`, and the call's textures are missing; a deferred bind of more than one handle binds the wrong textures on the Vulkan replay.
+- **Cause:** a bind record holds 32 handles, and the host dropped a larger call, though NVN binds up to the stage's slot count in one call. The Vulkan replay read a deferred bind's handles (`BindTexturesDeferred`, read at replay from the game's array) as 4-byte words, where `NVNtextureHandle` is 8 bytes: handle k was half of handle k / 2.
+- **Fix:** `bind_handles_ex` (`hle_nvn.c`) records a larger call in records of 32 handles each, in slot order; a deferred record points at its own part of the game's array. The replay reads 8-byte handles and keeps their low 32 bits, as `bind_handles_chunk` does (Banana Native #593, upstream nxnative 48781edc's host part).
+- **Check:** NDK `-fsyntax-only`; not yet run in a game on Android.
+- **Found on:** Immortals Fenyx Rising (49 textures in one call, upstream nxnative PR #3126; no profile here).
+
+### A handle of all ones binds nothing
+
+- **Symptom:** `[RED]` lines for a texture ID no pool registers, at slots the shader's branch does not sample.
+- **Cause:** an engine writes a handle of all ones (texture ID 0xFFFFF, sampler ID 0xFFF) as its "none"; the binding walk took it for a texture ID past every pool.
+- **Fix:** `HANDLE_NONE` (`vka_bind.c`): such a handle, bound or read from a uniform buffer, binds nothing, as a handle of 0 does; `bind_handles_chunk` leaves it out of the pool-base shift. The reads are the same zeros (Banana Native #614).
+- **Check:** NDK `-fsyntax-only`.
+- **Found on:** Kirby and the Forgotten Land - Nintendo Switch 2 Edition (Banana Native; no profile here).
+
+### A command list read by the replay worker after the game rewrote it (open)
+
+- **Symptom:** `CRASH sig=11` on the replay worker (`vk-replay`) in `vka_tex_get` called by `copy_t2t` (`vka_exec.c`): the `OP_COPY_T2T` record's `src`, which points to the texture snapshot inside the record, held `0x000000300000002c`, two 32-bit words where a pointer belongs. The phone was deep in swap (1.4 GB available, 4.1 GB of the process swapped), the frames at 65-93 ms of GPU just before.
+- **Cause:** open. The replay worker read command memory that held other bytes than when the game submitted it. Neither a stale walk nor an in-place rewrite is settled yet.
+  - The words are not a header Zelda writes: op 0x2c is `OP_TF_STATE`, whose record is 0x18 bytes, not 0x30.
+  - The worker reads the game's lists up to `DM_VK_WORKER_FRAMES` presents after the submit, and later still for a submission parked at a GPU wait ([`vka_qsched.h`](../../dm/gfx/vk_android/vka_qsched.h)).
+  - These do not let the game reuse that memory early:
+    - the submission's handle array, which is copied;
+    - SyncWait, QueueFinish and `mtl_finish`, which do not return while a parked submission's fence is not handed;
+    - the host-lent segments, which are reclaimed only when the game hands their guest bytes out again. Zelda lends none in these runs: no `ran short` line, and the staged texture uploads are not in the one host for every game.
+  - Ruled out (2026-11-22): a SyncWait whose timeout runs out while the replay lags.
+    - `hle_nvn.c` now logs the first finite timeouts and every wait that runs out: `[RED] SyncWait timed out`.
+    - In 6 minutes of Hyrule Field on V39, no blocking wait passed a finite timeout. The game waits without one.
+  - Candidate, not checked: a GPU write into the game's command memory. The crash came only with the mesh fallback, whose raw global stores write pool memory, and the two words look like counts. Mode 1 of the check misses a payload write; `DM_VK_CMD_CHECK=2` sees the field that broke (`src`, the record's first payload word).
+- **Fix:** none yet. `DM_VK_CMD_CHECK=1` ([`vka_worker.c`](../../dm/gfx/vk_android/vka_worker.c)) hashes each submission's lists at submit, as the replay walks them (op, size, jump and call targets; `=2` also each record's first payload word), and again before the worker replays them. A change logs `[RED] command list changed between submit and replay` with:
+  - the handle and the record counts;
+  - whether the submission was parked;
+  - how far the replay is behind (the game's frame, the fences done, handed and reserved, the presents ahead).
+
+  Run it where the crash came: a long run that swaps, as Hyrule Field with the mesh fallback on Turnip V39. A run without the crash (2026-11-22, Hyrule Field on V39, 7,500 frames) logged no change, so a line from it is not noise. The second walk of every list costs frame rate: 22 fps there against about 27 without it. `=2` in two 8-minute runs of the same scene, as deep in swap as the crash (5.6 GB swapped), logged no change either (2026-11-22).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (Hyrule Field, Turnip V39, chain 706d0c7262fa, about 309 s into the run, 2026-11-22; one run of many).
+
 ## Queues and syncs
 
 ### Bindings belong to each queue
@@ -304,6 +342,15 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md): KTGL's loader (effect banks, face models). Windowed Mac run after the fix: first load 6.1 s, frame pacing unchanged.
 - **Note:** how it was found on the device: `Documents/env.txt` with `DM_WATCH=50` (thread table at 50 s: only the yield-polling main thread used CPU) and `DM_FSLOG=<absolute path>` (the reads came in bursts, with stalls of 4 / 24 / 13 s right after the effect banks).
 
+### A CPU wait released a GPU wait parked on another queue: grass, plants and fog missing for a frame (Android)
+
+- **Symptom:** (Android, the replay worker with `DM_VK_EVENT_WAIT` on) for one frame all of a scene's vegetation and its fog are gone, and the next frame has them again. It shows on every driver (Qualcomm 891.14 too), more while walking and turning, and not with `DM_VK_EVENT_WAIT=0`. The stats line counts "passed for a CPU wait" and "released early by CPU wait" in the hundreds every 300 frames.
+- **Cause:** the scheduler ([`vka_qsched.h`](../../dm/gfx/vk_android/vka_qsched.h)) parks a queue at a GPU wait until its producer is replayed. A CPU thread blocking on a fence that a park held back (a SyncWait, a pool's release) released the park at once when the worker's job queue was empty, and a wait being replayed passed when a CPU thread waited for its fence or a later one. The producer was usually on its way: Ocarina of Time's queues 1 and 5 hand each other events within a frame while its game thread already waits for queue 1's fence, and the render thread submits the producer a moment later. The consumer ran before it and read the data the last frame had used up. In a diagnostic build, the releases came from `nvnSyncWait` (about 60 %) and from giving back pool memory (about 40 %).
+- **Fix:** upstream Banana Native's scheduler (MIT, v0.2.8-v0.3.0, its issue #98: whole frames dark while walking), ported 2026-11-24: no wait passes for a CPU wait. A park holding back the fence a CPU thread blocks on is released only once the worker is stuck for 2 ms (`QS_STUCK_NS`: nothing left to replay, no parked wait that holds; `vka_worker_cpu_wait` / `_end`, `qs_step`). It came with the rest of that scheduler: an event table that grows instead of dropping signals past 256 words, the source of each wait that held at once on the stats line, the `DM_VK_QS_TRACE` ring printed at a GPU hang, and its unit test (`t_android_qsched.c`, with the queues 1 and 5 ping-pong case). `DM_VK_EVENT_CPU_DEFER` is gone.
+  - Not the fix: a per-commit completion where a fence was done on its own, whatever lower fences were parked (tried 2026-11-23). It ended the vanishing frames, but the encoder then recorded a `vkCmdCopyBuffer` that crashed the 891.14 driver in 4 of 14 runs, cause not found.
+  - Banana's CPU gates (`DM_VK_EVENT_GATE`, also ported) are off by default here: with them, Ocarina of Time on 891.14 lost the device at the same place in Hyrule Field in 6 of 6 runs (a GPU instruction-pointer fault, `VK_EXT_device_fault` type 6), and in 0 of 7 with them off. Cause open.
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (2026-11-23/24, POCO F7 Ultra, 891.14, Hyrule Field from a copy of the user's save, 60 s recordings while walking and turning): 34 vanishing frames in two runs before, 0 in 13 runs after (the stuck-worker release alone, then with the rest of the port).
+
 ## CPU-written textures
 
 ### CPU deswizzle copies use slice and row offsets
@@ -318,8 +365,8 @@ Games read this count as a position in their own command memory and size their h
 
 - **Symptom:** a Switch 2 game's textures from its files keep their shapes but break up along every edge: misplaced 4×4 blocks (16-byte pieces) in a regular weave, invisible in flat areas. Normal maps make lit surfaces look woven; opacity masks punch holes.
 - **Cause:** the GOB (64 bytes × 8 rows) keeps its size and place, but the Switch 2 orders its 16-byte pieces x5 y2 x4 y1 y0 from the GOB's start, where the Tegra X1 orders them x5 y2 y1 x4 y0: offset bits 5 and 6 exchanged, (x%64/32)·256 + (y%8/4)·128 + (x%32/16)·64 + (y%4/2)·32 + (y%2)·16 + x%16. Block heights, sizes and level offsets are unchanged (the BNTX headers' block heights and sizes match `nvn_tex_layout`).
-- **Fix:** `nvn_gob_switch2` (`dm/gfx/tex/nvn_deswizzle.h`), set at `nvnDeviceInitialize` when the SDK targets the Switch 2 (`dm_sdk_ounce`): the CPU address formula, the CPU copy tables and both Metal untiling kernels take the Switch 2's order.
-- **Check:** `t_tex` checks the Switch 2's offsets by hand (B2) and both orders where they differ; `t_deswz_gpu` runs every case in both orders, the GPU kernels against the CPU copy.
+- **Fix:** `nvn_gob_switch2` (`dm/gfx/tex/nvn_deswizzle.h`), set at `nvnDeviceInitialize` when the SDK targets the Switch 2 (`dm_sdk_ounce`): the CPU address formula, the CPU copy tables and both Metal untiling kernels take the Switch 2's order. It is the process default: NVN2's device flag bit 16 selects the X1's order instead (the driver's CPU copies and descriptor word 2 bit 24 follow it), so `nvnTextureInitialize` keeps the owning device's order in the texture (`nvn_texdesc.gob_order`: 1 X1, 2 Switch 2, 0 the default for a descriptor the replay made itself or an older capture), and every reader and writer takes `nvn_gob_order(d)` (Banana Native #553).
+- **Check:** `t_tex` checks the Switch 2's offsets by hand (B2) and both orders where they differ, the differential cases with each `gob_order` against either default, and a texture's own order winning over the default (G); `t_deswz_gpu` runs every case in both orders, the GPU kernels against the CPU copy.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#rendering): level 0 of its BNTX textures (BC7 `BaseRock000_Pnrm`, BC4 `ArenaLevelShadowMaskSunbeam00_Smsk`) decoded with every order of the five address bits; the X1's left the weave, this order alone gave clean images (mean neighbour difference 19.5 → 14.9 on the rock normal map, 21.0 → 15.7 on the BC4 mask).
 
 ### Packaged texture block dimensions and linear storage rows
@@ -369,6 +416,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** non-3D regions are written in place by block-linear address (`write_region_bl` in `hle_nvn.c`).
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md).
 - **Check:** `t_nvn` checks 15 regions in RGBA8, BC1 and a two-layer RGBA16F array, from 1×1 to the whole level, byte for byte against the old whole-level path.
+
+### Out-of-range `WriteTexels` regions overran the scratch buffer
+
+- **Symptom:** heap corruption or stray storage writes after `nvnTextureWriteTexels` / `WriteTexelsStrided` with a mip level past the texture's, a negative origin or size, or a region past the level or its layers.
+- **Cause:** `write_region_bl` refused such a region, and `write_texels` (`hle_nvn.c`) then fell back to the whole-level path, which copied the region past the end of its scratch buffer before swizzling it back; a multi-layer region that overflowed on a later layer had already changed the earlier ones.
+- **Fix:** `write_texels` checks the mip level, the origin, size and depth, and the level's width, height (1 for 1D and 1D arrays), depth and layers before it writes anything, with `[RED] WriteTexels: ...` once; a zero-sized region writes nothing (upstream nxnative ba82ccb9).
+- **Check:** NDK `-fsyntax-only` (upstream's `t_cpu_tex` cases are Metal tests, not ported).
+- **Found on:** synthetic bounds checks (upstream nxnative PR #2906).
 
 ### Packaged texture data copied at `TextureInitialize`
 
@@ -520,6 +575,14 @@ Games read this count as a position in their own command memory and size their h
 - **Fix:** hold the pool-slot mutex across protect's lookup, page-state transitions and final `mprotect`. Pool creation and retirement already hold that mutex. The page-fault and host pre-write paths still take no slot mutex, so they can finish a BUSY transition while protect waits.
 - **Found on:** code review of the shared tracker, from a fork's compatibility commit `587d5206` ported through [PR #686](https://github.com/seedds/nxnative/pull/686). No game is known to hit it: a game normally finalizes a pool only after the GPU is done with it.
 - **Check:** `t_dirty_retire_race` retires the pool between protect's lookup and its first page-state exchange, then reads 16 bytes into the pool with `read()`. Without the fix, retirement completes first and the read fails with `EFAULT`; with it, retirement waits for protection, unregisters the pool and the read returns 16. `t_dirty_race` and `t_dirty_slots` cover page-state publication and shared / reused pool slots.
+
+### CPU staging recycled before a texture upload
+
+- **Symptom:** a scene's first load draws overbright effects or damaged UI textures, particularly while its pipelines are being built.
+- **Cause:** the game returns CPU staging blocks to its resource thread right after recording the uploads; the host queues the address and reads it later, when it encodes or runs the blit. A trace of Catherine's 512×512 BC1 effects texture found the right bytes at recording and submission, and replacement bytes at encoding about a second later.
+- **Fix:** for a verified CPU upload call site (profile key `tex_copy_staging`: main build ID and return address), the recording owns the source bytes with its strides and texture snapshot (`DM_COPY_SNAPSHOT`, `nvn_obj.h` `copy_staged`). The expanded record lives in a host segment anchored to the record's slot in the game's command memory (`hle_nvn.c` `rec_staged_texture_upload`, `hostseg_take` with an anchor): the slot becomes a JUMP to it and the segment ends in a JUMP back, so the game's command memory use is unchanged and a resubmitted handle reads the same bytes. The Metal replay fills its staging arena from them before the ordered blit (`nvn_mtl.m` `copy_b2t`). The build ID and return address name the CPU upload routine because NVN also has buffer-to-texture copies whose source the GPU writes. After upstream nxnative ff18e88a (MIT).
+- **Open:** Apple hosts only. The Android host does not read the key (`game.py` `RUNTIME_NOT_READ` keeps its rows out of a pack's `game_profile.tsv`, which the single host would refuse), and the Vulkan replay copies from `src`, the live guest buffer; a staged record stays compatible with it. Turning it on there takes the key in `dm/host/rt` and `copy_bt` in `vka_exec.c` reading the inline bytes.
+- **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md#rendering).
 
 ## NVN entry points
 

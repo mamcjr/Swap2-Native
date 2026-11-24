@@ -105,9 +105,21 @@ void vka_perf_thread(int nice) {
 // replay thread's time, GPU its busy time; the target p % of the period, at most 33.3 ms (so a game the controller dropped to 20 fps still aims at 30: with the 50 ms
 // period as target the session would lower the clocks until the frame took 50 ms and keep it there). Each frame is reported once. Not phone-checked (STUTTER-TEST.md)
 // Since 2026-11-05 the period is the game's shortest (vka_dev.c vka_floor_period_ns: 16.7 ms unless the game asked for less, or DM_VK_GPU_FLOOR_PERIOD), not the current
-// one capped at 33.3 ms: at 30 fps a frame the controller could only take back to 60 fps once it fits in a vsync. Unset (-1), DM_VK_ADPF_SPAN is 100 when the session is
-// the GPU clock floor (vka_floor_adpf: neither VK_QCOM_queue_perf_hint nor the KGSL constraint) and 0 otherwise
-static int span_pct(void) { int vka_floor_adpf(void); int p = VKA_ENV("DM_VK_ADPF_SPAN", -1); if (p < 0) p = vka_floor_adpf() ? 100 : 0; return p <= 0 ? 0 : p > 100 ? 100 : p; }
+// one capped at 33.3 ms: at 30 fps a frame the controller could only take back to 60 fps once it fits in a vsync. Unset (-1), DM_VK_ADPF_SPAN is 100 when this session
+// is the GPU clock floor (vka_floor_adpf) and 0 otherwise: with the queue hint or KGSL the reports go against the present period with the frame's GPU time. With
+// DM_VK_ADPF_SPAN_ANY=1 (live, default 0; Game settings > Keep GPU clock up) it is 100 whenever any GPU clock floor is on (vka_floor_on: VK_QCOM_queue_perf_hint,
+// the KGSL constraint or this session), and 0 with DM_VK_GPU_FLOOR=0 either way. PR 472 made that the default on 2026-11-18; since 2026-11-21 it
+// is opt-in again, because it keeps the GPU clock higher in menus and idle scenes for every game (572 -> 986 MHz in a menu on the Odin 3): more heat and power. On a host-DCVS Adreno (830, System Driver v800.72)
+// the system caps the GPU from userspace (kgsl-3d0 max_pwrlevel: level 5, 734 MHz, a few seconds after launch, with or without this session) and moves that cap with these
+// reports: 0.3 ms of GPU time against 16.7 ms in a menu walked it down to 389-525 MHz in 5 of 6 runs, and when the game's frames began there it took 39 ms of GPU time, the
+// controller went to 20 fps, and 39 against the new 50 ms target read as on target, so the cap never rose (OoT, 1 run of 6 stuck at 734 MHz for good). The floor itself
+// held: KGSL's "highest" is the cap. Against the shortest period the same frame reads 2-3 times over target (docs/reference/frame-rate.md "The GPU stays at a low clock
+// after a menu: the system's cap, moved by the ADPF reports")
+static int span_pct(void) {
+    int vka_floor_on(void), vka_floor_adpf(void);
+    int set = VKA_ENV("DM_VK_ADPF_SPAN", -1), p = set >= 0 ? set : (VKA_ENV("DM_VK_ADPF_SPAN_ANY", 0) ? vka_floor_on() : vka_floor_adpf()) ? 100 : 0;
+    return p <= 0 ? 0 : p > 100 ? 100 : p;
+}
 static int64_t span_target(double period_s, int pct) { (void)period_s; int64_t vka_floor_period_ns(void); return vka_floor_period_ns() * pct / 100; }
 uint64_t vka_floor_span_of(uint64_t f); uint64_t vka_frame_start_ns(uint64_t f); uint64_t now_ns(void);
 void vka_perf_frame(double period_s) {
@@ -136,6 +148,7 @@ void vka_perf_frame(double period_s) {
         }
     }
     int64_t tgt = pct ? span_target(period_s, pct) : period_s > 0.004 && period_s < 0.2 ? (int64_t)(period_s * 1e9) : 16666667;
+    if (!pct) { int dm_fps_cap_get(void); int cap = dm_fps_cap_get(); if (cap > 0) { int64_t c = 1000000000ll / cap; if (tgt < c) tgt = c; } }
     pthread_mutex_lock(&g_mu);
     session_update();
     if (g_s && tgt != g_target) { g_target = tgt; H.target(g_s, tgt); VLOG("ADPF target %.2f ms", tgt / 1e6); }
@@ -157,6 +170,8 @@ void dm_perf_time_constraint(uint64_t period_ns, uint64_t comp_ns) {
     (void)comp_ns;
     vka_perf_thread(-8);
     if (!avail()) return;
+    int dm_fps_cap_get(void); int cap = dm_fps_cap_get();
+    if (cap > 0) { uint64_t c = (uint64_t)(1000000000ll / cap); if (period_ns < c) period_ns = c; }
     pthread_mutex_lock(&g_mu);
     if (!(H.report2 && span_pct()) && period_ns >= 4000000 && period_ns <= 200000000 && (int64_t)period_ns != g_target) { g_target = (int64_t)period_ns; if (g_s) H.target(g_s, g_target); }   // (with DM_VK_ADPF_SPAN vka_perf_frame sets it)
     pthread_mutex_unlock(&g_mu);

@@ -336,8 +336,75 @@ OpFunctionEnd
 '''
 
 
+# Two calls of a load function, each followed by a copy of its value (as cache_raw_loads' runs), an unrelated sum, an Output store of the second, a sum of the first and a
+# storage buffer store (memory): _sink_raw_calls moves each call to its first use, and none past the storage buffer store
+VS_SINK = '''OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %o
+OpDecorate %o Location 0
+OpDecorate %rt ArrayStride 4
+OpMemberDecorate %blk 0 Offset 0
+OpDecorate %blk Block
+OpDecorate %sb DescriptorSet 0
+OpDecorate %sb Binding 0
+%void = OpTypeVoid
+%fnv = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%fnu = OpTypeFunction %uint
+%u0 = OpConstant %uint 0
+%u5 = OpConstant %uint 5
+%po = OpTypePointer Output %uint
+%o = OpVariable %po Output
+%rt = OpTypeRuntimeArray %uint
+%blk = OpTypeStruct %rt
+%pb = OpTypePointer StorageBuffer %blk
+%sb = OpVariable %pb StorageBuffer
+%pe = OpTypePointer StorageBuffer %uint
+%ld = OpFunction %uint None %fnu
+%l0 = OpLabel
+OpReturnValue %u5
+OpFunctionEnd
+%main = OpFunction %void None %fnv
+%m0 = OpLabel
+%c1 = OpFunctionCall %uint %ld
+%e1 = OpCopyObject %uint %c1
+%c2 = OpFunctionCall %uint %ld
+%e2 = OpCopyObject %uint %c2
+%x = OpIAdd %uint %u5 %u5
+OpStore %o %e2
+%y = OpIAdd %uint %e1 %x
+%c3 = OpFunctionCall %uint %ld
+%e3 = OpCopyObject %uint %c3
+%pp = OpAccessChain %pe %sb %u0 %u0
+OpStore %pp %y
+%z = OpIAdd %uint %e3 %e3
+OpReturn
+OpFunctionEnd
+'''
+
+
 @unittest.skipUnless(shutil.which('spirv-as') and shutil.which('spirv-val'), 'SPIRV-Tools not installed')
 class Rewrites(unittest.TestCase):
+    def test_sink_raw_calls(self):
+        m = self.module(VS_SINK)
+        a, e = m.function_range(m.entry_function())
+        body = m.ins[a:e + 1]
+        calls = [k for k, x in enumerate(body) if x[0] & 0xffff == spv.OP_FUNCTION_CALL]
+        groups = {k: [body[k], body[k + 1]] for k in calls}
+        items = [groups[k] if k in groups else x for k, x in enumerate(body) if k - 1 not in groups]   # each call with its copy as one list
+        defs = {x[2]: x for x in body if len(x) > 2 and (x[0] & 0xffff) not in spv.NO_RESULT_OPS and x[0] & 0xffff != spv.OP_LABEL}
+        out = spv._sink_raw_calls(m, defs, items)
+        self.assertEqual(len(out), len(body))
+        k1, k2, k3 = (next(i for i, x in enumerate(out) if x is body[c]) for c in calls)
+        sx = next(i for i, x in enumerate(out) if x[0] & 0xffff == spv.OP_IADD and x[3] == x[4] and x is not out[-2])   # %x = 5 + 5
+        so = next(i for i, x in enumerate(out) if x[0] & 0xffff == spv.OP_STORE)   # the Output store
+        ss = max(i for i, x in enumerate(out) if x[0] & 0xffff == spv.OP_STORE)   # the storage buffer store
+        self.assertTrue(sx < k2 < so, 'the second call moved past the unrelated sum to just before its Output store')
+        self.assertTrue(so < k1, 'the first call moved past the Output store to its use')
+        self.assertTrue(k3 < ss, 'the third call not moved past the storage buffer store')
+        m.ins[a:e + 1] = out
+        self.valid(m)
+
     def test_unit_render_scale(self):
         m = self.module(CS_SCALE.replace('ONE', '1'))
         self.assertEqual(spv.unit_render_scale(m), 1)

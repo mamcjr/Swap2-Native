@@ -70,7 +70,8 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
                 GotoElimination.Eliminate(context.GetGotos());
 
-                AstOptimizer.Optimize(context);
+                // nxnative 2f0210db: SPIR-V has no else-if construct; keep nested Else { If } blocks instead of flattening to ElseIf for GLSL syntax.
+                AstOptimizer.Optimize(context, flattenElseIf: targetLanguage != TargetLanguage.Spirv);
 
                 context.LeaveFunction();
             }
