@@ -271,6 +271,7 @@ final class PlayCurtain extends FrameLayout {
      */
     boolean compiling(String status, Runnable skip) {
         if (finishing) return false;
+        if ("pending".equals(status)) return true;   // the hold's first second: the curtain stays as it is, the count shows after it (vka_pso.c nxhost_pso_prepare_status)
         int[] st = parseCompiling(status);
         if (st == null) {
             if (compiling) { compiling = false; setOnClickListener(null); setClickable(true); tick(); }
@@ -340,7 +341,7 @@ final class PlayCurtain extends FrameLayout {
      * What the run's log says about the start-up, step by step (the host's own lines, dm/host/main.c and dm/gfx/vk_android): the SDK's start (">>> nnosInitialize",
      * ">>> nninitStartup"), the game's main (">>> nnMain"), the shader library ("[vk] shader library ", with "shader library check: a / b shaders" when the check
      * runs), the pipeline prewarm ("[vk] prewarm list …: N pipeline keys", "[vk] prewarm: N pipeline keys … made ahead", "[vk] prewarm: off"), the swapchain
-     * ("[vk] swapchain ": the first scene's textures and frame), then the presented frames (GameActivity.tail's own signal: "[nvn] frame ", "[longframe]",
+     * ("[vk] swapchain ": the first scene's textures and frame), then the presented frames (GameActivity.tail's own signal: "[nvn] frame <n>:", "[longframe]",
      * "window frame rate"). The prewarm goes on in the background after the first frame: the curtain never waits for it. A step only ever moves forward.
      */
     static final class LoadLog {
@@ -359,7 +360,7 @@ final class PlayCurtain extends FrameLayout {
         }
 
         private void line(String l) {
-            if (l.contains("[nvn] frame ") || l.contains("[longframe]") || l.contains("window frame rate")) drawing = true;
+            if (l.matches(".*\\[nvn\\] frame \\d+:.*") || l.contains("[longframe]") || l.contains("window frame rate")) drawing = true;   // not "[nvn] frame step …"
             if (l.contains("CRASH sig=") || l.contains("FATAL")) failed = true;
             if (l.contains(">>> nnosInitialize") || l.contains(">>> nninitStartup")) to(CODE);
             else if (l.contains(">>> nnMain")) to(MAIN);

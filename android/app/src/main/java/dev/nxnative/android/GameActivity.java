@@ -44,6 +44,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Runs one game in this process (":game"): sets up its folders and environment, starts nxhost_main, and shows a SurfaceView (handed to the host's Vulkan replay with
@@ -828,7 +829,8 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             r.seek(from);
             r.readFully(b);
             String text = new String(b, StandardCharsets.UTF_8);
-            if (text.contains("[nvn] frame ") || text.contains("[longframe]") || text.contains("window frame rate")) drawing = true;   // the host logs these once frames are presented
+            // the host logs these once frames are presented ("[nvn] frame <n>:", not "[nvn] frame step …", which comes before the first present)
+            if (FRAME_LINE.matcher(text).find() || text.contains("[longframe]") || text.contains("window frame rate")) drawing = true;
             if (text.contains("CRASH sig=") || text.contains("FATAL")) failed = true;
             // Not while the game loads any more (2026-11-08: the lines over the opening looked like an error): only after a crash, or with Show log on
             overlay.setVisibility(failed || TouchControls.showLog(this) ? View.VISIBLE : View.GONE);
@@ -846,6 +848,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
     private PlayCurtain curtain;
     private long curtainPos;
     private static final long CURTAIN_POLL_MS = 250, CURTAIN_MAX_MS = 120_000, CURTAIN_READ_MAX = 512 * 1024;
+    private static final Pattern FRAME_LINE = Pattern.compile("\\[nvn\\] frame \\d+:");   // the host's line for each of the first presented frames (hle_nvn.c)
 
     private void curtainShow(FrameLayout root) {
         curtain = PlayCurtain.loading(this, root, titleId(), getIntent().getStringExtra("name"));
@@ -877,7 +880,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         curtain.tick();
         // the host's boot hold (DM_VK_PREPARE): the count and a tap to skip, while it shows (it answers only after its first second)
         boolean holding = curtain.compiling(Native.prepareStatus(), () -> { Native.note("compiling shaders: skipped by the player"); Native.prepareSkip(); });
-        if (done || (curtain.shownMs() > CURTAIN_MAX_MS && !holding)) {   // (the hold ends by itself: the host's DM_VK_PREPARE_MAX_S)
+        if (failed || curtain.failed() || ((done || curtain.shownMs() > CURTAIN_MAX_MS) && !holding)) {   // never while the boot hold runs (it ends by itself: DM_VK_PREPARE_MAX_S)
             boolean bad = failed || curtain.failed();
             if (bad) failed = true;   // the log block shows (tail)
             curtainEnd(bad);

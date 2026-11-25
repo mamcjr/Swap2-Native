@@ -1582,7 +1582,9 @@ __attribute__((visibility("default"))) void nxhost_pso_prepare_status(char *buf,
     buf[0] = 0;
     if (!atomic_load(&g_prep)) return;
     double s = (now_ns() - g_prep_t0) / 1e9;
-    if (s * 1000.0 < VKA_ENV("DM_VK_PREPARE_SHOW_MS", 1000)) return;
+    // Its first DM_VK_PREPARE_SHOW_MS: "pending" (the launcher keeps its curtain up, without the count). An empty answer here let the curtain go once the game had
+    // presented a frame, and a long hold then ran behind a black screen (Ocarina of Time on Turnip, a Redmagic 11 Air, 2026-11-24)
+    if (s * 1000.0 < VKA_ENV("DM_VK_PREPARE_SHOW_MS", 1000)) { snprintf(buf, n, "pending"); return; }
     uint32_t tot = prep_total(), done = atomic_load(&g_pw_seen);
     if (done > tot) done = tot;
     int eta = done >= 16 && done < tot ? (int)(s * (tot - done) / done + 0.5) : -1;   // (from the rate so far; the slow kinds come first, so it falls faster than it counts)
