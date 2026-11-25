@@ -110,7 +110,7 @@ final class PlayCurtain extends FrameLayout {
         caption.setTextColor(Ui.col(c, R.color.s2_play_text_2));
         caption.setTextSize(13);
         caption.setGravity(Gravity.CENTER);
-        caption.setSingleLine(true);
+        caption.setMaxLines(2);   // two lines: the boot hold's count, time left and "Tap to skip" did not fit the bar's width on one (cut after "faltam…" in Portuguese)
         caption.setEllipsize(TextUtils.TruncateAt.END);
         addView(caption, new LayoutParams(0, LayoutParams.WRAP_CONTENT));
     }
@@ -279,6 +279,7 @@ final class PlayCurtain extends FrameLayout {
         }
         if (!compiling) {
             compiling = true;
+            bar.restart();   // the hold's own count: the loading steps had already filled the bar (it stood at about 83 % while the count rose)
             setOnClickListener(v -> { if (compiling) { compiling = false; setOnClickListener(null); setClickable(true); skip.run(); tick(); } });
         }
         bar.indeterminate(false);
@@ -499,6 +500,9 @@ final class PlayCurtain extends FrameLayout {
             indeterminate = on && target <= 0;   // once a value was shown the bar never goes back to sweeping
             invalidate();
         }
+
+        /** A new count of its own (the boot hold's pipelines): the fill starts again from empty */
+        void restart() { target = 0f; shown = 0f; indeterminate = false; invalidate(); }
 
         void progress(float v) {
             v = Math.max(0f, Math.min(1f, v));

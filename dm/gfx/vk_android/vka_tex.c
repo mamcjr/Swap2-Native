@@ -23,6 +23,8 @@
 #include <time.h>
 #include "vka_zshare.h"
 #include "vka_texlimit.h"
+#include "vka_lowram.h"
+#include <sys/resource.h>
 #include "vka_spvpatch.h"   // (VKA_PFB_* flags: "Texture pool reads")
 #include "vka_bcdec.h"
 
@@ -1433,9 +1435,51 @@ static double psi_some10(void) {
     if (n < 0) err = errno;
     if (fd >= 0) close(fd);
     const char *a = n > 0 ? (b[n] = 0, strstr(b, "some avg10=")) : NULL;
-    if (!a) { static _Atomic int k; if (!atomic_exchange(&k, 1)) VLOG("image cache: /proc/pressure/memory not readable (%s): the limit follows MemAvailable and the heap budget only", err ? strerror(err) : "no some avg10"); return -1; }
+    if (!a) { static _Atomic int k; if (!atomic_exchange(&k, 1)) VLOG("image cache: /proc/pressure/memory not readable (%s): the limit follows MemAvailable, the heap budget and, for memory pressure, the process's major faults (vktl_fault_psi; DM_VK_IMG_FAULTS=0: none)", err ? strerror(err) : "no some avg10"); return -1; }
     return strtod(a + 11, NULL);
 }
+// Where PSI cannot be read: the process's major faults as its stand-in (vka_texlimit.h vktl_fault_psi), averaged over the limit updates. Under the image lock (img_limit_update)
+static double fault_some10(uint64_t now) {
+    static uint64_t last_n, last_ns; static double avg;
+    struct rusage u = {0};
+    if (getrusage(RUSAGE_SELF, &u)) return -1;
+    uint64_t n = (uint64_t)u.ru_majflt;
+    if (last_ns && now > last_ns && n >= last_n) avg = vktl_fault_psi(avg, n - last_n, (now - last_ns) / 1e9);
+    last_n = n; last_ns = now;
+    return avg;
+}
+// The profile's low-RAM values: the pack's (game_profile.tsv), or the APK's profile where the launcher passes them (DM_VK_LOW_RAM_PART_MB, DM_VK_LOW_RAM_IMG_MAX_MB:
+// a pack's game_profile.tsv is written once, when it is prepared, so a pack made before the rows has none; GameActivity.java). Read once, with vka_low_ram; a value out of
+// game.py's range keeps the pack's. Still behind the gate (vklr_applies, DM_VK_LOW_RAM), unlike DM_VK_PLACE_PART_MB / DM_VK_IMG_LIMIT_MB
+static int g_lr_part = -1, g_lr_img = -1;
+static void low_ram_values(void) {
+    if (g_lr_part >= 0) return;
+    int p = VKA_ENV("DM_VK_LOW_RAM_PART_MB", -1), i = VKA_ENV("DM_VK_LOW_RAM_IMG_MAX_MB", -1);
+    g_lr_img = i == 0 || (i >= 512 && i <= 65536) ? i : (int)DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB;
+    g_lr_part = p == 0 || (p >= 16 && p <= 65536) ? p : (int)DM_GAME_LOW_RAM_PLACE_PART_MB;
+}
+// The profile's low-RAM keys (vka_lowram.h): decided once, from MemTotal, which does not change. One line says whether they apply, for a profile that sets them
+int vka_low_ram(void) {
+    static _Atomic int on = -1;
+    int r = atomic_load(&on);
+    if (r >= 0) return r;
+    low_ram_values();
+    int has = g_lr_part || g_lr_img, force = VKA_ENV("DM_VK_LOW_RAM", -1);
+    uint64_t total = 0;
+    if (has) {
+        int fd = open("/proc/meminfo", O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) { char b[2048]; ssize_t n = read(fd, b, sizeof b - 1); close(fd); if (n > 0) { b[n] = 0; total = meminfo_kb(b, "MemTotal:") << 10; } }
+    }
+    r = vklr_applies(has, total, force);
+    int exp = -1;
+    if (atomic_compare_exchange_strong(&on, &exp, r) && has)
+        VLOG("low-RAM profile keys %s: MemTotal %.0f MiB%s (placed parts from %d MiB, image cache at most %d MiB; DM_VK_LOW_RAM=0 / 1 overrides)", r ? "apply" : "do not apply",
+             total / 1048576.0, force >= 0 ? (force ? ", DM_VK_LOW_RAM=1" : ", DM_VK_LOW_RAM=0") : total && total <= VKLR_MEM_TOTAL_MAX ? ", 12 GiB or less" : ", over 12 GiB",
+             g_lr_part, g_lr_img);
+    return atomic_load(&on);
+}
+int vka_low_ram_place_part_mb(void) { return vka_low_ram() ? g_lr_part : 0; }
+static int low_ram_img_max_mb(void) { return vka_low_ram() ? g_lr_img : 0; }
 static void img_limit_update(uint64_t frame) {
     uint64_t now = img_time_ns();
     if (g_img_lim && frame < g_lim_frame + (g_psi_pressed ? 15 : 60) && now - g_lim_ns < 1000000000ull) return;
@@ -1445,7 +1489,12 @@ static void img_limit_update(uint64_t frame) {
     int fd = open("/proc/meminfo", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) { char b[2048]; ssize_t n = read(fd, b, sizeof b - 1); close(fd);
         if (n > 0) { b[n] = 0; in.mem_total = meminfo_kb(b, "MemTotal:") << 10; in.mem_avail = meminfo_kb(b, "MemAvailable:") << 10; } }
-    if (override <= 0 && VKA_ENV("DM_VK_IMG_PSI", 1)) in.psi_some10 = psi_some10();   // (DM_VK_IMG_PSI=0: the RAM and budget rules only)
+    // (DM_VK_IMG_PSI=0: the RAM and budget rules only.) PSI not readable: the process's major faults stand in for it (fault_some10; DM_VK_IMG_FAULTS=0: no pressure term then)
+    int src_faults = 0;
+    if (override <= 0 && VKA_ENV("DM_VK_IMG_PSI", 1)) {
+        in.psi_some10 = psi_some10();
+        if (in.psi_some10 < 0 && VKA_ENV("DM_VK_IMG_FAULTS", 1)) { in.psi_some10 = fault_some10(now); src_faults = 1; }
+    }
     uint32_t heap = V.local_type < V.memp.memoryTypeCount ? V.memp.memoryTypes[V.local_type].heapIndex : 0;
     if (heap < V.memp.memoryHeapCount) in.heap_size = V.memp.memoryHeaps[heap].size;
     PFN_vkGetPhysicalDeviceMemoryProperties2 memory_properties = V.mem_budget
@@ -1458,17 +1507,21 @@ static void img_limit_update(uint64_t frame) {
     }
     uint64_t old = g_img_lim;
     g_img_lim = override > 0 ? (uint64_t)override << 20 : vktl_limit(&in);
+    // The profile's low-RAM ceiling (low_ram_img_cache_max_mb, vka_lowram.h): on top of the measured limit, which still acts below it; DM_VK_IMG_LIMIT_MB replaces both
+    uint64_t measured = g_img_lim, ceil_mb = override <= 0 ? (uint64_t)low_ram_img_max_mb() : 0;
+    g_img_lim = vklr_ceiling(g_img_lim, ceil_mb << 20);
     int pressed = override <= 0 && in.psi_some10 >= VKTL_PSI_HOLD;
     if (pressed != g_psi_pressed) {
         static _Atomic int np;
-        if (atomic_fetch_add(&np, 1) < 32) VLOG("image cache: memory pressure %.1f %% (some avg10): %s, limit %llu MiB, images %.0f MiB", in.psi_some10 < 0 ? 0 : in.psi_some10,
+        if (atomic_fetch_add(&np, 1) < 32) VLOG("image cache: memory pressure %.1f %% (%s): %s, limit %llu MiB, images %.0f MiB", in.psi_some10 < 0 ? 0 : in.psi_some10,
+                                                 src_faults ? "the process's major faults as some avg10, PSI not readable" : "some avg10",
                                                  pressed ? (in.psi_some10 >= VKTL_PSI_SHRINK ? "shrinking" : "holding") : "eased, the RAM rule again", (unsigned long long)(g_img_lim >> 20), in.img_bytes / 1048576.0);
         g_psi_pressed = pressed;
     }
     uint64_t diff = old > g_img_lim ? old - g_img_lim : g_img_lim - old;
     if (!old || diff >= 256 * VKTL_MIB)
-        VLOG("image cache limit %llu MiB: live %.0f MiB, retired %.0f MiB, available %.0f MiB, heap budget %.0f MiB",
-             (unsigned long long)(g_img_lim >> 20), (g_img_bytes + vka_imem_zbytes()) / 1048576.0,
+        VLOG("image cache limit %llu MiB%s: live %.0f MiB, retired %.0f MiB, available %.0f MiB, heap budget %.0f MiB",
+             (unsigned long long)(g_img_lim >> 20), g_img_lim < measured ? " (the profile's low_ram_img_cache_max_mb, the low-RAM keys apply)" : "", (g_img_bytes + vka_imem_zbytes()) / 1048576.0,
              atomic_load(&g_retired_bytes) / 1048576.0, in.mem_avail / 1048576.0, in.heap_budget / 1048576.0);
 }
 typedef struct { vka_img *im; uint64_t last; } prune_ent;

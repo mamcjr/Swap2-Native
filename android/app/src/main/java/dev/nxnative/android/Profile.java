@@ -27,6 +27,7 @@ final class Profile {
     String stamp = "";   // its "stamp" rows: "version:old SHA-256:new SHA-256", ';' between them (ShaderLibs.restamp)
     String resolution = "";   // what Game resolution sets (build.gradle resolutionOf): "window", "scale:<choice>=<scale>/<console|handheld>,…" or "" (nothing: not offered)
     String ndsr = "";    // agl's NDSR networks (build.gradle ndsrOf): the FSR stand-in's input encoding (profile ndsr_input: sqrt or linear) when the shader map has them, else ""
+    String lowRamPart = "", lowRamImg = "";   // the low-RAM keys (build.gradle lowRamOf): low_ram_place_part_mb / low_ram_img_cache_max_mb, MiB, or "" (the pack's own); the launcher passes them as DM_VK_LOW_RAM_PART_MB / DM_VK_LOW_RAM_IMG_MAX_MB
     String fpsHold = "";   // the frame hold (build.gradle fpsHoldOf): the profile's fps_hold row, "on" / "off", or "" (the pack's own); the launcher passes it as DM_FPS_HOLD
     String foliage = "";   // the Ground foliage (build.gradle foliageOf): "<level>=<keys, ','>|…" from foliage_off rows, or "" (not offered)
     String grass = "";   // the Foliage option's grass programs (build.gradle meshKeysOf): the grass_mesh rows' mesh program keys, '+' between them, or ""
@@ -175,6 +176,8 @@ final class Profile {
             p.grass = c.length > 16 && c[16].matches("[0-9a-f]{16}(\\+[0-9a-f]{16})*") ? c[16] : "";
             p.plants = c.length > 17 && c[17].matches("[0-9a-f]{16}(\\+[0-9a-f]{16})*") ? c[17] : "";
             p.effects = c.length > 18 && c[18].matches(EFFECTS) ? c[18] : "";
+            p.lowRamPart = c.length > 19 && c[19].matches("[0-9]{1,5}") ? c[19] : "";
+            p.lowRamImg = c.length > 20 && c[20].matches("[0-9]{1,5}") ? c[20] : "";
             out.add(p);
         }
         return Collections.unmodifiableList(out);
@@ -226,7 +229,7 @@ final class Profile {
                     rows.add(c);
                 }
             } catch (IOException e) { continue; }
-            String name = d.getName(), ndsrInput = "linear", scene = "", upscaler = "", fpsHold = "", release = "";
+            String name = d.getName(), ndsrInput = "linear", scene = "", upscaler = "", fpsHold = "", release = "", lowRamPart = "", lowRamImg = "";
             List<String> presets = new ArrayList<>(), foliage = new ArrayList<>(), grass = new ArrayList<>(), plants = new ArrayList<>(), effects = new ArrayList<>();
             List<String> builds = new ArrayList<>(), scale = new ArrayList<>();
             boolean window = false;
@@ -236,6 +239,8 @@ final class Profile {
                 if (c[0].equals("scene_scale_palette") && c.length > 1 && scene.isEmpty()) scene = c[1] + "/" + (c.length > 2 ? c[2] : "") + scene;
                 if (c[0].equals("scene_preset") && c.length > 2) presets.add(c[1] + "=" + c[2]);
                 if (c[0].equals("release") && c.length > 1 && c[1].matches("[0-9]{4}-[0-9]{2}-[0-9]{2}")) release = c[1];
+                if (c[0].equals("low_ram_place_part_mb") && c.length > 1 && c[1].matches("[0-9]{1,5}")) lowRamPart = c[1];
+                if (c[0].equals("low_ram_img_cache_max_mb") && c.length > 1 && c[1].matches("[0-9]{1,5}")) lowRamImg = c[1];
                 if (c[0].equals("fps_hold") && c.length > 1 && (c[1].equals("on") || c[1].equals("off"))) fpsHold = c[1];
                 if (c[0].equals("foliage_off") && c.length > 2 && c[1].matches("[A-Za-z0-9_]+") && c[2].matches("[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*"))
                     foliage.add(c[1] + "=" + c[2]);
@@ -267,6 +272,8 @@ final class Profile {
             p.plants = String.join("+", plants);
             p.effects = String.join("|", effects);
             p.fpsHold = fpsHold;
+            p.lowRamPart = lowRamPart;
+            p.lowRamImg = lowRamImg;
             p.release = release;
             out.add(p);
         }

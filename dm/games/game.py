@@ -148,6 +148,11 @@ def header(g):
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     tenv = ' '.join(g.get('turnip_env', '').split())   # Android, a custom (Mesa) driver: Mesa's own variables for this game (vka_driver.c turnip_env; the environment's win): NAME=value ...
     if any(not re.fullmatch(r'(TU|FD|IR3|MESA)_[A-Z0-9_]+=[A-Za-z0-9_,.:+=-]+', w) for w in tenv.split()) or len(tenv) > 200: sys.exit(f'{g.id}: turnip_env takes NAME=value words of Mesa variables (TU_, FD_, IR3_, MESA_), 200 characters at most: {tenv}')
+    # Android, devices of 16 GiB or less (MemTotal; vka_lowram.h): defaults the Vulkan replay takes there only, for a profile that sets them. 0 = not set
+    lpp = g.get('low_ram_place_part_mb', '0')   # memory pools of at least this many MiB placed by parts (vka_mem.c part_min; the default elsewhere 1024, DM_VK_PLACE_PART_MB overrides)
+    if not lpp.isdigit() or int(lpp) and not 16 <= int(lpp) <= 65536: sys.exit(f'{g.id}: low_ram_place_part_mb must be 0 (not set) or 16 to 65536 MiB: {lpp}')
+    lic = g.get('low_ram_img_cache_max_mb', '0')   # a ceiling on the texture cache's measured limit, MiB (vka_tex.c img_limit_update; DM_VK_IMG_LIMIT_MB replaces both)
+    if not lic.isdigit() or int(lic) and not 512 <= int(lic) <= 65536: sys.exit(f'{g.id}: low_ram_img_cache_max_mb must be 0 (not set) or 512 to 65536 MiB: {lic}')
     mml = g.get('mem_map_limit', 'on')   # Horizon application-pool accounting; explicit off remains supported.
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
     cm, ic = g.get('core_mask', '0x7'), g.get('ideal_core', '0')   # the NPDM's cores (ThreadInfo min..max core; META +0xf): hle_svc.c GetInfo(CoreMask), hle_thread.c ideal core -2; 0x7 / 0 = a Switch 1 application
@@ -244,6 +249,7 @@ def header(g):
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          f'#define DM_GAME_TURNIP_ENV {q(tenv)}',
+         f'#define DM_GAME_LOW_RAM_PLACE_PART_MB {int(lpp)}', f'#define DM_GAME_LOW_RAM_IMG_CACHE_MAX_MB {int(lic)}',
          '#define DM_GAME_WINDOW_FN {' + (', '.join(wfn) or '{"", 0, 0, 0, 0}') + '}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          '#define DM_GAME_RES_LEVELS {' + (', '.join(rlv) or '{"", 0, 0, 0, {{0, 0}}}') + '}', f'#define DM_GAME_NRES_LEVELS {len(rlv)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
@@ -256,6 +262,8 @@ RUNTIME_LISTS = {'MODULES': 'MODULE', 'DISPLAY_VERSIONS': 'DISPLAY_VERSION', 'WI
 # Constants the one host for every game does not read yet (dm/host/rt/game_rt.c stops at a row it does not know): tex_copy_staging's (hle_nvn.c keeps it to the hosts built
 # for one game until rt/game_profile.h reads it and the Vulkan replay copies a staged upload's bytes, DM_COPY_SNAPSHOT)
 RUNTIME_NOT_READ = ('TEX_COPY_STAGING_BUILD', 'TEX_COPY_STAGING_PC')
+# Optional rows game_rt.c reads when they are there (0 = not set): written only when set, so a pack of a profile without them still starts on a host from before them
+RUNTIME_UNSET_OMITTED = ('LOW_RAM_PLACE_PART_MB', 'LOW_RAM_IMG_CACHE_MAX_MB')
 _Q = r'"((?:[^"\\]|\\.)*)"'   # a C string literal as header() writes it
 
 
@@ -273,6 +281,7 @@ def runtime(g):
         name, v = m[1], m[2]
         if name in ('NMOD', 'NWINDOW_FN', 'NRES_LEVELS'): continue
         if name in RUNTIME_NOT_READ: continue
+        if name in RUNTIME_UNSET_OMITTED and v == '0': continue
         if name in RUNTIME_LISTS:
             if name == 'MODULES': rows = [[unq(s)] for s in re.findall(_Q, v)]
             elif name == 'DISPLAY_VERSIONS': rows = [[unq(a), unq(b)] for a, b in re.findall(r'\{' + _Q + ', ' + _Q + r'\}', v)]

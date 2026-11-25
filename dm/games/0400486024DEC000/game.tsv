@@ -39,10 +39,11 @@ mem_stack	0x10000000
 app_pool	0x240000000
 # The packed version's NPDM's (pack_android.py takes it from the NPDM; this is the value for update 131072)
 sys_resource	0x3000000
-# Banana Native #524 (Android, devices of 12 GB or less): pools of 64 MiB or more placed in parts and the texture cache at most 1280 MiB; no low_ram_app_pool_mb, as main
-# sizes SetHeapSize as TotalMemorySize - 2.80 GiB and needs the 9216 MiB total for its 6.20 GiB heap. This fork's host has neither key yet (as Hyrule Warriors' profile notes)
-# (upstream, not in this fork) low_ram_place_part_mb	64
-# (upstream, not in this fork) low_ram_img_cache_max_mb	1280
+# Android, devices of 12 GiB or less (vka_lowram.h, as upstream Banana Native #524; on a 16 GB phone the 1280 MiB ceiling slowed Castle Town): pools of 64 MiB or more
+# placed in parts and the texture cache at most 1280 MiB; no low_ram_app_pool_mb (not ported), as main sizes SetHeapSize as TotalMemorySize - 2.80 GiB and needs the
+# 9216 MiB total for its 6.20 GiB heap
+low_ram_place_part_mb	64
+low_ram_img_cache_max_mb	1280
 # The NPDM's cores (ThreadInfo cores 0-5, main thread core 0), as on every Switch 2 application: GetInfo(CoreMask) answers them (pack_android.py takes the NPDM's)
 core_mask	0x3f
 ideal_core	0

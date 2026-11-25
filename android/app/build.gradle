@@ -121,7 +121,11 @@ def effectsOf = { String game -> tsvRows(game, 'graphics_off').collect { c ->
         if (c.size() < 4 || !(c[1].trim() ==~ /[a-z0-9_]+/) || !(c[2].trim() in ['dispatch', 'draw']) || !(c[3].trim() ==~ /[0-9a-f]{16}(,[0-9a-f]{16})*/))
             throw new GradleException("dm/games/$game/game.tsv: graphics_off takes <name> <dispatch | draw> <16-digit keys, comma-separated>: ${c.join(' ')}")
         c[1].trim() + ':' + c[2].trim() + ':' + c[3].trim() }.join('|') }
-def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), ndsrOf(g), sceneOf(g), ndsrDefaultOf(g), foliageOf(g), fpsHoldOf(g), releaseOf(g), meshKeysOf(g, 'grass_mesh'), meshKeysOf(g, 'plant_mesh'), effectsOf(g)].join('\\t') }.join('\\n')
+// and the low-RAM keys (Profile.lowRamPart, Profile.lowRamImg): the profile's low_ram_place_part_mb / low_ram_img_cache_max_mb rows, MiB, empty without one. The launcher
+// passes them as DM_VK_LOW_RAM_PART_MB / DM_VK_LOW_RAM_IMG_MAX_MB, so a pack prepared before the rows takes the APK's (the host still applies them only behind vka_lowram.h's gate)
+def lowRamOf = { String game, String key -> def v = tsvRows(game, key).collect { it[1].trim() }.find() ?: ''
+    if (v && !(v ==~ /\d{1,5}/)) throw new GradleException("dm/games/$game/game.tsv: $key takes MiB, not $v"); v }
+def nxProfiles = nxGames.collect { g -> [g, nameOf(g).replaceAll(/[\t\n\\"]/, ' '), shaderTotalOf(g), shaderInputsOf(g), buildsOf(g), reqsOf(g), statusOf(g), deltaOf(g), stampOf(g), resolutionOf(g), ndsrOf(g), sceneOf(g), ndsrDefaultOf(g), foliageOf(g), fpsHoldOf(g), releaseOf(g), meshKeysOf(g, 'grass_mesh'), meshKeysOf(g, 'plant_mesh'), effectsOf(g), lowRamOf(g, 'low_ram_place_part_mb'), lowRamOf(g, 'low_ram_img_cache_max_mb')].join('\\t') }.join('\\n')
 def lockOf = { String key -> def f = new File(repo, 'dm/gfx/tools/dmsh_chain.lock'); f.isFile() ? (f.readLines().find { it.startsWith(key + '\t') }?.split('\t')?.getAt(1) ?: 'unknown') : 'unknown' }
 
 android {

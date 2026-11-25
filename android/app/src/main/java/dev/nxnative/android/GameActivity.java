@@ -536,6 +536,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
             // The frame hold of the APK's profile (fps_hold; DM_FPS_HOLD): a pack's game_profile.tsv is written once, when it is prepared, so a pack made before the row
             // changed would keep the old one. env.txt and the game's own lines still override it (they come after)
             if (prof != null && !prof.fpsHold.isEmpty()) env.add("DM_FPS_HOLD=" + prof.fpsHold);
+            // The low-RAM keys of the APK's profile, for the same reason (vka_lowram.h: the host applies them only behind its gate and DM_VK_LOW_RAM); env.txt still overrides
+            if (prof != null && !prof.lowRamPart.isEmpty()) env.add("DM_VK_LOW_RAM_PART_MB=" + prof.lowRamPart);
+            if (prof != null && !prof.lowRamImg.isEmpty()) env.add("DM_VK_LOW_RAM_IMG_MAX_MB=" + prof.lowRamImg);
             int cap = Prefs.fpsCap(this, id);   // the game's own frame rate cap (its in-game panel, its Game settings), else the main screen's (unset: the profile's fps_target)
             if (cap >= 0) env.add("DM_FPS_TARGET=" + cap);
             String gpuNote = GpuDriver.env(this, id, env);   // the game's GPU driver, else the main screen's (DM_VK_DRIVER)

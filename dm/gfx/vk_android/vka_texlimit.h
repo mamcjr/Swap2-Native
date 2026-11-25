@@ -41,6 +41,22 @@ static inline uint64_t vktl_pressure_limit(uint64_t lim, uint64_t img_bytes, dou
     else if (psi_some10 >= VKTL_PSI_HOLD) { if (img_bytes < lim) lim = img_bytes; }
     return lim < VKTL_FLOOR ? VKTL_FLOOR : lim;
 }
+// Memory pressure where the app may not read /proc/pressure/memory (Android's SELinux denies it to apps on some phones: the POCO F7 Ultra): the process's own major
+// faults stand in for it. There the RAM rule above is blind: Android's compressed swap (zram) keeps MemAvailable above the reserve by swapping the game's own memory out,
+// so the limit (images + MemAvailable - reserve) grows with every image the cache makes while the game's heap goes to swap (Ocarina of Time on that 16 GB phone: images
+// 2.0-2.5 GiB, MemAvailable 0.5-0.9 GiB, 5.9 GiB of the process swapped, its anonymous memory 0.1-0.3 GiB resident, 13,000 major faults a second, 0.1-0.5 fps;
+// docs/reference/memory.md "Image cache limit blind to swap"). A major fault is a page read back (from zram, or a file), the stall PSI would count: each is taken as
+// VKTL_FAULT_US of stall and averaged like "some avg10" (a 10 s exponential average, the time constant approximated as dt / (10 + dt)). Measured on that phone:
+// a run that plays has 2-400 faults a second (under 1 %), a load spikes to 2,000-5,000 for a few seconds (averaged under the hold mark), the thrash 3,000-56,000
+// sustained (from 6 % to 100 %: holding, then shrinking)
+#define VKTL_FAULT_US 20.0
+static inline double vktl_fault_psi(double prev, uint64_t dfaults, double dt_s) {
+    if (dt_s <= 0) return prev;
+    double inst = (double)dfaults / dt_s * VKTL_FAULT_US * 1e-4;   // faults/s x µs each = µs stalled per s; / 1e4 = percent
+    if (inst > 100.0) inst = 100.0;
+    double a = dt_s / (10.0 + dt_s);
+    return prev + (inst - prev) * a;
+}
 // The limit in bytes; floor when nothing is known
 static inline uint64_t vktl_limit(const vktl_in *in) {
     uint64_t lim = UINT64_MAX;

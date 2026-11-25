@@ -77,6 +77,7 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	$(B)/t_android_ubq
 	$(B)/t_android_rcix
 	$(B)/t_android_smap
+	$(B)/t_android_lowram
 	$(B)/t_android_meshpack
 	$(B)/t_android_dlss
 	$(B)/t_android_tsr_cam
@@ -432,6 +433,10 @@ $(B)/t_android_rcix: t_android_rcix.c $(VKA)/vka_rcix.h $(VKA)/vka_oqbatch.h | $
 run: $(B)/t_android_smap
 $(B)/t_android_smap: t_android_smap.c $(VKA)/vka_smap.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_smap.c
+# A profile's low-RAM keys (vka_lowram.h, upstream Banana Native v0.3.52: the gate at 16 GiB here) and the texture cache's major-fault stand-in for PSI (vka_texlimit.h vktl_fault_psi)
+run: $(B)/t_android_lowram
+$(B)/t_android_lowram: t_android_lowram.c $(VKA)/vka_lowram.h $(VKA)/vka_texlimit.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_lowram.c
 # Two task / mesh compute workgroups a 64-lane subgroup (vka_mesh_pack.h, vka_mesh.inc DM_VK_MESH_PACK): the selftest's fixtures rewritten and refused as they should be,
 # validated by spirv-val when it is on the PATH; DM_MESHPACK_DIR=<folder of <key>_5.spv> adds a library's task / mesh computes
 run: $(B)/t_android_meshpack

@@ -81,6 +81,9 @@ int dm_game_load(const char *path) {
         if (!strcmp(c[0], "IDEAL_CORE") && nc == 2 && num(c[1], &a)) { dm_game.ideal_core = (int)a; continue; }
         // Mesa's variables for this game (turnip_env; vka_driver.c): optional, so that a pack from an earlier packer still starts (none then)
         if (!strcmp(c[0], "TURNIP_ENV")) { dm_game.turnip_env = strdup(nc > 1 ? c[1] : ""); continue; }
+        // The low-RAM keys (vka_lowram.h): optional, so that a pack from an earlier packer still starts (not set then); game.py writes them only when set
+        if (!strcmp(c[0], "LOW_RAM_PLACE_PART_MB") && nc == 2 && num(c[1], &a)) { dm_game.low_ram_place_part_mb = (int)a; continue; }
+        if (!strcmp(c[0], "LOW_RAM_IMG_CACHE_MAX_MB") && nc == 2 && num(c[1], &a)) { dm_game.low_ram_img_cache_max_mb = (int)a; continue; }
         unsigned k = 0;
         while (k < NKEYS && strcmp(KEYS[k].name, c[0])) k++;
         if (k == NKEYS) { LOG("[RED] game profile %s:%d: unknown row %s (a newer packer than this host?)", path, lineno, c[0]); bad = 1; continue; }
