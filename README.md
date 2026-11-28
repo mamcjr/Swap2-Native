@@ -35,7 +35,7 @@ A dump of another game build is refused by the build check, with a message that 
 
 | Phone | Chip | Tested with |
 |---|---|---|
-| POCO F7 Ultra | Snapdragon 8 Elite (Adreno 830) | Qualcomm system driver, or Turnip (Turnip Gen8 from the app's driver download) |
+| POCO F7 Ultra | Snapdragon 8 Elite (Adreno 830) | Qualcomm system driver, [Swap2-Turnip](https://github.com/mamcjr/Swap2-Turnip/releases/latest), or Turnip Gen8 from the app's driver download |
 | RedMagic 11 Air | Snapdragon 8 Elite (Adreno 830) | used to prepare Zelda: Ocarina of Time (2026-11-07); driver not recorded |
 
 Other phones are untested. Settings › **Readiness check** says what a phone lacks before a game starts (for example a driver without placed memory maps, which some Qualcomm drivers lack: Settings › GPU driver installs a Turnip).
@@ -50,7 +50,7 @@ Other phones are untested. Settings › **Readiness check** says what a phone la
 
 1. Download the APK from [Releases](https://github.com/mamcjr/Swap2-Native/releases) and install it.
 2. Open **Swap2-Native** and allow **All files access** (the app reads your games from shared storage).
-3. Optional: Settings › **GPU driver** to pick the system driver or install a Turnip, and Settings › **Readiness check**.
+3. Optional: Settings › **GPU driver** to pick the system driver or install a Turnip, and Settings › **Readiness check**. On Adreno, the Turnip we recommend is **[Swap2-Turnip](https://github.com/mamcjr/Swap2-Turnip/releases/latest)**, our own build of Mesa's driver. It compiles shaders that fail on other Turnip builds and has faster subgroup shuffles. Download its zip and pick it under GPU driver.
 
 ## Prepare a game
 
